@@ -16,10 +16,11 @@ Lanes never block on each other — mock the contract and move.
   fine-grained token's repo access). Everything below assumes it lands tonight;
   if not, lanes work on local branches and the push wave runs first thing Sat.
 
-## Sat Wave A — contracts + mocks (09:00–12:00 IST)
+## Sat Wave A — contracts + mocks (10:00–12:00 IST; 09:30 briefing)
 
 Forge publishes the frozen platform contracts; every lane builds against mocks after.
-No feature code before contracts.
+No feature code before contracts. (Reconciled 2026-10-03: 10:00 implementation start
+per working-hours rule; 09:30 is briefing time.)
 
 | # | Work | Owner | Exit |
 |---|---|---|---|
@@ -61,7 +62,7 @@ on each branch.
   malformed payloads). Results logged; failures become Sun AM tasks.
 - Relay: wave report — landed vs plan, delta explained, Sun tasks assigned.
 
-## Sun AM — hardening (09:00–14:00 IST)
+## Sun AM — hardening (10:00–14:00 IST)
 
 - Tripwire: fault-injection pass #2 + acceptance checks encoded (`ops/acceptance-sunday.md`).
 - Oracle: latency measurement campaign results in (p50/p95/p99, cold vs warm) —
