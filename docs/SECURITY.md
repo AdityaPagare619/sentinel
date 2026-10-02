@@ -242,11 +242,6 @@ Convergent precedent (all accessed 2026-10-03):
 - [ember issue #8](https://github.com/jusso-dev/ember/issues/8) — `row_hash =
   sha256(prev_hash || canonical_json(row))`, genesis `0x00…`, nightly
   verifier walk emitting control-plane events on mismatch.
-- [mcp-coordinator #44](https://github.com/swoofer/mcp-coordinator/commit/f073c51ef123ceb98e861a980968243e2980c1f3) —
-  canonical fields with **sorted JSON keys and explicit nulls** (no
-  absent-vs-null ambiguity), `GENESIS_HASH = "0".repeat(64)`, chain computed
-  inside a single transaction (tip lookup + insert atomic), `verify` walks
-  and reports `{verified, first_bad_id}`.
 - [promptzero #139](https://github.com/xunholy/promptzero/commit/f073c51ef123ceb98e861a980968243e2980c1f3) —
   **length-prefixed field encoding** so no value can forge a field boundary;
   chain head held in memory + write mutex serializing read-head → compute →
@@ -261,12 +256,15 @@ Convergent precedent (all accessed 2026-10-03):
   history now requires deliberately disabling a trigger") + a
   `verify-audit` CLI exiting nonzero on a break.
 
-Our design adopts all five lessons:
+Our design adopts these lessons (four verified precedents; a fifth,
+mcp-coordinator, was cited in error with a wrong URL and has been removed —
+see review note on PR #8):
 
 1. **Canonical encoding with length prefixes** (promptzero's lesson): each
    field encoded as `len || bytes` before hashing — no field-boundary
    forgery, no JSON key-order games.
-2. **Hash the timestamp too** (a gap mcp-coordinator honestly documented):
+2. **Hash the timestamp too** (our own addition — timestamps are part of the
+   threat model):
    `created_at` is part of the hashed payload so timestamps can't be
    silently rewritten either.
 3. **Atomic tip read + insert**: the chain tip is read and the row inserted
@@ -388,7 +386,7 @@ Precedent base: `research/security-privacy/2026-10-02-webhook-audit-precedents.m
 - Shared-secret-vs-HMAC audit precedent (PagerDuty/Persona/DocuSign P0 fix,
   "reject on missing/invalid signature; reject on timestamp skew > 5
   minutes"): fauward console remediation tracker.
-- Hash-chained audit logs: ember #8, mcp-coordinator #44, promptzero #139,
+- Hash-chained audit logs: ember #8, promptzero #139,
   lawyer-assistant (live-verified tamper detection), fhir-sqlite CHANGELOG
   (DB triggers + `verify-audit`).
 - Open question queued: Opsgenie public HMAC scheme (not found this pass —
