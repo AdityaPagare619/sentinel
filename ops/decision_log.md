@@ -53,3 +53,60 @@ Latest decisions on top.
 - 2026-10-02 — **Honest numbers only.** No accuracy claims in marketing or output;
   only calibration curves on the customer's own labels. Synthetic eval proves
   plumbing, never production accuracy.
+
+## 2026-10-02 — evening: the platform pivot (Aditya's correction)
+
+- 2026-10-02 ~18:45 — **Aditya's verdict: engine before platform was the wrong order;
+  roster before company was the wrong depth.** The v0.1 middleware is a strong engine
+  (fail-open, triple-lock, audit-first, 140/140), but the team built it before freezing
+  the PLATFORM architecture, and TEAMS.md was a roster, not an operating company.
+  Correction accepted in full. Tonight's work: per-chief operating files
+  (`chiefs/*.md`), the frozen `PLATFORM_ARCHITECTURE.md`, and `WAVE_PLAN.md` — no code
+  until the direction is frozen. (Aditya's order; this decision.)
+- 2026-10-02 ~18:45 — **Sunday 9 PM goal: the entire interactive platform, working.**
+  Not a wrapper, not slides — a design partner can click through it and run it:
+  live decision river, calibration dashboards, threshold simulator, audit explorer,
+  noise analytics, 15-minute onboarding. Error rate extremely low; Jev's speed must
+  not be degraded by our architecture; the software must be *interactive* and
+  feature-rich *besides* Jev. (Aditya's order; scope boundary in
+  PLATFORM_ARCHITECTURE.md §8.)
+- 2026-10-02 ~18:45 — **Do-no-harm laws adopted as non-negotiable** (from Aditya's
+  "things that shouldn't happen"): (i) the platform never adds latency to the paging
+  path beyond the Jev call itself; (ii) fail-open always, uncertainty pages;
+  (iii) zero *harmful* errors as the target — triple-lock suppress, flips audited
+  never hidden (Jev's 1.3–2.2% flip floor is irreducible and is said plainly);
+  (iv) honest scope — Sunday is a clickable working platform, NOT multi-tenancy,
+  billing, SSO, or production PagerDuty integration. (PLATFORM_ARCHITECTURE.md §4.)
+- 2026-10-02 ~18:45 — **Platform/hot-path separation is architectural, not aspirational.**
+  The dashboard tier runs as a SEPARATE process, reads ONLY from the audit log
+  (SQLite WAL, read-only connection), and never imports hot-path modules in a way
+  that couples deploys. UI traffic can never contend with the audit writer or slow
+  a page. (PLATFORM_ARCHITECTURE.md §3; Forge enforces.)
+- 2026-10-02 ~13:28 — **Real Jev key connected + verified.** Aditya submitted via
+  secure card; connector `custom.typesafe` live. Petu's smoke test: HTTP 200,
+  `answers.disposition` = choice "page", confidence 0.9, probabilities
+  {page: 0.94, cannot_determine: 0.05, suppress: 0.01} — shape matches the client.
+  **Open measurement question:** first-call latency was **~11.4s** vs the 70–500ms
+  spec. Could be cold start; Oracle owns the latency measurement campaign
+  (p50/p95/p99, cold vs warm) before anyone quotes latency numbers. Until measured,
+  the timeout policy (tight timeout, fail open fast) is what protects the paging
+  path — not hope. (Petu; skill at `~/workspace/skills/typesafe/`.)
+- 2026-10-02 ~13:40 — **Vercel connector available; deploy only when needed.**
+  v0.1 is a stdlib middleware — nothing to deploy yet. Vercel is the target for the
+  dashboard/marketing surface when it exists. No premature deploys. (Aditya's order.)
+- 2026-10-02 ~13:40 — **Reporting = PETU-LABS rhythm.** Detailed morning brief
+  09:30 IST, evening debrief at end of working hours, no ad-hoc daytime dumps.
+  Working hours 10:00–19:00 IST at full intensity. (Aditya's order.)
+- 2026-10-02 ~13:40 — **The bar: harder and broader than the other teams.**
+  Sentinel teams out-work the TFB and studio teams — deeper research, more code,
+  wider scope. Written as the standard, measured in the briefs. (Aditya's order.)
+- 2026-10-02 ~18:45 — **15 minutes of deep reading before direction.** Aditya gave
+  Petu 15 minutes to go through everything in depth and come back with the right
+  path — including correcting Aditya where he's wrong. The architect's verdict
+  (delivered to Petu): (1) the platform-before-engine correction is right and is
+  now executed; (2) "zero errors" needs the honest form — zero *unexplained* errors;
+  the flip floor is irreducible; (3) Sunday 9 PM is achievable for a clickable
+  design-partner platform, NOT for production (the scope boundary protects the goal);
+  (4) the 11.4s real-key latency vs "sub-second inline" is the biggest technical
+  risk to the thesis — handled by timeout policy + honest measurement, not assumed
+  away. (This decision.)
