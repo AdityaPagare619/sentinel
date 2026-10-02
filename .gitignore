@@ -1,0 +1,33 @@
+# Sentinel .gitignore — secrets and scratch never get committed
+
+# Secrets / keys — NEVER commit
+.env
+.env.*
+*.pem
+*.key
+**/*secret*
+**/*credentials*
+kaggle.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache__/
+*.egg-info/
+.eggs/
+
+# Node (docs tooling, if ever)
+node_modules/
+
+# SQLite dev databases (audit store runs locally; the file is not the schema)
+*.db
+*.sqlite
+*.sqlite3
+sentinel.db
+
+# Local runtime scratch
+/tmp/
+*.log
+.DS_Store

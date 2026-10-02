@@ -1,0 +1,40 @@
+name: Sentinel CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Full test suite (stdlib unittest, no pip deps)
+        run: python3 -m unittest discover tests
+
+      - name: Fail-open kill-the-client probe
+        run: python3 -m unittest tests.test_gate -v
+
+      - name: Repeatability probes (option-order shuffle + repeat-call flip)
+        run: PYTHONPATH=src python3 -m sentinel.evalharness --n 200 --seed 7 -o /tmp/probe-report.md
+
+      - name: Secrets grep (fail on anything key/token-like in the diff)
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1 || true
+          DIFF_RANGE="${{ github.event.pull_request.base.sha }}...${{ github.sha }}"
+          if [ "${{ github.event_name }}" = "push" ]; then DIFF_RANGE="HEAD~1...HEAD"; fi
+          PATTERN='(TYPESAFE_API_KEY\s*=\s*["'"'"'][^"'"'"']+["'"'"']|sk-[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|api[_-]?key\s*[:=]\s*["'"'"'][^"'"'"']{8,}["'"'"']|token\s*[:=]\s*["'"'"'][^"'"'"']{16,}["'"'"']|ghp_[A-Za-z0-9]{10,}|SENTINEL_WEBHOOK_SECRET\s*=\s*["'"'"'][^"'"'"']+["'"'"'])'
+          if git diff -U0 "$DIFF_RANGE" | grep -Ei "$PATTERN"; then
+            echo "SECRETS-GREP FAILED: possible secret in diff" >&2
+            exit 1
+          fi
+          echo "secrets-grep clean"
