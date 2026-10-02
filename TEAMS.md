@@ -143,3 +143,54 @@ Escalation: Warden → Petu → Aditya, only if blocked.
 policy" / "have the Claim Auditor verify the tuner projection numbers". Petu spawns
 the right subagent profile with a bounded brief, a source requirement, and a registry
 write-back.
+
+## Operating roster (2026-10-02)
+
+Roles are **agent slots**, not people — spawned and retired per need, never fake
+human names. One-line mandates below; the full operating file per chief lives in
+`chiefs/<NAME>.md` (mandate, skills, rituals, artifacts, interfaces, DoD,
+prohibited actions). Duplicate the one-liners here, never the full files.
+
+| Slot | One-line mandate | Full file |
+|---|---|---|
+| Petu (Commander) | Final technical calls; Aditya's single point of contact; owns Preview-1 | — (owns the roster) |
+| Relay | Rhythm and unblocking: briefs, milestones, lane hygiene, blockers within the hour | `chiefs/RELAY.md` |
+| Forge | The design's integrity: owns contracts; no lane codes against an unwritten contract | `chiefs/ARCHITECT.md` |
+| Pager | Practitioner-grade on-call reality: eval realism, alert taxonomy, disposition sanity | `chiefs/PAGER.md` |
+| Oracle | The numbers are honest: calibration, threshold math, drift, Jev behavior | `chiefs/ORACLE.md` |
+| Vault | Nobody's keys leak because of us: webhook auth, secret hygiene, audit integrity | `chiefs/VAULT.md` |
+| Ledger | Data truth: datasets, synthetic generator, eval harness, provenance | `chiefs/LEDGER.md` |
+| Prism | The sleek bar: dashboard UX, onboarding, docs, demo narrative | `chiefs/PRISM.md` |
+| Tripwire | The gates: test strategy, acceptance criteria, fault injection | `chiefs/TRIPWIRE.md` |
+| Memory Warden | Nothing is forgotten: ledger re-reads before consequential steps | (TEAMS.md §wardens) |
+| Claim Auditor | Every number cited or measured; `UNVERIFIED` marking; can block a PR | (TEAMS.md §wardens) |
+| Constraint Sentinel | Owns the constraint registry; hard veto on violations | (TEAMS.md §wardens) |
+| Red Team | Breaks every go-live claim: adversarial review of policies and thresholds | (TEAMS.md §wardens) |
+
+### Lane role templates
+
+| Role | Job | Rules |
+|---|---|---|
+| **Lane lead** | Owns the branch, contract conformance, and the write-back. One throat to choke per lane. | Registers the lane in `ops/lane_registry.md` at creation; reports status truthfully to Relay |
+| **Builder** (max 2 per lane) | Writes the lane's code/docs against the frozen contract | Never crosses into another lane's files; PRs <300 lines; commits per unit of work |
+| **Reviewer** (a DIFFERENT agent) | Contracts conformed? Secrets absent? Numbers sourced? Hot-path separation intact? | No self-merge, ever; review SLA is minutes |
+| **QA / fault-injection** (Tripwire's) | Acceptance checks + fault injection for the lane's surface | Kill-the-client / 529-storm / malformed-input where applicable |
+
+### Current staffing (2026-10-02 evening)
+
+- **Pending review** (3 branches, unmerged): `lane/company-v2`, `lane/platform-arch`,
+  `lane/ops-deepening` — awaiting different-agent review per METHODOLOGY.md.
+- **Sat Wave B lanes** (6, planned): `ui-river`, `ui-explorer`, `ui-simulator`,
+  `calib-api`, `ui-analytics`, `docs-onboarding` — staffed at the Sat 10:00
+  kickoff; each gets a lane lead + ≤2 builders, reviewers assigned cross-lane.
+- **Standing functions:** night R&D (daily cadence, `research/CHARTER.md`),
+  Relay's brief rhythm, Tripwire's gates.
+
+### How to staff / kill a lane
+
+- **Staff:** Petu spawns the slot with a bounded brief — mission, files owned,
+  interface contract, done-criteria, write-back requirement. The lane is
+  registered in `ops/lane_registry.md` the moment it exists.
+- **Kill:** Petu's call; the reason is logged in `ops/decision_log.md`; the
+  branch is kept (history is never rewritten) and the registry row flips to
+  `killed`. A killed lane is a decision, not a disappearance.
