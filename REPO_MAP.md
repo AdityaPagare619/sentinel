@@ -10,7 +10,7 @@ logged — nothing lives only in chat.
 |---|---|---|
 | `CHARTER.md` | Mission, why-we-win, design laws, non-goals, operating principles | Petu |
 | `METHODOLOGY.md` | The git machine: branches, commits, CI, Definition of Done, ledgers | Petu |
-| `TEAMS.md` | Named roster: 9 chiefs + 4 wardens + lane role templates + staffing | Petu |
+| `TEAMS.md` | Named roster: 8 chiefs + 4 wardens (+ Petu as commander) + lane role templates + staffing | Petu |
 | `ROADMAP.md` | Preview-1 scope, milestones M1–M6, exit bars, lane assignments | Relay |
 | `ROAD_TO_LAUNCH.md` | Master plan: mission, waves, top-5 risks, decisions needed | Petu |
 | `LOCAL-OPS.md` | How agents work in this room: branch-per-lane, file ownership, push/PR flow | Petu |

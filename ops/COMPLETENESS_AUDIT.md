@@ -45,7 +45,7 @@ files), frozen `PLATFORM_ARCHITECTURE.md`, `WAVE_PLAN.md`, `ops/LANE_PLAYBOOK.md
 | 3 | `ops/acceptance-sunday.md` — WAVE_PLAN Sun AM references it; Tripwire to encode | Tripwire | Sun AM |
 | 4 | `WAVE_PLAN.md` says Wave A starts 09:00; working hours are 10:00–19:00 IST — reconcile to 10:00 start / 09:30 briefing | Relay + Forge | Sat 09:30 |
 | 5 | ADR-001 / ADR-005 / ADR-007 decisions pending | Forge recommends; Aditya decides | before Sunday |
-| 6 | No remote `main`, no PRs, no GitHub Actions until the token step | Aditya (30-sec phone step) | ASAP |
+| 6 | ~~No remote `main`, no PRs, no GitHub Actions until the token step~~ — CLOSED 2026-10-03 ~00:25 IST (all-access PAT; remote `main` = `f4aa005`, 7 branches pushed, PRs #1–#6 open and merging) | — | done |
 | 7 | Brief cadence: only 2026-10-02 archived — the daily 09:30/EOD discipline must hold through the weekend | Relay | daily |
 
 Nothing above is hidden. When a gap closes, it leaves this list with a commit

@@ -57,7 +57,7 @@ SSO, or production PagerDuty integration on Sunday).
 
 | # | Risk | Owner | Mitigation |
 |---|---|---|---|
-| 1 | **GitHub push still blocked** (token 403/404) — the visible-work machine stays local | **Aditya** (30-sec phone step) | local branches + same PR discipline; push wave runs the instant access lands |
+| 1 | ~~**GitHub push still blocked** (token 403/404) — the visible-work machine stays local~~ — **KILLED 2026-10-03 ~00:25 IST**: all-access PAT installed; 7 branches pushed, PRs #1–#6 open, merges in flight | — | — |
 | 2 | **Real-key latency 11.4s (N=1)** vs 70–500ms spec — the sub-second thesis is unearned | Oracle | latency campaign N≥100 (cold/warm p50/p95/p99); tight timeout + fail-open protects the path meanwhile; demo stays mock-backed |
 | 3 | **TypeSafe rate limits disagree 6.25×** (live docs vs community) | Oracle + Forge | design to the tighter bound; storm-collapse (one call per storm) is load-bearing regardless |
 | 4 | **Scope creep into Sunday** | Relay | kills with a citation to the scope boundary; "that's post-Sunday" is a complete sentence |
@@ -65,9 +65,11 @@ SSO, or production PagerDuty integration on Sunday).
 
 ## 5. Decisions needed from Aditya
 
-1. **The token step** — add `AdityaPagare619/sentinel` (and `inboxpilot`) to the
+1. ~~**The token step** — add `AdityaPagare619/sentinel` (and `inboxpilot`) to the
    fine-grained PAT's selected-repository access. Unlocks: pushes, PRs, reviews,
-   GitHub Actions, the entire visible-work machine. Nothing else unblocks this.
+   GitHub Actions, the entire visible-work machine. Nothing else unblocks this.~~
+   — **DONE 2026-10-03 ~00:25 IST** (all-access PAT installed by Aditya; PAT path
+   via `gh` CLI is now canonical for GitHub writes, App connector is backup only).
 2. **ADR-001** — correlator craft alignment (flap-debounce, resolved/refired
    episodes, P1/P2 never silenced): accept for the platform wave, defer, or
    reject. Forge's call to recommend; Aditya's to decide.
