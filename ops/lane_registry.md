@@ -13,7 +13,7 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/company-v2` | Architect wave (Forge) | pending review — unmerged | 8 per-chief operating files (`chiefs/`) | `afd16dc` |
 | `lane/platform-arch` | Architect wave (Forge) | pending review — unmerged | `PLATFORM_ARCHITECTURE.md` frozen + `WAVE_PLAN.md` | `6ed1138` |
 | `lane/ops-deepening` | Architect wave (Relay/Vault) | pending review — unmerged | `ops/RUNBOOKS.md`, `ops/STANDING_ORDERS.md`, decision-log + constraint-registry deepening | `5020e5a` |
-| `lane/repo-completeness` | Repo completeness coordinator | in flight | company-depth docs: log, master plan, lane registry, repo map, team deepening, lane playbook, briefs archive, onboarding, completeness audit | — |
+| `lane/repo-completeness` | Repo completeness coordinator | pending review — unmerged | company-depth docs: log, master plan, lane registry, repo map, team deepening, lane playbook, briefs archive, onboarding, completeness audit | `0ee0839`, `8ea9845`, `076fd8d`, `1cae269`, `64c078c`, `7a4b275`, `88ee47a` (+ this registry update) |
 
 ## Rules
 
