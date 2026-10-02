@@ -1,0 +1,688 @@
+openapi: 3.0.3
+info:
+  title: Sentinel Platform Read API
+  version: 1.0.0
+  description: |
+    Read-only platform tier for Sentinel (SRE page-or-suppress middleware).
+    FROZEN for the Sunday 4 Oct 21:00 IST build. Every endpoint is a pure
+    read over the audit database (decisions ⨝ outcomes). No endpoint writes,
+    fires a page, or calls Jev. POST /api/simulate is a pure recompute over
+    stored probabilities and the versioned labeled dataset (same code path
+    as the v0.1 tuner, not a copy).
+    All timestamps are ISO-8601 UTC. All responses use the envelope:
+    {data, meta{contract_version, data_source, generated_at}}.
+  contact:
+    name: Forge (platform architect)
+    url: https://github.com/AdityaPagare619/sentinel
+servers:
+  - url: http://localhost:8080
+    description: Platform tier (demo default)
+tags:
+  - name: river
+    description: Live decision river
+  - name: explorer
+    description: Audit explorer
+  - name: calibration
+    description: Calibration dashboards
+  - name: simulator
+    description: Threshold simulator
+  - name: analytics
+    description: Alert-noise and flip analytics
+  - name: stream
+    description: Server-Sent Events tail
+
+paths:
+  /api/decisions:
+    get:
+      tags: [river, explorer]
+      summary: Decision feed (river) or audit search
+      description: |
+        Without filters: the decision river, newest first, keyed by
+        monotonic integer id. With filters (fingerprint/team/action/from/to):
+        the audit explorer search. Filters combine with AND. Pagination is
+        cursor-based: pass meta.pagination.next_since_id as since_id.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/SinceId'
+        - name: fingerprint
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{16}$'}
+          description: 16-hex alert fingerprint (service|check|severity_in|region sha256 prefix)
+        - name: team
+          in: query
+          schema: {$ref: '#/components/schemas/Team'}
+        - name: action
+          in: query
+          schema: {$ref: '#/components/schemas/DispositionAction'}
+          description: Disposition action taken
+        - name: from
+          in: query
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Decision rows, newest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: {$ref: '#/components/schemas/DecisionSummary'}
+                      meta:
+                        allOf:
+                          - $ref: '#/components/schemas/Meta'
+                          - type: object
+                            properties:
+                              pagination:
+                                $ref: '#/components/schemas/Pagination'
+              examples:
+                river:
+                  $ref: '#/components/examples/DecisionsFeed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/decision/{id}:
+    get:
+      tags: [explorer]
+      summary: Full decision record
+      description: |
+        The complete audit row: all three Jev answer triples, input hash,
+        model version, latency, reason code, alert context, and the joined
+        outcome label (when labeled). This is the "prove it" endpoint.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Full decision detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/DecisionDetail'}
+              examples:
+                detail:
+                  $ref: '#/components/examples/DecisionDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/calibration:
+    get:
+      tags: [calibration]
+      summary: Per-team calibration report
+      description: |
+        Reliability bins (predicted vs observed), ECE with N and 95% CI,
+        coverage@τ for τ ∈ {0.7, 0.8, 0.9}, and the flip rate. Joins
+        decisions ⨝ outcomes; unlabeled decisions are excluded and the
+        denominator is always reported (Oracle's law: no chart without a
+        denominator). For the Sunday build the labels are versioned
+        synthetic labels — data_source says so, loudly.
+      parameters:
+        - name: team
+          in: query
+          required: false
+          schema: {$ref: '#/components/schemas/Team'}
+          description: Omit for the global (all-teams) report
+      responses:
+        '200':
+          description: Calibration report
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/CalibrationReport'}
+              examples:
+                report:
+                  $ref: '#/components/examples/CalibrationReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/simulate:
+    post:
+      tags: [simulator]
+      summary: Threshold projection (pure recompute)
+      description: |
+        Projects suppressions, pages, queue, expected false suppresses,
+        and expected cost for a candidate threshold set over a pinned
+        labeled dataset version. Deterministic: same body ⇒ same
+        projection. No Jev calls. Unknown dataset_version ⇒ 422, never a
+        silent fallback. The response carries full provenance so the UI
+        can render "what is this number based on" without a second call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SimulateRequest'}
+            example:
+              thresholds:
+                suppress_p1_max: 0.002
+                suppress_conf_min: 0.90
+                page_p1p2_min: 0.30
+                uncertain_conf_max: 0.50
+                queue_conf_min: 0.70
+              cost_model: {c_fp: 100.0, c_fn: 50000.0}
+              dataset_version: labels-v3
+      responses:
+        '200':
+          description: Projection with provenance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/SimulateResponse'}
+              examples:
+                projection:
+                  $ref: '#/components/examples/SimulateResponse'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/analytics/noise:
+    get:
+      tags: [analytics]
+      summary: Alert-noise analytics
+      description: |
+        Top flapping checks (by volume and suppressed volume), per-team
+        page load before/after Sentinel, suppression breakdown by reason.
+        v1 (Sunday): top checks + team load + breakdown. Storm timeline is
+        a P1 stretch and NOT in this contract version.
+      parameters:
+        - name: window
+          in: query
+          schema: {type: string, pattern: '^\d+[smhd]$', default: 24h}
+      responses:
+        '200':
+          description: Noise analytics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/NoiseReport'}
+              examples:
+                noise:
+                  $ref: '#/components/examples/NoiseReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/analytics/flips:
+    get:
+      tags: [analytics]
+      summary: Flip-audit records
+      description: |
+        Repeatability probes: the same input_sha256 decided differently
+        across repeats. Shown, not hidden — this is the honesty panel.
+        Each record lists every decision on that input so the UI can
+        render the flip inline.
+      parameters:
+        - name: window
+          in: query
+          schema: {type: string, pattern: '^\d+[smhd]$', default: 7d}
+      responses:
+        '200':
+          description: Flip-audit records
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/FlipReport'}
+              examples:
+                flips:
+                  $ref: '#/components/examples/FlipReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/stream:
+    get:
+      tags: [stream]
+      summary: SSE tail of new decisions
+      description: |
+        text/event-stream. Each `decision` event's data is a DecisionSummary
+        and its `id:` is the decision id. Clients resume with the standard
+        `Last-Event-ID` header; non-EventSource clients may use ?since_id=.
+        A `: heartbeat` comment is sent every 25s. If the cursor predates
+        retention, the server emits one `event: gap` with
+        {resume_since_id, missed} and continues live; the client backfills
+        via GET /api/decisions?since_id=. The server may send
+        `retry: 3000` to set the reconnect delay.
+      parameters:
+        - name: since_id
+          in: query
+          schema: {type: integer, minimum: 0}
+          description: Fallback cursor for clients that cannot set Last-Event-ID
+      responses:
+        '200':
+          description: Endless event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  retry: 3000
+
+                  id: 1042
+                  event: decision
+                  data: {"id":1042,"disposition":"suppress","confidence":0.96,...}
+
+                  : heartbeat
+
+                  id: 1043
+                  event: decision
+                  data: {"id":1043,"disposition":"page_now","confidence":0.88,...}
+
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 500, default: 50}
+    SinceId:
+      name: since_id
+      in: query
+      schema: {type: integer, minimum: 0}
+      description: Return decisions with id greater than this (exclusive)
+
+  schemas:
+    DataSource:
+      type: string
+      enum: [synthetic, shadow, production]
+      description: |
+        synthetic — seeded fixtures (v0.1 synthetic.py shapes).
+        shadow — live alerts, Sentinel in shadow mode (would-be disposition
+        recorded, action forced to passthrough).
+        production — live alerts, Sentinel enforcing.
+
+    Team:
+      type: string
+      enum: [platform, network, data, product_backend, security, cannot_determine]
+
+    Severity:
+      type: string
+      enum: [p1_critical, p2_high, p3_medium, p4_low, known_noise, cannot_determine]
+
+    DispositionAction:
+      type: string
+      enum: [page_now, page_business_hours, suppress, passthrough]
+      description: |
+        page_now — a human is paged immediately.
+        page_business_hours — queued for business-hours handling.
+        suppress — dropped as confirmed known noise (triple lock only).
+        passthrough — unchanged from the existing pipeline (uncertain,
+        error, shadow mode, or cannot_determine).
+
+    AnswerTriple:
+      type: object
+      required: [choice, confidence, probs]
+      properties:
+        choice: {type: string, description: Winning option}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        probs:
+          type: object
+          additionalProperties: {type: number, minimum: 0, maximum: 1}
+          description: Full option→probability map; sums to ~1
+
+    ProbMap:
+      type: object
+      required: [severity, owning_team, disposition]
+      properties:
+        severity:
+          allOf: [{$ref: '#/components/schemas/AnswerTriple'},
+                  {description: Q1 — severity classification}]
+        owning_team:
+          allOf: [{$ref: '#/components/schemas/AnswerTriple'},
+                  {description: Q2 — owning team}]
+        disposition:
+          allOf: [{$ref: '#/components/schemas/AnswerTriple'},
+                  {description: Q3 — the money question}]
+
+    DecisionSummary:
+      type: object
+      required: [id, time, title, service, severity, team, disposition,
+                 confidence, reason, prob_map, fingerprint, input_sha256,
+                 jev_model, latency_ms]
+      properties:
+        id: {type: integer, description: Monotonic decision id (audit rowid)}
+        alert_id: {type: string}
+        time: {type: string, format: date-time, description: received_at}
+        title: {type: string, example: 'cpu_util warning on redis-cache (us-east-1)'}
+        service: {type: string, example: redis-cache}
+        severity: {$ref: '#/components/schemas/Severity', description: Q1 winning choice}
+        team: {$ref: '#/components/schemas/Team', description: Q2 winning choice}
+        disposition: {$ref: '#/components/schemas/DispositionAction'}
+        confidence: {type: number, minimum: 0, maximum: 1, description: Q3 confidence}
+        reason:
+          type: string
+          description: |
+            Machine-readable reason code. triple-lock | p1p2-mass |
+            queue-policy | uncertain-default | storm-continuation |
+            dedup | change-window | allowlist | shadow | error:<code>
+          example: triple-lock
+        prob_map: {$ref: '#/components/schemas/ProbMap'}
+        fingerprint: {type: string, pattern: '^[0-9a-f]{16}$'}
+        input_sha256: {type: string, pattern: '^[0-9a-f]{64}$', description: Canonical input hash; flip-audit join key}
+        jev_model: {type: string, nullable: true, example: system-one-2026-09-15, description: Pinned Jev model version; null on deterministic pre-Jev paths}
+        latency_ms: {type: number, nullable: true, description: Jev round-trip; null on deterministic paths}
+        shadow:
+          type: boolean
+          description: True when this row was recorded in shadow mode (action forced to passthrough)
+
+    DecisionDetail:
+      allOf:
+        - $ref: '#/components/schemas/DecisionSummary'
+        - type: object
+          required: [alert, audit]
+          properties:
+            alert:
+              type: object
+              description: Alert context as received
+              properties:
+                check: {type: string, example: cpu_util}
+                severity_in: {type: string, example: warning}
+                region: {type: string, example: us-east-1}
+                labels: {type: object, additionalProperties: {type: string}}
+                metric_value: {type: number}
+                metric_threshold: {type: number}
+                breach_seconds: {type: integer}
+            outcome:
+              type: object
+              nullable: true
+              description: Joined outcomes row; null when unlabeled
+              properties:
+                became_sev12: {type: boolean}
+                auto_cleared: {type: boolean}
+                mttr_min: {type: number, nullable: true}
+                labeled_at: {type: string, format: date-time, nullable: true}
+            audit:
+              type: object
+              properties:
+                received_at: {type: string, format: date-time}
+                created_at: {type: string, format: date-time}
+
+    CalibrationBin:
+      type: object
+      required: [bin, predicted_lo, predicted_hi, n, observed_rate]
+      properties:
+        bin: {type: integer, description: 1-based bin index}
+        predicted_lo: {type: number}
+        predicted_hi: {type: number}
+        n: {type: integer, description: Decisions in this bin (denominator)}
+        observed_rate: {type: number, description: Fraction that became SEV1/2}
+        ci95_lo: {type: number}
+        ci95_hi: {type: number}
+
+    CalibrationReport:
+      type: object
+      required: [team, window, dataset_version, n_decisions, n_labeled, bins, ece, coverage]
+      properties:
+        team: {type: string, description: Team name or "all"}
+        window: {type: string, example: 7d}
+        dataset_version: {type: string, description: Label set version (e.g. labels-v3)}
+        n_decisions: {type: integer}
+        n_labeled: {type: integer, description: Decisions with an outcome label — every chart's denominator}
+        bins: {type: array, items: {$ref: '#/components/schemas/CalibrationBin'}}
+        ece: {type: number, description: Expected calibration error}
+        ece_ci95: {type: array, items: {type: number}, minItems: 2, maxItems: 2}
+        coverage:
+          type: object
+          description: Fraction of labeled decisions with Q3 confidence ≥ τ
+          properties:
+            '0.7': {type: number}
+            '0.8': {type: number}
+            '0.9': {type: number}
+        flip_rate: {type: number, description: Fraction of repeated inputs that flipped}
+        flips_n: {type: integer}
+
+    ThresholdSet:
+      type: object
+      required: [suppress_p1_max, suppress_conf_min, page_p1p2_min, uncertain_conf_max, queue_conf_min]
+      properties:
+        suppress_p1_max: {type: number, description: P(p1_critical) must be below this to suppress}
+        suppress_conf_min: {type: number, description: Q3 confidence floor for suppression}
+        page_p1p2_min: {type: number, description: P(p1)+P(p2) above this pages now}
+        uncertain_conf_max: {type: number, description: Q3 confidence below this pages (uncertainty pages)}
+        queue_conf_min: {type: number, description: Q3 confidence floor for business-hours queue}
+
+    CostModel:
+      type: object
+      required: [c_fp, c_fn]
+      properties:
+        c_fp: {type: number, description: Cost of one false page (USD)}
+        c_fn: {type: number, description: Cost of one false suppress / missed SEV (USD)}
+
+    SimulateRequest:
+      type: object
+      required: [thresholds, dataset_version]
+      properties:
+        thresholds: {$ref: '#/components/schemas/ThresholdSet'}
+        cost_model: {$ref: '#/components/schemas/CostModel'}
+        dataset_version: {type: string, description: Pinned label set; unknown ⇒ 422}
+
+    Projection:
+      type: object
+      required: [n_alerts, suppress, page_now, queue, baseline, exp_false_suppresses,
+                 expected_cost, avoided_page_cost, suppress_rate, recommended]
+      properties:
+        n_alerts: {type: integer}
+        suppress: {type: integer}
+        page_now: {type: integer}
+        queue: {type: integer}
+        baseline: {type: integer, description: Unchanged from today's pipeline}
+        exp_false_suppresses: {type: number, description: Σ P(p1) over suppressed (linearity of expectation)}
+        expected_cost: {type: number, description: exp_false_suppresses × c_fn (USD)}
+        avoided_page_cost: {type: number, description: suppress × c_fp (USD)}
+        suppress_rate: {type: number}
+        pages_per_night_avoided: {type: number}
+        recommended:
+          type: object
+          description: Tuner's expected-cost-optimal row on the confidence grid
+          properties:
+            conf_min: {type: number}
+            note: {type: string}
+
+    Provenance:
+      type: object
+      required: [dataset_version, dataset_sha256, n_alerts, tuner_rev, policy_version, computed_at]
+      properties:
+        dataset_version: {type: string}
+        dataset_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        n_alerts: {type: integer}
+        tuner_rev: {type: string, description: Git rev of the tuner code that produced this}
+        policy_version: {type: string, description: Gate policy table version}
+        computed_at: {type: string, format: date-time}
+
+    SimulateResponse:
+      type: object
+      required: [projection, provenance]
+      properties:
+        projection: {$ref: '#/components/schemas/Projection'}
+        provenance: {$ref: '#/components/schemas/Provenance'}
+
+    NoiseReport:
+      type: object
+      required: [window, top_checks, team_load, suppression_breakdown]
+      properties:
+        window: {type: string}
+        top_checks:
+          type: array
+          items:
+            type: object
+            required: [fingerprint, service, check, region, volume, suppressed]
+            properties:
+              fingerprint: {type: string}
+              service: {type: string}
+              check: {type: string}
+              region: {type: string}
+              volume: {type: integer}
+              suppressed: {type: integer}
+              suppress_rate: {type: number}
+        team_load:
+          type: array
+          items:
+            type: object
+            required: [team, pages_per_night_before, pages_per_night_after]
+            properties:
+              team: {type: string}
+              pages_per_night_before: {type: number}
+              pages_per_night_after: {type: number}
+              delta_pct: {type: number}
+        suppression_breakdown:
+          type: array
+          items:
+            type: object
+            required: [reason, count]
+            properties:
+              reason: {type: string}
+              count: {type: integer}
+              pct: {type: number}
+
+    FlipRecord:
+      type: object
+      required: [input_sha256, fingerprint, alert_id, repeats, flipped, decisions]
+      properties:
+        input_sha256: {type: string}
+        fingerprint: {type: string}
+        alert_id: {type: string}
+        repeats: {type: integer}
+        flipped: {type: boolean}
+        first_seen: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        decisions:
+          type: array
+          items:
+            type: object
+            required: [decision_id, time, disposition, confidence]
+            properties:
+              decision_id: {type: integer}
+              time: {type: string, format: date-time}
+              disposition: {$ref: '#/components/schemas/DispositionAction'}
+              confidence: {type: number}
+              q3_choice: {type: string}
+
+    FlipReport:
+      type: object
+      required: [window, repeats_total, flip_rate, flips]
+      properties:
+        window: {type: string}
+        repeats_total: {type: integer}
+        flip_rate: {type: number}
+        flips: {type: array, items: {$ref: '#/components/schemas/FlipRecord'}}
+
+    Meta:
+      type: object
+      required: [contract_version, data_source, generated_at]
+      properties:
+        contract_version: {type: string, example: '1.0.0'}
+        data_source: {$ref: '#/components/schemas/DataSource'}
+        generated_at: {type: string, format: date-time}
+
+    Pagination:
+      type: object
+      properties:
+        limit: {type: integer}
+        next_since_id: {type: integer, description: Pass as since_id for the next page; null when exhausted}
+        has_more: {type: boolean}
+
+    Envelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {description: Endpoint payload}
+        meta: {$ref: '#/components/schemas/Meta'}
+        error:
+          type: object
+          nullable: true
+          properties:
+            code: {type: string}
+            message: {type: string}
+            retryable: {type: boolean}
+
+    ErrorEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [error]
+          properties:
+            data: {nullable: true}
+
+  responses:
+    BadRequest:
+      description: Bad parameter
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: Unknown decision id
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unprocessable:
+      description: Simulate body invalid (unknown dataset_version or out-of-bounds thresholds)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  examples:
+    DecisionsFeed:
+      value:
+        data: []
+        meta:
+          contract_version: 1.0.0
+          data_source: shadow
+          generated_at: 2026-10-02T18:55:00Z
+          pagination: {limit: 50, next_since_id: 992, has_more: true}
+    DecisionDetail:
+      value:
+        data: {}
+        meta:
+          contract_version: 1.0.0
+          data_source: shadow
+          generated_at: 2026-10-02T18:55:00Z
+    CalibrationReport:
+      value:
+        data: {}
+        meta:
+          contract_version: 1.0.0
+          data_source: synthetic
+          generated_at: 2026-10-02T18:55:00Z
+    SimulateResponse:
+      value:
+        data: {}
+        meta:
+          contract_version: 1.0.0
+          data_source: synthetic
+          generated_at: 2026-10-02T18:55:00Z
+    NoiseReport:
+      value:
+        data: {}
+        meta:
+          contract_version: 1.0.0
+          data_source: shadow
+          generated_at: 2026-10-02T18:55:00Z
+    FlipReport:
+      value:
+        data: {}
+        meta:
+          contract_version: 1.0.0
+          data_source: synthetic
+          generated_at: 2026-10-02T18:55:00Z
