@@ -27,7 +27,7 @@ with no interpretation. If a row cannot be executed as written, the row is RED.
 | | |
 |---|---|
 | **Verify** | CI is green on `main` HEAD; suite + probes + secrets-grep all green. |
-| **Command** | `gh run list -R AdityaPagare619/sentinel --branch main --limit 1` → status `completed`, conclusion `success`. Then `gh run view <id> --json jobs` → every job `success`. Confirm the run bound to workflow `373379827` ("Sentinel CI"), not the dead `BuildFailed` record (see `ops/ci-repair.md`). |
+| **Command** | `gh run list -R AdityaPagare619/sentinel --branch main --limit 1` → status `completed`, conclusion `success`. Then confirm the run bound to the ACTIVE "Sentinel CI" record at `.github/workflows/sentinel-ci.yml` (state=active via `gh api .../actions/workflows`), never a `BuildFailed`/`deleted` record — see `ops/ci-repair.md`. |
 | **Pass** | Latest `main` run green on the active workflow; `git rev-parse origin/main` equals the run's `head_sha`. Re-verify at 21:00 before delivery. |
 | **Sign** | Tripwire: ______ |
 

@@ -24,7 +24,7 @@
 Every commit: a body line saying *why* (the decision), and a footer line pointing at the
 decision-log entry when one exists (`Decision: ops/decision_log.md#2026-10-02-gate-policy`).
 
-## 3. CI — `.github/workflows/ci.yml`
+## 3. CI — `.github/workflows/sentinel-ci.yml`
 
 Runs on every PR and every push to `main`. **stdlib only** (frozen decision — no pip
 deps, no network installs):

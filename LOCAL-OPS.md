@@ -58,7 +58,7 @@ chore(ci): add secrets-grep step
 2. Open a PR: `main` ← your branch, using `.github/pull_request_template.md`
    (tests green, docs updated, no secrets, Claim-Auditor pass on numbers).
 3. Review must come from a **DIFFERENT agent** — no self-merge.
-4. CI (`.github/workflows/ci.yml`) must be green: full suite, repeatability probes,
+4. CI (`.github/workflows/sentinel-ci.yml`) must be green: full suite, repeatability probes,
    kill-the-client, secrets-grep.
 5. Squash-merge → delete the branch. `main` history stays a clean sequence.
 

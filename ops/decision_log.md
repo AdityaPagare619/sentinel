@@ -22,6 +22,14 @@ Latest decisions on top.
   the dead record 373379524; the file bytes were always valid (active record
   373379827 since 18:41:30). No file fix needed — a fresh run is the
   verification; escalation = forced re-ingest. (`ops/ci-repair.md`; Tripwire.)
+- 2026-10-03 — **CI fix, second attempt: workflow renamed to
+  `sentinel-ci.yml`.** The "transient" hypothesis was FALSIFIED — fresh runs at
+  18:59 UTC still bound to the dead record, so the (repo, path) → record
+  mapping is permanently poisoned and re-pushing the same path can never fix
+  it. `git mv .github/workflows/ci.yml .github/workflows/sentinel-ci.yml`
+  (zero content change); cross-lane path references in METHODOLOGY.md §3 and
+  LOCAL-OPS.md §4 updated and flagged. Tripwire owns `ci.yml` test gates
+  (TEAMS.md), so the rename is in-lane. (`ops/ci-repair.md`; Tripwire.)
 
 ## 2026-10-02 — base setup
 
