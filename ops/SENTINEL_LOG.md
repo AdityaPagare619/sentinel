@@ -77,3 +77,10 @@ Format: date/time (IST) — event — evidence. Latest entries on top.
 - #1 recommendation: page-or-suppress SRE triage middleware. Aditya read it in
   full and ordered the build phase: two parallel builds (Sentinel + InboxPilot),
   separate rooms and coordinators.
+
+## 2026-10-03 ~00:20 IST — GitHub push wave complete (PAT path)
+- Aditya installed an all-access PAT; gh CLI verified (push/admin/maintain on sentinel).
+- Pushed all 7 branches natively (full history preserved): base/setup-docs, lane/code-mvp-v0.1, lane/company-v2, lane/ops-deepening, lane/platform-arch, lane/repo-completeness, lane/research-night-1. Remote main = f4aa005.
+- Opened PRs #1–#6 (code-mvp, research-night-1, platform-arch, ops-deepening, company-v2, repo-completeness → main). Merges held for different-agent review per standing orders.
+- Retired the sentinel-push-watch cron (superseded) and removed the probe/test-branch.
+- Known gap: .github/workflows/ci.yml could not go via the GitHub App (missing workflows permission); now unblocked via PAT — include in next push. GitHub App connector is backup only per Aditya's order (no approval popups).
