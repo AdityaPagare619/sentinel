@@ -10,24 +10,44 @@
 
 - [x] 1. ARCHITECTURE.md — design doc (frozen 2026-10-02)
 - [x] 2. System-One wire-format client (`src/sentinel/client.py`) — DONE 2026-10-02 (Helper A: client+models+questions+state, 41/41 tests pass, coordinator-verified)
-- [ ] 3. Webhook receiver + triage pipeline — Helper B running (mid-flight; full-suite shows its tests still being written)
+- [x] 3. Webhook receiver + triage pipeline — DONE 2026-10-02 (Helper B: correlator/audit/gate/forwarder/receiver; kill-the-client release-blocker tests pass; coordinator-verified)
 - [x] 4. Threshold tuner CLI (`tuner.py`) — DONE 2026-10-02 (Helper C, tests pass, coordinator-verified)
 - [x] 5. Eval harness (`evalharness.py` + `synthetic.py`) — DONE 2026-10-02 (Helper C, 24/24 tests pass, coordinator-verified)
-
-## Integration notes (for coordinator review when all land)
-- Box has no `python`, only `python3` — README must use `python3` in all commands.
-- `src/sentinel/_shims.py` appeared (not Helper A's) — review at integration; remove if redundant.
-- Helper A spec resolutions accepted: Q2/Q3 instruction one-liners; state cap enforced on whole-state JSON tokens; truncate-lowest-priority-first semantics; mock-local canonical-JSON helper (avoids import cycle).
-- [ ] 6. README.md — after code lands (coordinator)
+- [x] 6. README.md — DONE 2026-10-02 (coordinator; quickstart, BYOK, env table, honest limitations)
 
 ## Milestones
 
 - [x] M1: ARCHITECTURE.md complete (design frozen for v0.1)
 - [x] M2: client + mock + unit tests green (41/41, coordinator-verified 2026-10-02)
-- [ ] M3: receiver → correlator → gate → forwarder pipeline working end-to-end on synthetic alerts (mock Jev)
+- [x] M3: receiver → correlator → gate → forwarder pipeline end-to-end (mock Jev) — verified 2026-10-02 via live mock-mode smoke test (HTTP 200s, audit rows written, fail-open on mock error) + loopback receiver tests incl. dead-Jev byte-identical relay
 - [x] M4: tuner CLI produces thresholds + savings projection from labeled data (smoke: 2,000 synthetic alerts → conf 0.90, 1,123 suppressions / 67.3% of baseline pages)
-- [ ] M5: eval harness runs; calibration report generated; repeatable probes green (harness DONE — severity acc 0.9765, ECE Q1 0.0956/Q3 0.0819, false-suppress 0.0000, flip+shuffle PASS; full-suite green pending Helper B)
-- [ ] M6: MVP complete — README done, full test suite green, demo walkthrough recorded in PROGRESS
+- [x] M5: eval harness runs; calibration report generated; probes green; FULL SUITE 140/140 OK (2026-10-02)
+- [x] M6: MVP complete — README done, full suite green, demo walkthrough below
+
+## Demo walkthrough (Preview-1 ready)
+
+```bash
+cd ~/workspace/jev-builds/sentinel && export PYTHONPATH=src
+# 1. synthetic storm → tune → evaluate
+python3 -m sentinel.synthetic --n 2000 --seed 7 -o /tmp/labels.jsonl
+python3 -m sentinel.tuner --labels /tmp/labels.jsonl -o /tmp/thresholds.json
+python3 -m sentinel.evalharness --n 2000 --seed 7 -o /tmp/calibration-report.md
+# 2. live receiver in mock mode (no key needed)
+SENTINEL_MOCK=1 SENTINEL_DB=/tmp/demo.db python3 -m sentinel.receiver --port 8080 &
+curl -s localhost:8080/v2/enqueue -H 'Content-Type: application/json' -d \
+ '{"routing_key":"demo","event_action":"trigger","payload":{"summary":"CPU > 95% for 10m","source":"prometheus","severity":"critical","component":"api-web"}}'
+# 3. audit trail
+python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('/tmp/demo.db').execute('select alert_id,action,reason from decisions')]"
+```
+
+## Integration notes
+- Box has no `python`, only `python3` — README uses `python3` throughout.
+- `_shims.py` REMOVED 2026-10-02 (dead code: evalharness prefers real `gate.py` via try/except; eval tests re-verified green after removal).
+- `SENTINEL_MOCK=1` added to receiver (coordinator): mock client, full pipeline runs, every decision fails open to passthrough, zero network calls.
+- Code committed on `lane/code-mvp-v0.1` (a8a7cf4, conventional commit). Push to GitHub blocked on Aditya's 30-sec phone step (repo access for the PAT) — Petu's domain.
+- Helper A spec resolutions accepted: Q2/Q3 instruction one-liners; state cap enforced on whole-state JSON tokens; truncate-lowest-priority-first semantics; mock-local canonical-JSON helper (avoids import cycle).
+- ARCHITECTURE.md §5 example corrected 2026-10-02 ($20,000 not $20.0 — caught by Helper C).
+- Smoke-test forwarder behavior confirmed as designed: PD relay timeout → logged + metric, receiver still 200; missing routing key → loud logged failure, never raise.
 
 ## Decisions log
 
@@ -37,4 +57,4 @@
 
 ## Blockers / decisions needed
 
-(none yet)
+(none — MVP complete. Awaiting GitHub push unblock for PR flow; next build decisions (shadow pilot, real-key Jev validation) are Petu/Aditya calls.)
