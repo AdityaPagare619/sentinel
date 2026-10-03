@@ -69,17 +69,23 @@ class ReceiverTestBase(unittest.TestCase):
         os.makedirs(cfgdir, exist_ok=True)
         with open(os.path.join(cfgdir, "thresholds.json"), "w") as fh:
             json.dump({}, fh)
+        # ADR-013: AllowlistEntry objects (with attestations) can't go through
+        # JSON config; write plain fingerprints to file, pass entries directly.
+        entries = [a for a in (allowlist or []) if not isinstance(a, str)]
+        fp_strings = [a for a in (allowlist or []) if isinstance(a, str)]
         with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
-            json.dump(sorted(allowlist or []), fh)
+            json.dump(sorted(fp_strings), fh)
         statedir = os.path.join(self._tmp.name, "state")
         loader = ConfigLoader(config_dir=cfgdir, state_dir=statedir)
         policy = loader.load_startup()
+        # Override with attested entries if provided (bypasses file format).
+        allowlist_for_gate = entries if entries else policy.allowlist
         record_restart(statedir)
         self.pd = CaptureServer()
         audit = AuditLog(":memory:")
         # ADR-013: allowlist may be AllowlistEntry objects (with attestations)
         # or plain fingerprint strings. Pass through as list; Gate handles both.
-        gate = Gate(jev_client, policy.thresholds, list(policy.allowlist),
+        gate = Gate(jev_client, policy.thresholds, list(allowlist_for_gate),
                     audit, shadow=shadow)
         forwarder = Forwarder(pd_events_url=self.pd.url,
                               default_routing_key="rk-default")
