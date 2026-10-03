@@ -112,7 +112,45 @@ beats (terminal river is the rehearsed fallback).
 
 ---
 
-## Rehearsal 3 — PENDING
+## Rehearsal 3 — flip-beat fallback + no-key stop — 2026-10-03 ~20:45 IST
+
+**What ran:**
+1. `rehearsal/flip_beat.py rehearse-fallback --recording rehearsal/flip-beat-recording-20261003T144811.672709p0000.json`
+   (sibling lane's tooling, executed by lane 3 in this worktree).
+2. Monkeypatched `check_auth()` in `demo/storm-scenario/storm_runner.py`
+   with a dead credential to exercise the no-key stop path.
+
+**Results — fallback rehearsal 4/4 PASS:**
+- dead live + recording → `recorded` mode, verbatim label:
+  "recorded real-Jev re-ask from rehearsal
+  2026-10-03T14:48:11.672709+00:00 — live path down right now"
+- dead live, no recording → `limits_beat` mode, failure named
+  (JevError/network), no crash
+- corrupt recording path → limits beat, no crash
+- unlabeled-recording scan: clean
+
+**Results — no-key stop:** banner printed verbatim on screen
+("The demo refuses to run on a mock engine…"), `SystemExit(2)`,
+no mock engaged, nothing decided, nothing recorded. PASS.
+
+**Honesty notes:**
+- The rehearsal recording was inspected: real Jev answers, timestamped,
+  source-labeled (`real Jev System One (custom.typesafe surrogate
+  auth)`). A labeled recording of the real engine is not a mock —
+  but it NEVER wears the LIVE badge, and without the verbatim
+  timestamped label it is not shown at all.
+- `render_beat()` never raises (verified across all three failure
+  shapes). No network failure can kill the demo.
+- DEMO_SCRIPT.md beat 1b updated to the live-first procedure with the
+  exact fallback label and the hard rules.
+
+**Verdict:** the flip beat is live-first and failure-proof. The demo
+survives Jev being down, the credential being gone, and the recording
+being corrupt — each with its honest on-screen state.
+
+---
+
+## Rehearsal 4 — PENDING
 
 Reserved for: the integrated stack rehearsal (API + UI lanes merged on
 main). Lane 3 re-checks main periodically; when the platform tier serves

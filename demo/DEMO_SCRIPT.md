@@ -89,16 +89,47 @@ in the open, in front of you, at minute one. That is not a bug we are
 apologizing for. That is the product: every disagreement the machine has
 with itself is written to the event log and shown, not smoothed over."
 
-**The honest re-ask (same beat, 30 seconds later):** the same alert goes
-through the real gate again at B=2700 ms, twice. Present both
-dispositions exactly as they land:
+**The honest re-ask (same beat, 30 seconds later): LIVE-FIRST, never
+live-or-stop.** The flip beat attempts the real Jev re-ask live; no
+network failure may kill the demo. Procedure (implemented in
+`rehearsal/flip_beat.py::render_beat` — the demoist calls it, never
+improvises):
 
-- If identical (the modal outcome, ~98%): "Same answer twice. That is the
-  modal outcome. Jev flips on 1.3–2.2% of re-asks — the floor is measured,
-  not promised. The flip-audit view holds every one we've ever seen."
-- If they differ: "There it is — a real flip, live, unscripted. Same
-  input hash, two different answers. The log holds both; nothing was
-  rewritten."
+1. **Attempt the real Jev re-ask live** — the same alert, twice, through
+   the real B=2700 ms gate. Present both dispositions exactly as they
+   land, wearing the **LIVE** badge:
+   - identical (the modal outcome, ~98%): "Same answer twice. That is
+     the modal outcome. Jev flips on 1.3–2.2% of re-asks — the floor is
+     measured, not promised. The flip-audit view holds every one we've
+     ever seen."
+   - differ: "There it is — a real flip, live, unscripted. Same input
+     hash, two different answers. The log holds both; nothing was
+     rewritten."
+2. **Live fails** (529 / auth / network / timeout) → the demo does NOT
+   collapse. Two honest options, in this order:
+   - **(a) Recorded fallback** (when a rehearsal recording exists):
+     show the recorded real-Jev re-ask with the EXACT label, verbatim:
+
+     > recorded real-Jev re-ask from rehearsal \<timestamp\> — live path
+     > down right now
+
+     The label always carries the rehearsal timestamp. No timestamp, no
+     showing. The presenter adds one line: "The live re-ask failed just
+     now — so you're seeing a real re-ask from rehearsal, labeled as
+     such." The recording NEVER wears the LIVE badge.
+   - **(b) Limits beat** (no recording available): show the failure
+     itself — "Jev is unreachable right now (\<failure class\>) — and
+     that's the backup plan working: when the model path is down,
+     Sentinel pages on uncertainty instead of going blind. The paging
+     path never depended on this call."
+
+**Hard rules (no exceptions):** `render_beat()` never raises. No
+unlabeled recordings, ever — a recorded render without the verbatim
+label is a rehearsal failure, not a demo option. A labeled recording is
+not a mock: it is a real recording of the real engine, and it says so
+on screen. (Rehearsed 2026-10-03: fallback path 4/4 — recorded label
+verbatim, limits beat, corrupt-path, unlabeled scan; see
+REHEARSAL_LOGBOOK.md Rehearsal 3.)
 
 **Reads (UI path):** `GET /api/decisions?limit=50` + `SSE /api/stream`.
 **Strip:** *"The budget fired first: the page went out. The machine's
@@ -255,7 +286,8 @@ exercised). Both are successes.
 
 | What happens live | Say this |
 |---|---|
-| No Jev credential (runner exits 2) | Read the banner aloud. "The demo refuses to run on a mock. We reconnect and re-run — nothing was faked in the meantime." |
+| No Jev credential at startup (runner exits 2) | Read the banner aloud. "The demo refuses to run on a mock. We reconnect and re-run — nothing was faked in the meantime." |
+| Live re-ask fails mid-beat | `render_beat()` handles it: labeled recording (verbatim label + timestamp, never the LIVE badge) or the limits beat. "The live re-ask failed just now — so you're seeing a real re-ask from rehearsal, labeled as such." |
 | Jev is slow on the night (many timer wins) | "The vendor's tail is the demo's best material: every timer win is a page that went out on time. The budget is the promise; Jev's latency is the vendor's property." |
 | Jev 529s / errors (gate fail-open) | "The gate failed open — pages, not silence. The error is in the log with its class. Uncertainty pages; that is Law 7." |
 | Zero suppressions | Beat 2's triple-lock honesty beat. Never apologize for the lock holding. |

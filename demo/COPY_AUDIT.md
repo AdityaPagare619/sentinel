@@ -1,15 +1,17 @@
-# Prism Copy Audit — Lane 3 — 2026-10-03 ~20:30 IST
+# Prism Copy Audit — Lane 3 — 2026-10-03 ~20:30 IST (rescoped 20:45 IST)
 
 **Authority:** Petu's ruling on the ADR debt register (PR #29, merged):
 the demo shows ONLY what is BUILT. Cross-note 4: *"an
 adopted-but-unimplemented design must never be described as a property of
 the system — in docs, demos, or buyer conversations."*
 
-**Scope:** every screen and every line of copy in `demo/` (DEMO_SCRIPT.md,
-storm-scenario/storm_runner.py printed copy, REHEARSAL_LOGBOOK.md), plus
-the copy contracts the not-yet-merged UI lanes must satisfy.
+**Scope (corrected):** the built-only principle (D1/D3) is lane 3's
+audit. The threshold-simulator and calibration-dashboard findings below
+were flagged for the UI lane — they are recorded here as handoff notes
+with the technical evidence, but the cut/relabel decisions belong to the
+UI lane and the coordinator, not to lane 3.
 
-**Method:** grepped all three assets for D1/D3 implication terms
+**Method:** grepped all demo/ assets for D1/D3 implication terms
 (`suppress_precondition`, `storm aggregate`, `never suppress`, `freshness`,
 `corroborat`, `simulat`); hand-read every beat's spoken copy; diffed the
 simulator's math (`src/sentinel/tuner.py::classify`) against the live
@@ -65,61 +67,39 @@ appears, its honest label is the folded disposition from the real event.
 
 ---
 
-## Finding 3 — Threshold simulator kernel mismatch (ACTION REQUIRED)
+## Finding 3 — Threshold simulator kernel mismatch (UI-LANE HANDOFF)
 
-**This is the audit's one real catch.** `PLATFORM_ARCHITECTURE.md` §6(c)
-specifies the simulator as *"the tuner's projection logic exposed as a
-pure function … (same code path as `tuner.py`, not a copy)"*. But
-`tuner.py::classify` simulates the **pre-ADR-013 continuous gate**:
+**Status:** technical finding verified by lane 3; the cut/relabel
+decision belongs to the UI lane + coordinator — NOT a lane-3 ruling.
 
-```python
-if p1 < p_star and conf >= conf_min and row["fingerprint"] in allowlist:
-    return "suppress"          # p_star ≈ 0.002, continuous comparison
-```
+**The evidence (unchanged):** `PLATFORM_ARCHITECTURE.md` §6(c) specifies
+the simulator as *"the tuner's projection logic exposed as a pure
+function … (same code path as `tuner.py`, not a copy)"*. But
+`tuner.py::classify` simulates the **pre-ADR-013 continuous gate**
+(`if p1 < p_star …: return "suppress"`), while the **live kernel** is the
+quantized ADR-013 gate (integer hundredths == 0, conf ≥ 0.90, dual
+attestation until the per-org fit) + the B=2700 ms race (timer-win →
+passthrough; the tuner models no race).
 
-The **live kernel** (`gate.py::evaluate_policy` + `quantized.py::
-leg1_prob_lock`) is:
-
-1. **Quantized prob lock:** reported P(p1) parsed to integer hundredths;
-   suppress requires EXACTLY 0 hundredths (never `p1 < 0.002` — that was
-   the original units bug).
-2. **Confidence lock:** q3_confidence ≥ suppress_conf_min (0.90).
-3. **Allowlist lock:** dual attestation until the per-org fit exists.
-4. **The race:** B=2700 ms; timer-win → passthrough (page), never
-   suppress. The tuner models no race at all.
-
-A simulator built on `tuner.classify` would show "at 0.85 you'd have
-suppressed N" using a gate that **does not exist** — presenting
-D1-adjacent capability as live, violating Petu's ruling and cross-note 4.
-
-**Ruling for the demo:**
-- The Sunday simulator screen may ship ONLY IF its projection engine is
-  the real kernel (call `evaluate_policy` + `leg1_prob_lock` per row over
-  stored probabilities, with the race modeled as: rows whose recorded
-  Jev latency exceeded B project to `passthrough`, not suppress).
-- Until then, the simulator screen is CUT from the demo. It is not
-  relabeled — a relabel ("old math") would still show the buyer a wrong
-  tradeoff curve. The demoist's line if asked: "The simulator projects
-  only the live kernel — quantized gate, dual attestation, the real
-  race. That wiring lands with D1; tonight we show you the storm instead."
-- The thin-data refusal (design 08 §6.2: *"Cannot project — n cases is
-  below 100"*) stays as specified; it is a copy property, not a kernel
-  property.
+**Lane-3 recommendation to the UI lane:** the Sunday simulator screen
+should ship ONLY IF its projection engine is the real kernel
+(`evaluate_policy` + `leg1_prob_lock` per row over stored probabilities,
+race modeled as timer-win → passthrough). Otherwise cut or relabel per
+Petu's ruling — a relabel ("old math") would still show the buyer a
+wrong tradeoff curve. The thin-data refusal (design 08 §6.2) stays as
+specified regardless.
 
 **Doc fix for the coordinator** (not lane 3's file to edit):
 `PLATFORM_ARCHITECTURE.md` §6(c)'s "(same code path as `tuner.py`)"
-sentence is now false w.r.t. the live kernel and must be rewritten to
-point at `gate.evaluate_policy` + `quantized.leg1_prob_lock` once D1
-collapses the mirror.
+sentence is false w.r.t. the live kernel once D1 collapses the mirror —
+rewrite to point at `gate.evaluate_policy` + `quantized.leg1_prob_lock`.
 
 ---
 
-## Finding 4 — Calibration dashboard denominators (binding copy contract)
+## Finding 4 — Calibration dashboard denominators (UI-LANE HANDOFF)
 
-The UI lanes are not merged, so there are no screens to cut — but the
-contract is binding before any card ships. Per design 08 §2.2 and the
-operator-empathy spec (06 §2.2): **a number without its denominator is a
-rumor.**
+**Status:** binding copy contract drafted by lane 3 for the UI lane;
+enforcement belongs to the UI lane + coordinator.
 
 Every calibration card MUST render, on the card, in the same visual
 weight class as the headline number:
@@ -192,16 +172,19 @@ audit records the findings here for coordinator adjudication:
 
 ---
 
-## Summary of cuts/relabels in lane-3 assets
+## Summary of cuts/relabels — lane-3 scope (built-only principle)
 
 | Location | Issue | Action |
 |---|---|---|
-| DEMO_SCRIPT.md beat 6 | — | No change: triple-lock copy already matches the built kernel |
-| DEMO_SCRIPT.md beats 1–5 | — | No D1/D3 implication found |
-| storm_runner.py printed copy | — | No D1/D3 implication found; allowlist labeled `demo-*` |
-| Threshold simulator screen | Simulates the pre-ADR-013 continuous gate via `tuner.classify` | **CUT from the Sunday demo** until it runs the real kernel (Finding 3); root DEMO_SCRIPT.md beat 4 line flagged for cut/relabel (Finding 5.1) |
-| Root DEMO_SCRIPT.md beat 3 | "Click a SUPPRESS row" assumes a suppression exists | Conditional copy required — honest-absence branch (Finding 5.2) |
-| Root DEMO_SCRIPT.md beat 1b | Recorded fallback vs lane-3 exit-2 contract | Acceptable labeled; precedence to coordinator (Finding 5.3) |
+| DEMO_SCRIPT.md (demo/) beats 1–6 | D1/D3 implication scan | CLEAN — no change needed; triple-lock copy matches the built kernel |
+| storm_runner.py printed copy | D1/D3 implication scan | CLEAN — allowlist labeled `demo-*` |
+| DEMO_SCRIPT.md beat 1b | Fresh-minds refinement: live-first flip beat | UPDATED — live-first + labeled recorded fallback + limits beat |
+| Threshold simulator (UI lane) | Kernel mismatch (Finding 3) | HANDOFF — UI lane + coordinator decide cut/relabel |
+| Calibration cards (UI lane) | Denominators (Finding 4) | HANDOFF — contract drafted, enforcement is UI lane's |
+| Root DEMO_SCRIPT.md (sibling lane) | Audit flags (Finding 5) | FLAGGED for coordinator adjudication |
+
+*Lane 3's audit verdict: no demo copy describes D1/D3 as system
+properties. The flip beat is live-first with the fallback rehearsed.*
 | Calibration dashboard (unmerged UI) | — | Binding denominator contract issued (Finding 4); nothing to cut yet |
 
 *Auditor: Lane 3. No screen implies D1/D3 as live. The simulator is the
