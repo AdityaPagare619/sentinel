@@ -2,7 +2,9 @@
 
 **Lane:** VAULT (security lead) · Saturday wave · 2026-10-03
 **Branch:** `lane/vault-hardening`
-**Status:** DESIGN — feeds ADR-005 (proposed, **NOT decided** — Aditya decides)
+**Status:** ADR-005 **ADJUDICATED and IMPLEMENTED** — panel decision
+adopt-with-conditions ratified (PR #29), fail-closed receiver auth landed
+(PRs #38/#41). This doc is the design evidence behind that decision.
 **Builds on:** `research/security-privacy/2026-10-02-webhook-audit-precedents.md` (2026-10-02 precedent sweep)
 
 Sentinel sits in the paging path. A forged alert pages a human at 3am; a
@@ -88,9 +90,10 @@ radius. Rotation is a documented procedure, not an emergency rewrite.
 
 ## 2. Webhook verification design — evidence for ADR-005
 
-> ADR-005 is **proposed, not decided**. This section is the design evidence
-> Aditya evaluates. No implementation may claim ADR-005 compliance until
-> Aditya approves it.
+> ADR-005 is **decided and implemented** — decision text in
+> `docs/adr-decisions-2026-10-03.md` (adjudication ratified in PR #29),
+> fail-closed webhook auth landed in PRs #38/#41. This section is the
+> design evidence the implementation satisfies.
 
 ### 2.1 The contract
 
@@ -394,9 +397,9 @@ Precedent base: `research/security-privacy/2026-10-02-webhook-audit-precedents.m
 
 ## 7. Decision log linkage
 
-- Feeds **ADR-005** (webhook auth hardening checklist → receiver spec):
-  PROPOSED. Aditya decides.
-- Feeds audit-log implementation lane: schema §4.2 + verifier §4.3 are the
-  build spec once ADR-005 (and the audit ADR, if any) are approved.
+- **ADR-005** (webhook auth hardening): DECIDED (adopt-with-conditions) and
+  IMPLEMENTED (PRs #38/#41) — receiver spec in `src/sentinel/receiver.py`.
+- Feeds audit-log implementation lane: schema §4.2 + verifier §4.3 remain the
+  build spec for the audit-lane implementation.
 - BYOK posture (§3.2) is a standing product promise — no ADR needed, but
   any deviation (us ever custodied partner keys) requires a new ADR.

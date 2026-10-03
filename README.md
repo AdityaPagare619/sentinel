@@ -58,8 +58,8 @@ curl -s localhost:8080/v2/enqueue -H 'Content-Type: application/json' -d '{
 export TYPESAFE_API_KEY="ts_..."      # your TypeSafe key — never hardcode it
 export PD_ROUTING_KEY="..."           # PagerDuty integration key to relay pages to
 export SENTINEL_DB="./sentinel.db"
-# optional: SENTINEL_WEBHOOK_SECRET (HMAC for /webhook/generic),
-#           PD_EVENTS_URL, SENTINEL_SHADOW=1 (shadow mode)
+# required: SENTINEL_WEBHOOK_SECRET (≥16 chars; timestamped HMAC for /webhook/generic —
+#           startup refuses without it), PD_EVENTS_URL, SENTINEL_SHADOW=1 (shadow mode)
 PYTHONPATH=src python3 -m sentinel.receiver --port 8080
 ```
 
@@ -71,14 +71,15 @@ Then point your PagerDuty integration's Events API endpoint at `http://your-host
 | `SENTINEL_MOCK` | no | `1` = mock Jev client: full pipeline runs, every decision fails open to passthrough, no network calls |
 | `PD_ROUTING_KEY` | yes (live) | PagerDuty integration key pages are relayed to |
 | `SENTINEL_DB` | no | SQLite path (default `./sentinel.db`) |
-| `SENTINEL_WEBHOOK_SECRET` | no | HMAC-SHA256 for `POST /webhook/generic` (`X-Sentinel-Signature`) |
+| `SENTINEL_WEBHOOK_SECRET` | yes (prod) | Timestamped HMAC-SHA256 for `POST /webhook/generic`: send `X-Sentinel-Timestamp: <unix seconds>` + `X-Sentinel-Signature: sha256=<hex>` where hex = HMAC-SHA256(secret, `<ts>.<raw body>`); \|server_now − ts\| ≤ 300s. Startup refuses when unset (no fail-open default); legacy timestamp-less signatures → 403 |
+| `SENTINEL_WEBHOOK_ONBOARDING` | no | `1` = the only fail-open path: unsigned/legacy deliveries accepted loudly (per-request WARNING + `webhook_auth_bypassed` metric, CRITICAL boot warning, `/healthz` shows `webhook_auth_fail_open=true`). Onboarding migration window only — disable after sender migration |
 | `PD_EVENTS_URL` | no | Override PagerDuty endpoint (default `https://events.pagerduty.com/v2/enqueue`) |
 | `SENTINEL_SHADOW` | no | `1` = shadow mode: log dispositions, change nothing |
 
 ## Endpoints
 
 - `POST /v2/enqueue` — PagerDuty Events API v2 shape (`routing_key`, `event_action`, `payload.*`)
-- `POST /webhook/generic` — `{service, check, title, severity, labels{}, metric{}}`, optional HMAC signature
+- `POST /webhook/generic` — `{service, check, title, severity, labels{}, metric{}}`, timestamped HMAC signature **required** (see env table; unsigned/malformed/stale/legacy → 403)
 - `GET /healthz` — `{"ok": true}`
 
 ## The math (why the thresholds are what they are)
