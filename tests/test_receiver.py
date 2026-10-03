@@ -27,7 +27,9 @@ from sentinel.correlator import Correlator, fingerprint_for
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate
 from sentinel.models import Thresholds
+from sentinel.quantized import AllowlistEntry, Attestation
 from sentinel.receiver import Pipeline, ReceiverConfig, make_server
+from datetime import datetime, timedelta, timezone
 
 from tests.helpers import CaptureServer
 from tests.test_gate import ExplodingClient, canned
@@ -75,7 +77,9 @@ class ReceiverTestBase(unittest.TestCase):
         record_restart(statedir)
         self.pd = CaptureServer()
         audit = AuditLog(":memory:")
-        gate = Gate(jev_client, policy.thresholds, set(policy.allowlist),
+        # ADR-013: allowlist may be AllowlistEntry objects (with attestations)
+        # or plain fingerprint strings. Pass through as list; Gate handles both.
+        gate = Gate(jev_client, policy.thresholds, list(policy.allowlist),
                     audit, shadow=shadow)
         forwarder = Forwarder(pd_events_url=self.pd.url,
                               default_routing_key="rk-default")
@@ -202,8 +206,16 @@ class TestPdEnqueue(ReceiverTestBase):
 
 class TestSuppressEndToEnd(ReceiverTestBase):
     def test_suppress_never_reaches_pagerduty(self):
+        # ADR-013: suppression requires dual attestation (bare fingerprint no longer suppresses — M-1 fix).
         fp = fingerprint_for("web", "http_5xx", "critical", "us-east")
-        self._start(FixedClient(canned(p1=0.0, conf=0.95)), allowlist={fp})
+        now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        entry = AllowlistEntry(
+            fingerprint=fp, author="carol",
+            attestations=[
+                Attestation("alice", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+                Attestation("bob", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+            ])
+        self._start(FixedClient(canned(p1=0.0, conf=0.95)), allowlist=[entry])
         code, body = self._post("/v2/enqueue", _pd_event())
         self.assertEqual(code, 200)
         self.assertEqual(self.pd.requests, [])  # suppressed: no forward

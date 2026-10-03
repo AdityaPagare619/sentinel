@@ -23,6 +23,22 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta, timezone
+
+from .quantized import (
+    ATTESTATION_TTL_MAX_DAYS,  # noqa: F401  (re-exported for pipeline use)
+    FIT_VALID_DAYS,
+    FIT_WINDOW_DAYS,
+    GATE_FORMULA_VERSION,
+    REFERENCE_CLASS,
+    SUPPRESS_BAR,
+    TUNER_VERSION,
+    UNLABELED_FRACTION_FLAG,
+    WILSON_Z,
+    FitArtifact,
+    parse_hundredths,
+    wilson_upper_onesided,
+)
 
 CONF_GRID = (0.80, 0.85, 0.90, 0.95)
 
@@ -34,6 +50,97 @@ CONF_GRID = (0.80, 0.85, 0.90, 0.95)
 def expected_cost_threshold(c_fp: float, c_fn: float) -> float:
     """p* = C_FP / (C_FP + C_FN): suppress iff P(p1_critical) < p*."""
     return c_fp / (c_fp + c_fn)
+
+
+# ---------------------------------------------------------------------------
+# ADR-013 — the calibration fit for R(C, W, r=0.00) (design §2.2)
+# ---------------------------------------------------------------------------
+
+def _as_aware(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def fit_r000_class(rows: list[dict], *, org: str, model_pin: str,
+                   window_start: str, window_end: str, computed_at,
+                   gate_formula_version: str = GATE_FORMULA_VERSION,
+                   tuner_version: str = TUNER_VERSION,
+                   z: float = WILSON_Z) -> dict:
+    """Build the FitArtifact for R(C, W, r=0.00) from adjudicated labels.
+
+    rows: dicts with keys
+      reported_p1 : the WIRE (reported) P(p1) value — str/Decimal/float.
+                    Only rows with integer-hundredths == 0 enter the class.
+      label       : 1 (adjudicated true SEV1 — linked to a confirmed SEV1
+                    incident within the correlation window),
+                    0 (adjudicated not SEV1 — explicit recorded verdict),
+                    None (unlabeled after the label SLA).
+
+    Label discipline (denominator honesty, PM-5): unlabeled rows are
+    EXCLUDED from n and k and counted in m — never folded into n as
+    negatives. A fit with m/(n+m) > 0.20 is flagged (not failed).
+
+    Returns {"artifact", "n", "k", "m", "p_hat_upper", "bar_cleared",
+             "unlabeled_fraction", "unlabeled_flag"}. The artifact is
+    content-hash bound (fit_id set); the gate re-verifies the binding.
+    Raises ValueError when there are no labeled rows — zero evidence is an
+    error, not a fit.
+    """
+    n = k = m = 0
+    for r in rows:
+        try:
+            hundredths = parse_hundredths(r.get("reported_p1"))
+        except Exception:
+            continue  # malformed wire value: cannot enter the class
+        if hundredths != 0:
+            continue  # not a member of R(C, W, r=0.00)
+        label = r.get("label")
+        if label is None:
+            m += 1
+        elif int(label) == 1:
+            n += 1
+            k += 1
+        elif int(label) == 0:
+            n += 1
+        else:
+            raise ValueError(f"bad label value: {label!r}")
+    if n == 0:
+        raise ValueError("no labeled reported-0.00 rows: cannot build a fit")
+
+    p_hat_upper = wilson_upper_onesided(k, n, z)
+    computed_dt = _as_aware(computed_at)
+    unlabeled_fraction = m / (n + m)
+    artifact = FitArtifact(
+        fit_id="",
+        org=org,
+        reference_class=REFERENCE_CLASS,
+        window_start=str(window_start),
+        window_end=str(window_end),
+        n=n, k=k, m=m,
+        p_hat_upper=p_hat_upper,
+        z=z,
+        model_pin=model_pin,
+        gate_formula_version=gate_formula_version,
+        computed_at=computed_dt.isoformat(),
+        valid_until=(computed_dt + timedelta(days=FIT_VALID_DAYS)).isoformat(),
+        shift_status="OK",
+        tuner_version=tuner_version,
+    ).bind()
+    return {
+        "artifact": artifact,
+        "n": n,
+        "k": k,
+        "m": m,
+        "p_hat_upper": p_hat_upper,
+        "bar_cleared": bool(p_hat_upper < SUPPRESS_BAR),
+        "unlabeled_fraction": unlabeled_fraction,
+        "unlabeled_flag": bool(unlabeled_fraction > UNLABELED_FRACTION_FLAG),
+    }
 
 
 def fingerprint_stats(rows: list[dict]) -> dict[str, dict]:
