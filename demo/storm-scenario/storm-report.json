@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-10-03T15:02:38.045969+00:00",
+  "engine": "real Gate + race-to-page, B=2700ms (flip beat B=500ms)",
+  "jev": {
+    "model": [
+      "jev-1.13.0"
+    ],
+    "auth": "custom.typesafe surrogate (no raw key in process)"
+  },
+  "traffic": {
+    "synthetic": true,
+    "n": 40,
+    "seed": 42,
+    "note": "synthetic data, REAL engine \u2014 every number traces to the event log"
+  },
+  "decisions": {
+    "passthrough": 28,
+    "page_now": 14
+  },
+  "budget_outcomes": {
+    "timer_won": 1,
+    "answered_in_time": 41
+  },
+  "latency_ms": {
+    "n": 41,
+    "min": 358.41178800001217,
+    "p50": 605.0803250000172,
+    "max": 916.0107329989842
+  },
+  "suppressions": 0,
+  "flips_detected": [
+    {
+      "input_sha256": "7e09c26dcbd7469525de71ec243288f3bd4c135e45f936297c3ce3cfdecf94e0",
+      "first_seq": 3,
+      "second_seq": 4,
+      "differing_field": "q3",
+      "first_value": 0.62,
+      "second_value": 0.63
+    }
+  ],
+  "disposition_flips": 0,
+  "confidence_wobbles": 1,
+  "event_types": {
+    "decision_made": 42,
+    "shadow_decision": 1
+  },
+  "head_hash": "99e920ff9ed71cac1b97af2cc652bfff2ad563263ef181580c1ac5bc6498fefa",
+  "no_key_fallback": "none \u2014 the script exits 2 if auth is absent (no mock path)"
+}
