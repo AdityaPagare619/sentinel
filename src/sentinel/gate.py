@@ -175,7 +175,14 @@ class Gate:
                  *, fit_store: FitStore | None = None,
                  pinned_model: str | None = None,
                  org: str | None = None,
-                 clock=None):
+                 clock=None,
+                 policy_gate=None,
+                 policy_id: str = "suppression"):
+        """policy_gate: optional ADR-022/D8 enforcement hook with
+        ``can_suppress(policy_id) -> (bool, reason)``. When present and the
+        verdict is suppress, a False answer downgrades to passthrough — the
+        watchdog freeze and the B3 expired state are enforced here, on the
+        hot path, not in the UI. Never raises (fail toward the human)."""
         self.client = client
         self.thresholds = thresholds
         # Allowlist entries: ADR-017/019. Accepts a plain set of fingerprints
@@ -216,6 +223,8 @@ class Gate:
         self.pinned_model = pinned_model
         self.org = org
         self.clock = clock  # () -> aware datetime; tests inject a fixed now
+        self.policy_gate = policy_gate
+        self.policy_id = policy_id
 
     def close(self) -> None:
         """Shut down the race scheduler/pool/watchdog threads."""
@@ -397,9 +406,23 @@ class Gate:
         disp = Disposition(action=verdict.action, reason=verdict.reason,
                            team=verdict.team, confidence=verdict.confidence,
                            latency_ms=verdict.latency_ms)
+        # ADR-022/D8 enforcement: a frozen or expired suppression policy
+        # cannot suppress, no matter what the triple lock says. Fail toward
+        # the human. Never raises — an unreadable policy state is itself a
+        # reason to page, not to suppress.
+        if disp.action == "suppress" and self.policy_gate is not None:
+            try:
+                allowed, why = self.policy_gate.can_suppress(self.policy_id)
+            except Exception:  # noqa: BLE001
+                allowed, why = False, "policy_state_unreadable"
+            if not allowed:
+                disp = Disposition(action="passthrough",
+                                   reason=f"policy_blocked:{why}",
+                                   team=disp.team, confidence=disp.confidence,
+                                   latency_ms=disp.latency_ms)
         self._emit(decision_made_payload(
             alert=alert, input_sha256=in_sha,
-            disposition=verdict.action,
+            disposition=disp.action,
             budget_outcome=race.ANSWERED_IN_TIME, budget_ms=budget_ms,
             jev_model=verdict.jev_model, q1_reported=verdict.q1_reported,
             q2_team=verdict.q2_team, q3_confidence=verdict.q3_confidence,
