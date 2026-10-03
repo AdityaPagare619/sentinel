@@ -976,6 +976,38 @@ class EventLog:
         with self._lock:
             self._conn.close()
 
+    def decision_dispositions_since(self, since_seq: int,
+                                    limit: int = 5000) -> tuple[list[dict], int]:
+        """Tail decision_made dispositions for the ADR-022 watchdog.
+
+        Returns ([{seq, ts_epoch, disposition, policy_id}], max_seq).
+        policy_id defaults to "suppression" when the decision body does not
+        carry one (the engine's single suppression policy).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT seq, ts, body FROM events "
+                "WHERE type = 'decision_made' AND seq > ? "
+                "ORDER BY seq ASC LIMIT ?",
+                (since_seq, limit)).fetchall()
+        out: list[dict] = []
+        max_seq = since_seq
+        for seq, ts, body in rows:
+            max_seq = max(max_seq, seq)
+            try:
+                b = json.loads(body)
+            except ValueError:
+                continue
+            try:
+                ts_epoch = datetime.fromisoformat(
+                    ts.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                continue
+            out.append({"seq": seq, "ts_epoch": ts_epoch,
+                        "disposition": b.get("disposition"),
+                        "policy_id": b.get("policy_id", "suppression")})
+        return out, max_seq
+
 
 def _iso_age_s(ts: str, now_iso: str) -> float | None:
     """Age in seconds between two ISO-8601 timestamps. None if unparsable."""
