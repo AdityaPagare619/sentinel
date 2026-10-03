@@ -30,6 +30,7 @@ from sentinel.models import Thresholds
 from sentinel.quantized import AllowlistEntry, Attestation
 from sentinel.receiver import Pipeline, ReceiverConfig, make_server
 from datetime import datetime, timedelta, timezone
+from tests.test_gate import fresh_monitor_for
 
 from tests.helpers import CaptureServer
 from tests.test_gate import ExplodingClient, canned
@@ -85,8 +86,15 @@ class ReceiverTestBase(unittest.TestCase):
         audit = AuditLog(":memory:")
         # ADR-013: allowlist may be AllowlistEntry objects (with attestations)
         # or plain fingerprint strings. Pass through as list; Gate handles both.
+        # D1: the kernel's suppress branch requires fresh evidence — give the
+        # test gate the same freshness bundle production boots the live gate
+        # with (receiver._freshness_monitor_from_env). Freshness only gates
+        # suppress, so page-path tests are unaffected.
+        allowlist_fps = [a.fingerprint if isinstance(a, AllowlistEntry) else a
+                         for a in (allowlist or [])]
         gate = Gate(jev_client, policy.thresholds, list(allowlist_for_gate),
-                    audit, shadow=shadow)
+                    audit, shadow=shadow,
+                    freshness_monitor=fresh_monitor_for(allowlist_fps))
         forwarder = Forwarder(pd_events_url=self.pd.url,
                               default_routing_key="rk-default")
         config = ReceiverConfig(webhook_secret=webhook_secret, shadow=shadow,

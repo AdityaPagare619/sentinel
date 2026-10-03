@@ -40,7 +40,7 @@ from sentinel.shadow import (
 )
 from sentinel.state import build_state
 
-from tests.test_gate import canned
+from tests.test_gate import canned, fresh_monitor_for
 
 
 # ---------------------------------------------------------------- fixtures
@@ -437,8 +437,12 @@ class TestReadOnlyProof(unittest.TestCase):
     def _build(self, jev_client, allowlist=None):
         write_path = RefusingForwarder()
         audit = AuditLog(":memory:")
+        # D1: the shadow would-be verdict runs the live kernel, so the shadow
+        # gate sees the same freshness evidence production gives the live gate
+        # (receiver boots the monitor from SENTINEL_FRESHNESS_BUNDLE).
         gate = Gate(jev_client, Thresholds(), _attested_entries(allowlist), audit,
-                    shadow=True)
+                    shadow=True,
+                    freshness_monitor=fresh_monitor_for(list(allowlist or [])))
         pipeline = Pipeline(Correlator(), gate, write_path, audit,
                             ReceiverConfig())
         config = ShadowConfig(enabled=True, pd_secret=PD_SECRET,
