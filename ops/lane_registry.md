@@ -19,8 +19,8 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/tripwire-acceptance` | Tripwire | done (merged PR #13) | acceptance-sunday.md, fault-injection-plan.md, ci-repair.md (escalated: GitHub ghost-record platform bug) | `6c71d0e` |
 | `lane/impl-event-log` | Ledger | in flight | design 02: hash-chained event log + outbox, v0.1 migration, 4 commits | `b2e0005` |
 | `lane/impl-race` | Forge | in flight | design 01: race-to-page B=1000ms | — |
-| `lane/impl-gate` | Oracle/Tripwire | pending review (PR #15) | design 04: ADR-013 quantized probability lock, M-1 fix | `5ada371` |
-| `lane/impl-freshness` | Vault | pending review (PR #14) | design 07: C-1 freshness proofs, stale⇒page | `3803a72` |
+| `lane/impl-gate` | Oracle/Tripwire | done (merged PR #15) | design 04: ADR-013 quantized probability lock, M-1 fix; 3 cross-lane tests adopted | `5ada371`, `0cd1356` |
+| `lane/impl-freshness` | Vault | done (merged PR #14) | design 07: C-1 freshness proofs, stale⇒page | `3803a72` |
 | `lane/impl-shadow-tap` | Prism | in flight | design 06: read-only PD/Opsgenie tap + Shadow Report | — |
 | `lane/oracle-latency` | Oracle | in flight | N=100 latency campaign (measurement) | — |
 | `lane/impl-forwarder` | Pager | in flight | design 03: durable forwarder, PD dedup_key, standby | — |
