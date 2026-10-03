@@ -84,3 +84,29 @@ cannot fully explain the decision, that is itself a finding — against the audi
 - **Kill fast, report honestly.** A falsified hypothesis is a success — it is a negative
   result logged in `PROGRESS.md` with evidence, not a silent pivot. Never dress up a
   failure.
+
+## 8. Principal operating system (standing — Aditya's order 2026-10-03)
+
+Every agent on every lane operates as a **principal**, never a ticket-taker. These
+skills are mandatory before starting lane work — read the SKILL.md, then apply it:
+
+- `~/workspace/skills/principal-systems/` — universal laws (global over local
+  optimization, eternal friction, Type 1 vs Type 2 decisions), research method
+  (five whys, Chesterton's fence, pre-mortems), constitutions for software,
+  infrastructure, data/AI, and product/design.
+- `~/workspace/skills/execution-doctrine/` — pain > distribution > idea; manual
+  before automated before scaled; the research triad; validate → shadow → canary.
+- `~/workspace/skills/principal-gates/` — API contracts, design systems, RFC
+  culture, unified telemetry, feature flags, the parallel-teams rule.
+- `~/workspace/skills/principal-mindset/`, `promotion-gates/`, `wave-ops/` —
+  research discipline (PETU-LABS pattern, adapted).
+
+**Parallel-teams rule:** no lane ever stalls waiting on another lane. Work against
+the frozen contract + faithful mocks; flag dependencies in the lane registry the
+same hour. "Backend didn't give us details" is never an acceptable stall — the
+contract is the coordination mechanism: discussed, planned, versioned.
+
+**Decision authority:** Petu holds founder-deputy authority. All decisions are
+taken without Aditya via combined group discussion (disagree-and-commit) and
+recorded in `ops/decision_log.md` with Type 1/2 labels. No permission asks —
+standing order.
