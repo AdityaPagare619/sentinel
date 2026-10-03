@@ -22,9 +22,13 @@ from sentinel.correlator import CorrelationResult
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate
 from sentinel.models import Thresholds
+from sentinel.quantized import (AllowlistEntry, Attestation, FitStore,
+                                REFERENCE_CLASS, wilson_upper_onesided)
 from sentinel.state import build_state, input_sha256
 
 from tests.helpers import CaptureServer, make_alert
+
+from datetime import datetime, timedelta, timezone
 
 
 def _answer(qid, choice, probs, conf):
@@ -67,7 +71,7 @@ class GateTestBase(unittest.TestCase):
     def make_gate(self, client, allowlist=None, shadow=False):
         self.audit = AuditLog(":memory:")
         self.gate = Gate(client, Thresholds(),
-                         set(allowlist or []), self.audit, shadow=shadow)
+                         allowlist or [], self.audit, shadow=shadow)
         return self.gate
 
     def scripted_gate(self, alert, response, **kw):
@@ -78,14 +82,67 @@ class GateTestBase(unittest.TestCase):
 
 
 class TestSuppressTripleLock(GateTestBase):
+    # ADR-013: the probability leg is the quantized lock — reported P(p1)
+    # must be exactly 0.00 AND (a valid fit with p_hat_upper < 0.002 OR dual
+    # human attestation on the allowlist entry). A bare fingerprint in the
+    # allowlist no longer suppresses (that was the M-1 units error).
+
+    def _attested(self, fingerprint, author="carol"):
+        now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        return AllowlistEntry(
+            fingerprint=fingerprint, author=author,
+            attestations=[
+                Attestation("alice", now - timedelta(days=1),
+                            "lrq-9f2c-41ab", 30),
+                Attestation("bob", now - timedelta(days=1),
+                            "lrq-9f2c-41ab", 30),
+            ])
+
     def test_suppress_when_triple_lock_holds(self):
+        # New contract: suppress via the dual-attestation interim path.
         alert = make_alert()
         gate, client, state = self.scripted_gate(
-            alert, canned(p1=0.0, conf=0.95), allowlist={alert.fingerprint})
+            alert, canned(p1=0.0, conf=0.95),
+            allowlist=[self._attested(alert.fingerprint)])
         disp, rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
         self.assertEqual(disp.reason, "allowlist")
         self.assertEqual(len(client.calls), 1)
+
+    def test_suppress_via_valid_fit(self):
+        # New contract: suppress via the fit path (k=0, n=1351 clears).
+        from sentinel.quantized import FitArtifact, WILSON_Z
+        now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        art = FitArtifact(
+            fit_id="", org="org-c", reference_class=REFERENCE_CLASS,
+            window_start="2026-07-05T00:00:00+00:00",
+            window_end="2026-10-02T00:00:00+00:00",
+            n=1351, k=0, m=0,
+            p_hat_upper=wilson_upper_onesided(0, 1351), z=WILSON_Z,
+            model_pin="jev-1.13.0", gate_formula_version="adr013-v1",
+            computed_at="2026-10-02T00:00:00+00:00",
+            valid_until="2026-11-01T00:00:00+00:00",
+            shift_status="OK", tuner_version="test").bind()
+        store = FitStore()
+        store.put(art)
+        alert = make_alert()
+        state = build_state(alert, {}, {})
+        client = MockSystemOneClient(
+            {input_sha256(state): canned(p1=0.0, conf=0.95)})
+        audit = AuditLog(":memory:")
+        gate = Gate(client, Thresholds(), {alert.fingerprint}, audit,
+                    fit_store=store, pinned_model="jev-1.13.0", org="org-c",
+                    clock=lambda: now)
+        disp, _rec = gate.evaluate(alert, state, {}, {})
+        self.assertEqual(disp.action, "suppress")
+
+    def test_suppress_denied_without_fit_or_attestation(self):
+        # M-1: reported 0.00 with a bare allowlist entry must NOT suppress.
+        alert = make_alert()
+        gate, _c, state = self.scripted_gate(alert, canned(p1=0.0, conf=0.95),
+                                             allowlist={alert.fingerprint})
+        disp, _rec = gate.evaluate(alert, state, {}, {})
+        self.assertNotEqual(disp.action, "suppress")
 
     def test_suppress_denied_without_allowlist(self):
         alert = make_alert()
