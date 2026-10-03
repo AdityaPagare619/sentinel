@@ -12,7 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from sentinel.audit import AuditLog
-from sentinel.correlator import Correlator
+from sentinel.correlator import Correlator, fingerprint_for
 from sentinel.eventlog import DISPOSITIONS
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate, evaluate_policy
@@ -271,6 +271,61 @@ class TestFoldedForwarder(unittest.TestCase):
         self.assertFalse(res.forwarded)
         self.assertEqual(fw.metrics["folded"], 1)
         self.assertEqual(fw.metrics["suppressed"], 0)
+
+
+class TestShadowDigestMirror(unittest.TestCase):
+    """D3 shadow-mirror regression (Tripwire probe): the shadow tap must
+    record the digest would-be for storm-declared aggregates — never route
+    them through gate.evaluate, where the race + triple lock could record
+    'suppress' for an aggregate that production pages via digest_storm."""
+
+    def _pipeline(self):
+        from sentinel.shadow import (ShadowConfig, ShadowPipeline,
+                                      ShadowStore, VendorEvent)
+        self._VendorEvent = VendorEvent
+        audit = AuditLog(":memory:")
+        self.client = _AlwaysAnswersClient()
+        fps = [fingerprint_for(f"svc-{i}", "pagerduty.incident",
+                               "critical", "")
+               for i in range(3)]
+        gate = Gate(self.client, Thresholds(),
+                    [_attested_entry(fp) for fp in fps],
+                    audit, shadow=True)
+        corr = Correlator(storm_fingerprints=2, storm_window_s=3600)
+        config = ShadowConfig(enabled=True)
+        return ShadowPipeline(gate=gate, correlator=corr,
+                              store=ShadowStore(), config=config,
+                              allowlist=set())
+
+    def _ev(self, i):
+        return self._VendorEvent(
+            vendor="pagerduty", event_type="incident.triggered",
+            event_id=f"ev-{i}", incident_id=f"INC-{i}",
+            occurred_at="2026-10-04T00:00:00+00:00",
+            service=f"svc-{i}", title=f"storm member {i}",
+            severity_raw="critical", estate_severity="critical",
+            incident_url=None, gate_relevant=True, raw={})
+
+    def test_storm_declared_would_be_is_digest_page_not_suppress(self):
+        pipeline = self._pipeline()
+        for i in range(3):
+            disp, rec, detail = pipeline._evaluate(self._ev(i))
+            if i < 2:
+                # The setup CAN suppress: pre-storm alerts go through the
+                # gate with suppress-shaped answers and allowlisted
+                # fingerprints — so a page_now on the 3rd is the digest
+                # branch working, not the setup failing to suppress.
+                self.assertEqual(rec.disposition.action, "suppress")
+        # The storm-declaring aggregate's honest would-be is 'paged via the
+        # aggregate' — recorded (reason "shadow"), never executed.
+        self.assertEqual(rec.disposition.action, "page_now")
+        self.assertEqual(rec.disposition.reason, "shadow")
+        self.assertEqual(disp.action, "passthrough")  # recorded, not executed
+        # The digest path never consults Jev — not even in shadow.
+        self.assertEqual(len(self.client.calls), 2)
+        # No invented evidence on the digest path (honesty contract — W1).
+        self.assertEqual(detail["probs"], {})
+        self.assertIsNone(detail["conf3"])
 
 
 if __name__ == "__main__":

@@ -50,8 +50,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .correlator import Correlator, fingerprint_for
-from .models import Alert, Thresholds
-from .state import build_state
+from .models import Alert, DecisionRecord, Disposition, Thresholds
+from .state import build_state, input_sha256
+from .storm_digest import storm_digest_disposition
 
 
 # ---------------------------------------------------------------- constants
@@ -784,6 +785,14 @@ class ShadowPipeline:
         state = build_state(alert, history={}, context={})
         corr = self.correlator.ingest(alert)
         self._last_corr = corr
+        if corr.kind == "storm" and corr.storm_declared:
+            # D3: the shadow mirror takes the digest disposition too. The
+            # storm-declared aggregate's honest would-be is 'paged via the
+            # aggregate' — routing it through gate.evaluate would let the
+            # race + triple lock 'suppress' it in shadow while production
+            # pages via digest_storm. A lying mirror in the over-trust
+            # direction. Recorded, not executed.
+            return self._evaluate_storm_digest(alert, state, corr)
         disp, rec = self.gate.evaluate(alert, state, {}, {}, correlation=corr)
         # rec.disposition is the would-be verdict in shadow mode.
         self.correlator.note_disposition(alert.fingerprint, rec.disposition)
@@ -800,6 +809,54 @@ class ShadowPipeline:
                       "conf3": cached.get("conf3"),
                       "q3_choice": cached.get("q3_choice"),
                       "from_cache": True}
+        return disp, rec, detail
+
+    def _evaluate_storm_digest(self, alert: Alert, state: dict, corr):
+        """Shadow mirror of the live digest path (D3, Tripwire probe).
+
+        The live pipeline routes storm-declared aggregates to
+        ``Gate.digest_storm`` — never ``evaluate_policy`` — so suppress is
+        unreachable by construction. The shadow tap must record the same
+        would-be: ``page_now`` via digest. Recorded, not executed, mirroring
+        exactly how ``Gate.evaluate()`` wraps would-be verdicts in shadow
+        mode (would-be action kept, reason "shadow", returned disposition
+        forced to passthrough).
+
+        Deliberately disposition-only: the live digest's advisory Jev call
+        and decision_made emission are execution-side effects — the shadow
+        tap records what WOULD have been decided, nothing else.
+        """
+        would_be = storm_digest_disposition(
+            storm_size=sum(corr.storm_counts.values()),
+            storm_counts=dict(corr.storm_counts))
+        audit_disp = Disposition(
+            action=would_be.action, reason="shadow", team=would_be.team,
+            confidence=would_be.confidence, latency_ms=would_be.latency_ms)
+        disp = Disposition(
+            action="passthrough", reason="shadow", team=would_be.team,
+            confidence=would_be.confidence, latency_ms=would_be.latency_ms)
+        rec = DecisionRecord(
+            alert=alert,
+            input_sha256=input_sha256(state),
+            jev_model=None,
+            q_severity=None,
+            q_team=None,
+            q_disposition=None,
+            disposition=audit_disp,
+        )
+        try:
+            self.gate.audit.record(rec)
+        except Exception as exc:  # audit must never sink the alert
+            print(f"[sentinel] shadow audit write failed for "
+                  f"{alert.alert_id}: {exc}", file=sys.stderr)
+        # The correlator's duplicate inheritance propagates the WOULD-BE
+        # verdict, not the shell — same as the evaluate() path above.
+        self.correlator.note_disposition(alert.fingerprint, rec.disposition)
+        # No Jev answers were consulted on the digest path: the digest is
+        # deterministic. Evidence/counterfactual inputs stay empty rather
+        # than invented (honesty contract — W1).
+        detail = {"probs": {}, "conf3": None, "q3_choice": None,
+                  "from_cache": False}
         return disp, rec, detail
 
     def _fingerprint_of(self, ev: VendorEvent) -> str:
