@@ -26,7 +26,7 @@ from sentinel.shadow_report import (generate_shadow_report,
                                     render_report_markdown,
                                     zero_sev12_divergence_bar)
 
-from tests.test_gate import canned
+from tests.test_gate import canned, fresh_monitor_for
 from tests.test_shadow import (PD_SECRET, ScriptedClient, _attested_entries,
                                _pd_sig, _pd_v3)
 
@@ -34,8 +34,11 @@ from tests.test_shadow import (PD_SECRET, ScriptedClient, _attested_entries,
 def _build_pipeline(by_title, allowlist):
     audit = AuditLog(":memory:")
     client = ScriptedClient(by_title, default=canned(p1=0.9, conf=0.95))
+    # D1: the shadow would-be verdict runs the live kernel — give the shadow
+    # gate the same freshness evidence production gives the live gate.
     gate = Gate(client, Thresholds(), _attested_entries(allowlist), audit,
-                shadow=True)
+                shadow=True,
+                freshness_monitor=fresh_monitor_for(list(allowlist)))
     config = ShadowConfig(enabled=True, pd_secret=PD_SECRET)
     return ShadowPipeline(gate=gate, correlator=Correlator(),
                           store=ShadowStore(), config=config,

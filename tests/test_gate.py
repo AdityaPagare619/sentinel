@@ -68,10 +68,12 @@ class ExplodingClient:
 
 
 class GateTestBase(unittest.TestCase):
-    def make_gate(self, client, allowlist=None, shadow=False):
+    def make_gate(self, client, allowlist=None, shadow=False,
+                  freshness_monitor=None):
         self.audit = AuditLog(":memory:")
         self.gate = Gate(client, Thresholds(),
-                         allowlist or [], self.audit, shadow=shadow)
+                         allowlist or [], self.audit, shadow=shadow,
+                         freshness_monitor=freshness_monitor)
         return self.gate
 
     def scripted_gate(self, alert, response, **kw):
@@ -79,6 +81,35 @@ class GateTestBase(unittest.TestCase):
         client = MockSystemOneClient({input_sha256(state): response})
         gate = self.make_gate(client, **kw)
         return gate, client, state
+
+
+def fresh_monitor_for(fingerprints, **bundle_kw):
+    """Boot a V1-validated all-fresh bundle covering ``fingerprints``.
+
+    D1: suppress requires a FreshnessReport — tests that expect the
+    suppress path must wire one (the production receiver boots it from
+    SENTINEL_FRESHNESS_BUNDLE).
+    """
+    import tempfile
+    from sentinel.correlator import fingerprint_for
+    from sentinel.freshness import FreshnessMonitor, FreshnessValidator
+    from tests.freshness_fixtures import (
+        LABEL_PIPELINE, FixtureClock, build_bundle, make_allowlist_entry,
+    )
+    tmp = tempfile.mkdtemp(prefix="sentinel-fresh-")
+    build_bundle(
+        tmp,
+        entries=[(fp, "prod", make_allowlist_entry(fp))
+                 for fp in fingerprints],
+        **bundle_kw)
+    validator = FreshnessValidator(
+        clock=FixtureClock(),
+        deployed_label_pipeline_version=LABEL_PIPELINE)
+    mon = FreshnessMonitor(validator, tmp)
+    mon.boot()
+    assert mon.current_report().stale_locks() == [], \
+        "test bundle must validate all-fresh"
+    return mon
 
 
 class TestSuppressTripleLock(GateTestBase):
@@ -103,7 +134,8 @@ class TestSuppressTripleLock(GateTestBase):
         alert = make_alert()
         gate, client, state = self.scripted_gate(
             alert, canned(p1=0.0, conf=0.95),
-            allowlist=[self._attested(alert.fingerprint)])
+            allowlist=[self._attested(alert.fingerprint)],
+            freshness_monitor=fresh_monitor_for([alert.fingerprint]))
         disp, rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
         self.assertEqual(disp.reason, "allowlist")
@@ -132,7 +164,9 @@ class TestSuppressTripleLock(GateTestBase):
         audit = AuditLog(":memory:")
         gate = Gate(client, Thresholds(), {alert.fingerprint}, audit,
                     fit_store=store, pinned_model="jev-1.13.0", org="org-c",
-                    clock=lambda: now)
+                    clock=lambda: now,
+                    freshness_monitor=fresh_monitor_for(
+                        [alert.fingerprint]))
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
 
@@ -343,7 +377,10 @@ class TestDeterministicPaths(GateTestBase):
         self.assertEqual(disp.reason, "change_window")
         self.assertEqual(len(client.calls), 0)
 
-    def test_storm_continuation_suppresses_without_jev(self):
+    def test_storm_continuation_folds_without_jev(self):
+        # D3: storm-continuation is FOLDED into the aggregate page — not
+        # suppressed. action="suppress" here used to read as model-driven
+        # suppression to a 3 AM operator.
         alert = make_alert()
         client = MockSystemOneClient({})
         gate = self.make_gate(client)
@@ -351,7 +388,7 @@ class TestDeterministicPaths(GateTestBase):
                                  storm_declared=False)
         disp, _rec = gate.evaluate(alert, build_state(alert, {}, {}), {}, {},
                                    correlation=corr)
-        self.assertEqual(disp.action, "suppress")
+        self.assertEqual(disp.action, "folded")
         self.assertEqual(disp.reason, "storm")
         self.assertEqual(len(client.calls), 0)
 
@@ -380,16 +417,23 @@ class TestShadowMode(GateTestBase):
 
 class TestAuditAlwaysWritten(GateTestBase):
     def test_row_written_for_every_policy_outcome(self):
+        from sentinel.correlator import fingerprint_for
         cases = [
             canned(p1=0.0, conf=0.95),                       # suppress (allowlisted)
             canned(p1=0.5, conf=0.9),                        # page_now
             canned(p1=0.0, p3=0.7, p4=0.3, conf=0.8),        # business hours
             canned(p1=0.0, p3=0.7, p4=0.3, conf=0.6),        # passthrough
         ]
+        # D1: the suppress case needs a fresh report; the other cases page
+        # regardless of freshness.
+        fps = [fingerprint_for(f"svc{i}", "http_5xx", "critical", "us-east")
+               for i in range(len(cases))]
+        monitor = fresh_monitor_for(fps)
         for i, resp in enumerate(cases):
             alert = make_alert(alert_id=f"row{i}", service=f"svc{i}")
             gate, _c, state = self.scripted_gate(
-                alert, resp, allowlist={alert.fingerprint})
+                alert, resp, allowlist={alert.fingerprint},
+                freshness_monitor=monitor)
             _disp, _rec = gate.evaluate(alert, state, {}, {})
             rows = self.audit.decisions_for_fingerprint(alert.fingerprint)
             self.assertEqual(len(rows), 1, f"no audit row for case {i}")

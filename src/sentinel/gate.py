@@ -2,20 +2,34 @@
 
 Policy table (frozen §4), evaluated in order:
   suppress            P(p1_critical) < 0.002 AND Q3 conf >= 0.90 AND fp in allowlist
+                      AND every freshness proof fresh (ADR-014/D1 — stale ⇒ page_now)
   page_now            P(p1)+P(p2) > 0.30 OR Q3 conf < 0.50 (uncertainty pages)
   page_business_hours P(p3)+P(p4) dominant AND Q3 conf >= 0.70
   passthrough         client error/timeout, Q3 = cannot_determine, else uncertain
+
+ADR-014 freshness (D1): the suppress conjunction carries freshness legs
+evaluated from the cached FreshnessReport (two-point discipline — V1 boot
++ V2 heartbeat; the gate reads O(1) cached booleans, never validates on
+the hot path). Stale evidence vetoes suppression: the alert pages NOW
+with reason ``freshness:<stale legs>``. Without a wired monitor the legs
+fail closed — suppress is unreachable. Never silently approximated.
 
 Race-to-page (ADR-010, design/fixes/01-race-to-page.md): the Jev call never
 blocks the page. It races budget B on the inference pool; the timer's
 default action is passthrough (deterministic, not model output); a late
 answer becomes a ``shadow_decision`` payload via the late-answer hook —
-it never pages, never suppresses. The ONLY Jev-call site is the pool
-submission inside ``RaceRunner.run``.
+it never pages, never suppresses. The ONLY Jev-call sites are the pool
+submissions inside ``RaceRunner.run`` (the race — gates the disposition)
+and ``RaceRunner.submit_advisory`` (detached advisory for the storm
+digest — never gates anything).
 
 Deterministic pre-Jev paths arrive via the optional `correlation` kwarg
 (dup/change_window/storm-continuation from the Correlator) and never call
 Jev — they emit ``structural_passthrough`` decision payloads.
+
+Storm aggregates take ``digest_storm`` (D3, ADR-016) — a separate code
+path, not a flag: it never calls the policy kernel, never arms a race,
+and cannot suppress by construction (see sentinel.storm_digest).
 
 The gate EMITS decision payloads (decision_made per decision,
 shadow_decision for late answers); it does NOT write events — the
@@ -38,12 +52,16 @@ import time
 
 from . import race
 from .client import JevError
+from .freshness import (LOCK1_CALIBRATION, lock1_fallback_offered,
+                        suppress_precondition)
 from .models import Alert, DecisionRecord, Disposition, Thresholds
 from .questions import build_questions
 from .quantized import (AllowlistEntry, FitStore, leg1_prob_lock)
 from .race_payloads import (decision_made_payload, empty_lock_evaluation,
                             lock_evaluation, shadow_decision_payload)
 from .state import input_sha256
+from .storm_digest import (storm_digest_disposition, storm_root_cause_payload,
+                           storm_root_cause_questions)
 
 # Frozen contract: evaluate(self, alert, state, history, context).
 # `correlation` is an optional extension (defaults None) carrying the
@@ -94,12 +112,29 @@ class PolicyVerdict:
 
 def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
                     thresholds: Thresholds, allowlist: set,
-                    latency_ms: float, prob_lock_pass: bool = False) -> PolicyVerdict:
+                    latency_ms: float, prob_lock_pass: bool = False,
+                    freshness_report=None,
+                    lock1_dual_attested: bool = False) -> PolicyVerdict:
     """The pure policy kernel — the frozen §4 table, no I/O, no clocks.
 
     Shared by the live gate AND the race's late-answer path (one kernel,
     not a copy — ADR-010 §4.2: ``shadow_disposition`` is what the gate
     *would* have decided had the answer arrived in time).
+
+    ADR-014: the freshness legs are part of the suppress conjunction.
+    ``freshness_report`` is the cached FreshnessReport (two-point
+    discipline — O(1) read, no validation on the hot path). A stale proof
+    vetoes suppression: the severity/confidence evidence is distrusted
+    wholesale, so the alert pages NOW (``page_now``, reason
+    ``freshness:<stale legs>``) rather than queuing on distrusted
+    evidence — uncertainty pages (Law 7). No report ⇒ the legs fail
+    closed: suppress is unreachable without proven freshness, never
+    silently approximated.
+
+    ``lock1_dual_attested``: the lock-1 interim path (synthesis §3.1) — a
+    stale calibration leg may be satisfied by dual human attestation.
+    Locks 2 and 3 offer no interim path. The flag is explicit operator
+    evidence carried on the decision context, never a default.
 
     Raises JevError on malformed answers (uncertainty pages — Law 7).
     """
@@ -117,9 +152,7 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
     t = thresholds
 
     # Per-lock verdicts, evaluated at answer time. The detail strings say
-    # exactly what was checked: attestation freshness is NOT enforced yet
-    # (ADR-014 — the freshness lane owns it), so the allowlist leg never
-    # silently approximates it.
+    # exactly what was checked.
     # ADR-013: quantized lock replaces the naive p1 threshold.
     prob_pass = prob_lock_pass
     conf_pass = conf3 is not None and conf3 >= t.suppress_conf_min
@@ -133,14 +166,23 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
         f"{'>=' if conf_pass else '<'} suppress_conf_min={t.suppress_conf_min}",
         allow_pass,
         ("fingerprint in allowlist" if allow_pass
-         else "fingerprint NOT in allowlist")
-        + "; attestation freshness not yet enforced (ADR-014/freshness lane)",
+         else "fingerprint NOT in allowlist"),
     )
+
+    # ADR-014: freshness legs of the suppress conjunction. Every stale leg
+    # is named in the veto reason (rot-matrix row 5: the operator sees the
+    # full rot, not the first failure).
+    fresh_ok, fresh_reasons = _freshness_legs(
+        freshness_report, alert.fingerprint, lock1_dual_attested)
 
     if q3.choice == "cannot_determine":
         action, reason = "passthrough", "uncertain"
     elif prob_pass and conf_pass and allow_pass:
-        action, reason = "suppress", "allowlist"          # triple lock
+        if fresh_ok:
+            action, reason = "suppress", "allowlist"          # triple lock
+        else:
+            action, reason = ("page_now",
+                              "freshness:" + "|".join(fresh_reasons))
     elif (p1 + p2 > t.page_p1p2_min
           or conf3 is None or conf3 < t.uncertain_conf_max):
         action, reason = "page_now", "threshold"          # uncertainty pages
@@ -157,6 +199,32 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
         q3_confidence=conf3,
         q3_disposition=q3.choice,
     )
+
+
+def _freshness_legs(report, fingerprint: str | None,
+                    lock1_dual_attested: bool) -> tuple[bool, list[str]]:
+    """Freshness legs of the suppress conjunction (ADR-014, D1).
+
+    Returns (ok, reasons). No report ⇒ not ok: suppress requires PROVEN
+    freshness — a missing report must never silently approximate fresh
+    (fail closed). Lock 1's stale leg may be satisfied through the
+    dual-attestation interim path (synthesis §3.1); locks 2 and 3 have no
+    interim path.
+    """
+    if report is None:
+        return False, ["no freshness evidence: suppress requires a "
+                       "FreshnessReport (ADR-014) — without one the proofs "
+                       "cannot be verified"]
+    ok, reasons = suppress_precondition(report, fingerprint)
+    if ok:
+        return True, []
+    l1 = report.locks.get(LOCK1_CALIBRATION)
+    if (l1 is not None and not l1.fresh and lock1_dual_attested
+            and lock1_fallback_offered(report)):
+        # The interim path satisfies the probability leg: drop lock 1's
+        # stale reason. Any other stale leg still vetoes.
+        reasons = [r for r in reasons if r != l1.reason]
+    return (len(reasons) == 0), reasons
 
 
 def _default_watchdog_page(rate: float, n: int) -> None:
@@ -177,7 +245,8 @@ class Gate:
                  org: str | None = None,
                  clock=None,
                  policy_gate=None,
-                 policy_id: str = "suppression"):
+                 policy_id: str = "suppression",
+                 freshness_monitor=None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
@@ -225,6 +294,11 @@ class Gate:
         self.clock = clock  # () -> aware datetime; tests inject a fixed now
         self.policy_gate = policy_gate
         self.policy_id = policy_id
+        # ADR-014 (D1): the V1/V2 FreshnessMonitor whose cached report the
+        # kernel reads per-alert (two-point discipline — O(1), no
+        # validation on the hot path). None ⇒ the freshness legs fail
+        # closed and suppress is unreachable.
+        self.freshness_monitor = freshness_monitor
 
     def close(self) -> None:
         """Shut down the race scheduler/pool/watchdog threads."""
@@ -274,6 +348,73 @@ class Gate:
                   file=sys.stderr)
         return disp, rec
 
+    def digest_storm(self, agg: Alert, agg_state: dict, *, storm_size: int,
+                     storm_counts: dict) -> tuple:
+        """Deterministic digest for a storm-declared aggregate (D3).
+
+        A SEPARATE CODE PATH from evaluate(), not a flag: this method
+        never calls evaluate_policy, never arms a race, never consults
+        freshness or the allowlist. ``suppress`` is unreachable BY
+        CONSTRUCTION — storm_digest_disposition takes no action parameter.
+
+        The aggregate's Jev call runs detached as an advisory (root-cause
+        candidates for the digest page); its answer feeds the
+        ``storm_root_cause_payload`` advisory event and never gates the
+        disposition. Never raises: the company-ending bug is dropping the
+        storm page.
+        """
+        t0 = time.perf_counter()
+        try:
+            disp = storm_digest_disposition(storm_size=storm_size,
+                                            storm_counts=storm_counts)
+            self._emit(decision_made_payload(
+                alert=agg, input_sha256=input_sha256(agg_state),
+                disposition=disp.action,  # always "page_now"
+                budget_outcome=race.STRUCTURAL_PASSTHROUGH,
+                budget_ms=self._runner.config.budget_ms,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                lock_evaluation=empty_lock_evaluation()))
+            # Advisory root-cause call: detached, best-effort, never gates.
+            submitted = self._runner.submit_advisory(
+                state=agg_state,
+                questions=storm_root_cause_questions(),
+                on_answer=lambda resp: self._on_storm_root_cause(
+                    agg, storm_size, storm_counts, resp))
+            if not submitted:
+                print("[sentinel] storm advisory shed (pool full); "
+                      "digest page unaffected", file=sys.stderr)
+        except Exception as exc:  # fail open — never drop the storm page
+            code = _error_code(exc)
+            latency = (time.perf_counter() - t0) * 1000.0
+            disp = Disposition(action="passthrough", reason=f"error:{code}",
+                               team=None, confidence=None, latency_ms=latency)
+
+        rec = DecisionRecord(
+            alert=agg,
+            input_sha256=input_sha256(agg_state),
+            jev_model=None,
+            q_severity=None,
+            q_team=None,
+            q_disposition=None,
+            disposition=disp,
+        )
+        try:
+            self.audit.record(rec)
+        except Exception as exc:  # audit must never sink the alert
+            print(f"[sentinel] audit write failed for {agg.alert_id}: {exc}",
+                  file=sys.stderr)
+        return disp, rec
+
+    def _on_storm_root_cause(self, agg, storm_size, storm_counts, resp):
+        """Advisory answer handler: emit enrichment, touch no disposition."""
+        answers = (resp.answers or {}) if resp is not None else {}
+        self._emit(storm_root_cause_payload(
+            alert=agg, storm_size=storm_size, storm_counts=storm_counts,
+            jev_model=getattr(resp, "model", None),
+            severity_answer=answers.get("severity"),
+            team_answer=answers.get("owning_team"),
+            latency_ms=getattr(resp, "latency_ms", None)))
+
     # -------------------------------------------------------------- internals
 
     def _emit(self, payload: dict) -> None:
@@ -305,8 +446,10 @@ class Gate:
                                 confidence=None, latency_ms=0.0),
                     _empty_answers())
         if kind == "storm" and not getattr(correlation, "storm_declared", False):
-            # Folded into the aggregate page: no individual forward.
-            return (Disposition(action="suppress", reason="storm", team=None,
+            # Folded into the aggregate page: no individual forward. This is
+            # NOT suppression — action "folded" (D3), so a 3 AM operator never
+            # reads it as model-driven suppression.
+            return (Disposition(action="folded", reason="storm", team=None,
                                 confidence=None, latency_ms=0.0),
                     _empty_answers())
         return None
@@ -328,6 +471,26 @@ class Gate:
         except Exception:
             return False
         return ok
+
+    def _freshness_report(self):
+        """Per-alert read of the cached FreshnessReport (two-point
+        discipline: a pure attribute read — no validation, no clock, no
+        I/O; this is the whole point).
+
+        Returns None when no monitor is wired OR the monitor cannot serve
+        (never booted). The kernel fails the freshness legs closed on None,
+        so suppress is unreachable — the failure mode is noisy paging,
+        never silence, never a crash.
+        """
+        mon = self.freshness_monitor
+        if mon is None:
+            return None
+        try:
+            return mon.current_report()
+        except Exception as exc:
+            print(f"[sentinel] freshness monitor unreadable ({exc}) — "
+                  f"suppress unreachable until it serves", file=sys.stderr)
+            return None
 
     def _decide(self, alert, state, history, context, correlation):
         in_sha = input_sha256(state)
@@ -353,10 +516,11 @@ class Gate:
                                    questions=questions, input_sha256=in_sha)
 
         if outcome.winner == race.CLAIMED_BY_INFERENCE:
-            return self._on_answered(alert, in_sha, outcome, budget_ms)
+            return self._on_answered(alert, in_sha, outcome, budget_ms,
+                                     context)
         return self._on_timer_won(alert, in_sha, outcome, budget_ms)
 
-    def _on_answered(self, alert, in_sha, outcome, budget_ms):
+    def _on_answered(self, alert, in_sha, outcome, budget_ms, context):
         """Inference won the race: run S3–S6 through the shared kernel."""
         res = outcome.result
         if res is None or not res.ok:
@@ -381,13 +545,19 @@ class Gate:
         q_disp = answers.get("disposition")
         try:
             # ADR-013: compute quantized lock before policy evaluation.
+            # ADR-014 (D1): the cached freshness report gates the suppress
+            # conjunction; the lock-1 interim flag is explicit operator
+            # evidence carried on the decision context.
             _probs = (q_sev.probabilities or {}) if q_sev else {}
             _lock = self._leg1_prob_lock(_probs.get("p1_critical"), alert, {})
             verdict = evaluate_policy(
                 alert, jev_model=getattr(resp, "model", None),
                 q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
                 thresholds=self.thresholds, allowlist=self.allowlist,
-                latency_ms=res.latency_ms, prob_lock_pass=_lock)
+                latency_ms=res.latency_ms, prob_lock_pass=_lock,
+                freshness_report=self._freshness_report(),
+                lock1_dual_attested=bool(
+                    (context or {}).get("lock1_dual_attested", False)))
         except JevError as exc:
             # S3 — malformed/untrustworthy answer: uncertainty pages.
             disp = Disposition(action="passthrough",
@@ -477,13 +647,21 @@ class Gate:
             try:
                 # The SAME pure policy kernel the live gate uses — not a
                 # copy (design §4.2). ADR-013: quantized lock for shadow too.
+                # ADR-014 (D1): the same cached freshness report, so the
+                # counterfactual answers what the gate *would* have decided
+                # with the proofs live at decision time. The lock-1 interim
+                # cannot apply here: the live decision already went to
+                # passthrough (the timer won), so there is no interim
+                # attestation in play — passing False is the honest input.
                 _probs2 = (q_sev.probabilities or {}) if q_sev else {}
                 _lock2 = self._leg1_prob_lock(_probs2.get("p1_critical"), alert, {})
                 verdict = evaluate_policy(
                     alert, jev_model=jev_model,
                     q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
                     thresholds=self.thresholds, allowlist=self.allowlist,
-                    latency_ms=late.latency_ms, prob_lock_pass=_lock2)
+                    latency_ms=late.latency_ms, prob_lock_pass=_lock2,
+                    freshness_report=self._freshness_report(),
+                    lock1_dual_attested=False)
             except JevError:
                 # Malformed late answer: still vendor evidence — q-fields
                 # null, error_class set; never acts.

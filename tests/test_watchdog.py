@@ -27,9 +27,16 @@ from sentinel.audit import AuditLog
 from sentinel.client import MockSystemOneClient
 from sentinel.gate import Gate
 from sentinel.models import Thresholds
+from sentinel.freshness import FreshnessMonitor, FreshnessValidator
 from sentinel.quantized import AllowlistEntry, Attestation
 from sentinel.state import build_state, input_sha256
 
+from tests.freshness_fixtures import (
+    LABEL_PIPELINE,
+    FixtureClock,
+    build_bundle,
+    make_allowlist_entry,
+)
 from tests.helpers import make_alert
 from tests.test_gate import _answer, canned
 
@@ -409,8 +416,22 @@ class GatePolicyHookTest(unittest.TestCase):
         client = MockSystemOneClient(
             {input_sha256(state): canned(p1=0.0, conf=0.95)})
         audit = AuditLog(":memory:")
+        # D1: suppress is unreachable without a freshness monitor (fail
+        # closed). These tests target the policy-gate hook, so they run
+        # against an all-fresh bundle — the freshness legs are not the
+        # variable under test here.
+        bundle_dir = build_bundle(
+            tempfile.mkdtemp(prefix="sentinel-wd-"),
+            entries=[(alert.fingerprint, "prod",
+                      make_allowlist_entry(alert.fingerprint))])
+        validator = FreshnessValidator(
+            clock=FixtureClock(),
+            deployed_label_pipeline_version=LABEL_PIPELINE)
+        monitor = FreshnessMonitor(validator, bundle_dir)
+        monitor.boot()
         return Gate(client, Thresholds(), [entry], audit,
-                    policy_gate=policy_gate), alert, state
+                    policy_gate=policy_gate,
+                    freshness_monitor=monitor), alert, state
 
     def test_suppress_flows_when_policy_allows(self):
         gate, alert, state = self._suppressing_gate(

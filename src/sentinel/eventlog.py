@@ -64,6 +64,9 @@ ACTORS = frozenset({
 
 DISPOSITIONS = frozenset({
     "passthrough", "page_now", "page_business_hours", "suppress",
+    # D3: "folded" — storm-continuation absorbed into the aggregate page.
+    # Not suppression: no model decided anything about this alert.
+    "folded",
 })
 
 PAGE_DISPOSITIONS = frozenset({"page_now", "page_business_hours", "passthrough"})
@@ -938,6 +941,11 @@ class EventLog:
                 state["status"] = ("passthrough_unconfirmed"
                                    if obid and not is_confirmed
                                    else "passthrough_decided")
+            elif disp == "folded":
+                # D3: absorbed into the storm aggregate's page — neither
+                # suppressed nor individually paged. Explicit status so the
+                # river never misreads it as a pending decision.
+                state["status"] = "folded_into_aggregate"
             if failed and not is_confirmed and disp in PAGE_DISPOSITIONS:
                 state["detail"]["last_forward_error"] = json.loads(
                     failed[-1]["body"]).get("error_detail")

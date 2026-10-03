@@ -21,6 +21,10 @@ Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1),
       Stage-0 shadow tap (design 06): SENTINEL_SHADOW_TAP (0/1),
       SENTINEL_SHADOW_PD_SECRET, SENTINEL_SHADOW_OG_TOKEN,
       SENTINEL_SHADOW_AM_TOKEN, SENTINEL_SHADOW_WRITE_CREDENTIALS (must stay empty).
+      Freshness proofs (ADR-014, D1): SENTINEL_FRESHNESS_BUNDLE (config bundle
+      dir — without it suppress is unreachable, fail closed),
+      SENTINEL_LABEL_PIPELINE_VERSION (deployed outcomes-pipeline version
+      the calibration fit is checked against).
 
 Webhook auth contract (ADR-005, adjudicated 2026-10-03):
   X-Sentinel-Timestamp: <unix seconds>
@@ -211,12 +215,18 @@ class Pipeline:
 
         if corr.kind == "storm" and corr.storm_declared:
             # Single aggregate request: page once for the whole storm.
+            # D3: the aggregate takes the deterministic digest path — it
+            # never enters the race or the triple lock, so suppress is
+            # unreachable by construction. The forward is unconditional:
+            # the digest pages, always.
             self.metrics["storms"] += 1
             agg = _aggregate_alert(corr, alert)
             agg_state = build_state(agg, history={}, context={})
-            disp, _rec = self.gate.evaluate(agg, agg_state, {}, {})
-            if disp.action != "suppress":
-                self.note_forward(self.forwarder.forward(agg, disp))
+            disp, _rec = self.gate.digest_storm(
+                agg, agg_state,
+                storm_size=sum(corr.storm_counts.values()),
+                storm_counts=dict(corr.storm_counts))
+            self.note_forward(self.forwarder.forward(agg, disp))
             self.correlator.note_disposition(agg.fingerprint, disp)
             return disp.action
 
@@ -230,7 +240,9 @@ class Pipeline:
                                         correlation=corr)
         self.metrics["triaged"] += 1
         self.correlator.note_disposition(alert.fingerprint, disp)
-        if disp.action != "suppress":
+        # D3: "folded" (storm-continuation absorbed into the aggregate page)
+        # is not forwarded either — it is not suppression, it is absorption.
+        if disp.action not in ("suppress", "folded"):
             self.note_forward(
                 self.forwarder.forward(alert, disp, raw_bytes=raw_bytes))
         return disp.action
@@ -669,6 +681,46 @@ def _as_int(value):
 # ------------------------------------------------------------------ entrypoint
 
 
+def _freshness_monitor_from_env():
+    """Boot the V1 freshness validator from SENTINEL_FRESHNESS_BUNDLE.
+
+    ADR-014 (D1): the live gate reads the monitor's cached FreshnessReport
+    per-alert (two-point discipline). Unset bundle ⇒ loud warning and NO
+    monitor: suppress is unreachable and everything the value locks would
+    suppress pages instead (fail closed). Corrupt bundle (manifest
+    failure) ⇒ CRITICAL log and boot WITHOUT the monitor: the failure
+    mode is noisy paging, never silence, never a crash (rot-matrix row 8).
+    """
+    from .freshness import FreshnessMonitor, FreshnessValidator, ManifestError
+    bundle_dir = os.environ.get("SENTINEL_FRESHNESS_BUNDLE")
+    if not bundle_dir:
+        sys.stderr.write(
+            "[sentinel] WARNING: SENTINEL_FRESHNESS_BUNDLE is not set — no "
+            "freshness proofs are served; suppress is UNREACHABLE and every "
+            "alert the value locks would suppress pages instead. Set "
+            "SENTINEL_FRESHNESS_BUNDLE to the config bundle directory to "
+            "enable suppression (ADR-014).\n")
+        return None
+    validator = FreshnessValidator(
+        deployed_label_pipeline_version=os.environ.get(
+            "SENTINEL_LABEL_PIPELINE_VERSION", ""))
+    mon = FreshnessMonitor(validator, bundle_dir)
+    try:
+        mon.boot()
+    except ManifestError as exc:
+        sys.stderr.write(
+            f"[sentinel] CRITICAL: freshness bundle manifest invalid "
+            f"({exc}) — booting WITHOUT freshness proofs; suppress is "
+            f"UNREACHABLE until the bundle is repaired.\n")
+        return None
+    stale = mon.current_report().stale_locks()
+    if stale:
+        sys.stderr.write(
+            f"[sentinel] WARNING: freshness bundle boots with stale locks "
+            f"{stale} — affected alerts page until re-attested (ADR-014).\n")
+    return mon
+
+
 def build_pipeline_from_env(policy=None,
                             config_loader: ConfigLoader | None = None,
                             state_dir: str | None = None) -> Pipeline:
@@ -732,8 +784,10 @@ def build_pipeline_from_env(policy=None,
     # fail-closed to passthrough.
     policy_gate = PolicyGate(os.environ.get("SENTINEL_POLICY_STATE",
                                              "./policy-state.json"))
+    freshness_monitor = _freshness_monitor_from_env()
     gate = Gate(client, policy.thresholds, set(policy.allowlist), audit,
-                shadow=shadow, policy_gate=policy_gate)
+                shadow=shadow, policy_gate=policy_gate,
+                freshness_monitor=freshness_monitor)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
@@ -752,17 +806,24 @@ def build_pipeline_from_env(policy=None,
     # the fail-closed gate above already refused to boot without one.
     pipeline.shadow_pipeline = build_shadow_pipeline_from_env(
         client=client, thresholds=policy.thresholds,
-        allowlist=policy.allowlist, audit=audit)
+        allowlist=policy.allowlist, audit=audit,
+        freshness_monitor=freshness_monitor)
     return pipeline
 
 
 def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
-                                   audit) -> ShadowPipeline | None:
+                                   audit, freshness_monitor=None
+                                   ) -> ShadowPipeline | None:
     """Stage-0 read-only tap (design 06 §a). None unless SENTINEL_SHADOW_TAP=1.
 
     The shadow gate runs in shadow mode (verdicts recorded, never
     executed). Refuses to boot when SENTINEL_SHADOW_WRITE_CREDENTIALS is
     non-empty — the tap may not hold write credentials (design 06 §a.4).
+
+    D1: the shadow gate's would-be verdicts run the live kernel, so it
+    takes the same freshness monitor as the live gate — a shadow that
+    evaluates suppress against different evidence than production is a
+    lying mirror.
     """
     config = shadow_config_from_env()
     if config is None:
@@ -770,7 +831,7 @@ def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
     # B2: the shadow gate consults the same enforcement file — shadow
     # would-be verdicts evaluate identical policy state to production.
     shadow_gate = Gate(client, thresholds, set(allowlist or []), audit,
-                       shadow=True,
+                       shadow=True, freshness_monitor=freshness_monitor,
                        policy_gate=PolicyGate(os.environ.get(
                            "SENTINEL_POLICY_STATE", "./policy-state.json")))
     return ShadowPipeline(gate=shadow_gate, correlator=Correlator(),
