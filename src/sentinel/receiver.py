@@ -18,11 +18,14 @@ Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1), SENTINEL_WEBHOOK_SECR
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import hmac
 import json
 import os
+import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,13 +34,16 @@ from urllib.parse import urlsplit
 
 from .audit import AuditLog
 from .client import SystemOneClient, MockSystemOneClient, client_from_env
+from .config import ConfigLoader, ConfigRejected, record_restart
 from .correlator import Correlator, fingerprint_for, fingerprint_of
 from .forwarder import Forwarder
 from .gate import Gate
+from .health import HealthMonitor
 from .models import Alert, Thresholds
 from .state import build_state
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_INFLIGHT = 64  # alert-ingress admission bound (503, never 429)
 
 
 class Unparseable(Exception):
@@ -57,12 +63,21 @@ class Pipeline:
 
     def __init__(self, correlator: Correlator, gate: Gate,
                  forwarder: Forwarder, audit: AuditLog,
-                 config: ReceiverConfig | None = None):
+                 config: ReceiverConfig | None = None,
+                 policy=None, config_loader: ConfigLoader | None = None,
+                 state_dir: str | None = None):
         self.correlator = correlator
         self.gate = gate
         self.forwarder = forwarder
         self.audit = audit
         self.config = config or ReceiverConfig()
+        # Live validated policy (design 05, §4). None only for ad-hoc
+        # constructions that never serve traffic (unit tests); the real
+        # entrypoint always supplies one — see build_pipeline_from_env.
+        self.policy = policy
+        self.config_loader = config_loader
+        self.state_dir = (state_dir or os.environ.get("SENTINEL_STATE_DIR")
+                          or "./sentinel-state")
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -70,7 +85,34 @@ class Pipeline:
             "storms": 0,
             "change_window": 0,
             "unparseable": 0,
+            "handler_panics": 0,
         }
+        # (timestamp, failed) per forward attempt; feeds the
+        # forwarder_draining health predicate (design §1.2.3).
+        self.forward_outcomes: collections.deque = collections.deque(maxlen=1000)
+        self._health: HealthMonitor | None = None
+        self._health_lock = threading.Lock()
+
+    # ------------------------------------------------------------------ health
+
+    @property
+    def health(self) -> HealthMonitor:
+        """Lazily-created HealthMonitor (no threads until start())."""
+        with self._health_lock:
+            if self._health is None:
+                self._health = HealthMonitor(self, state_dir=self.state_dir)
+            return self._health
+
+    def note_forward(self, result) -> None:
+        """Record one forward attempt's outcome for the health predicates."""
+        failed = result is not None and result.error is not None
+        self.forward_outcomes.append((time.time(), failed))
+
+    def apply_policy(self, policy) -> None:
+        """Atomically swap the live policy (post-validation only)."""
+        self.gate.thresholds = policy.thresholds
+        self.gate.allowlist = set(policy.allowlist)
+        self.policy = policy
 
     # ------------------------------------------------------------ entry points
 
@@ -91,8 +133,8 @@ class Pipeline:
             alert = _normalize_pd(data)
         except Unparseable:
             self.metrics["unparseable"] += 1
-            self.forwarder.forward_raw(body, alert_id="unparseable",
-                                       dedup_key=_body_key(body))
+            self.note_forward(self.forwarder.forward_raw(
+                body, alert_id="unparseable", dedup_key=_body_key(body)))
             return _pd_ok(_body_key(body))
         disp_action = self._triage(alert, body)
         return _pd_ok(alert.alert_id)
@@ -107,8 +149,8 @@ class Pipeline:
             alert = _normalize_generic(data)
         except Unparseable:
             self.metrics["unparseable"] += 1
-            self.forwarder.forward_raw(body, alert_id="unparseable",
-                                       dedup_key=_body_key(body))
+            self.note_forward(self.forwarder.forward_raw(
+                body, alert_id="unparseable", dedup_key=_body_key(body)))
             return {"status": "success", "dedup_key": _body_key(body),
                     "disposition": "passthrough"}
         disp_action = self._triage(alert, body)
@@ -129,7 +171,7 @@ class Pipeline:
             agg_state = build_state(agg, history={}, context={})
             disp, _rec = self.gate.evaluate(agg, agg_state, {}, {})
             if disp.action != "suppress":
-                self.forwarder.forward(agg, disp)
+                self.note_forward(self.forwarder.forward(agg, disp))
             self.correlator.note_disposition(agg.fingerprint, disp)
             return disp.action
 
@@ -144,7 +186,8 @@ class Pipeline:
         self.metrics["triaged"] += 1
         self.correlator.note_disposition(alert.fingerprint, disp)
         if disp.action != "suppress":
-            self.forwarder.forward(alert, disp, raw_bytes=raw_bytes)
+            self.note_forward(
+                self.forwarder.forward(alert, disp, raw_bytes=raw_bytes))
         return disp.action
 
 
@@ -260,48 +303,105 @@ class SentinelHandler(BaseHTTPRequestHandler):
     # -- GET ---------------------------------------------------------
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path == "/healthz":
-            self._send_json(200, {"ok": True})
+        if path == "/livez":
+            # Shallow: the process is alive and answering. No dependencies
+            # checked, never authenticated (supervisors need it unconditionally).
+            self._send_json(200, self.pipeline.health.livez())
+        elif path == "/healthz":
+            # Deep: can the process do its job right now? (design 05, §1.2)
+            if not self._health_auth_ok():
+                self._send_json(401, {"status": "error",
+                                      "message": "unauthorized"})
+                return
+            code, body = self.pipeline.health.check()
+            self._send_json(code, body)
         else:
             self._send_json(404, {"status": "error", "message": "not found"})
 
     # -- POST --------------------------------------------------------
     def do_POST(self):
         path = urlsplit(self.path).path
-        length = self.headers.get("Content-Length")
-        try:
-            length = int(length) if length else 0
-        except ValueError:
-            length = 0
-        if length > MAX_BODY_BYTES:
-            self._send_json(413, {"status": "error",
-                                  "message": "payload too large"})
+        if path in ("/v2/enqueue", "/webhook/generic"):
+            self._handle_alert_post(path)
+        elif path == "/-/reload":
+            self._handle_reload()
+        else:
+            self._send_json(404, {"status": "error",
+                                  "message": "not found"})
+
+    def _handle_alert_post(self, path: str) -> None:
+        # Admission control — the 503-not-429 receiver contract (design §3.1).
+        # Alertmanager DROPS alerts on 429 (unrecoverable verdict) but RETRIES
+        # on 503. Overload must therefore be 503, never 429 — this is
+        # release-blocking: get it wrong and pages are silently lost.
+        sem = self.server.inflight_sem
+        if not sem.acquire(blocking=False):
+            self._send_json(
+                503,
+                {"status": "error",
+                 "message": "receiver overloaded; retry"},
+                headers={"Retry-After": "1"},
+            )
             return
-        body = self.rfile.read(length) if length > 0 else b""
         try:
-            if path == "/v2/enqueue":
-                resp = self.pipeline.handle_pd(body)
-                self._send_json(200, resp)
-            elif path == "/webhook/generic":
-                if not self._signature_ok(body):
-                    self._send_json(403, {"status": "error",
-                                          "message": "bad signature"})
-                    return
-                resp = self.pipeline.handle_generic(body)
-                self._send_json(200, resp)
-            else:
-                self._send_json(404, {"status": "error",
-                                      "message": "not found"})
-        except Exception as exc:
-            # Absolute last resort: never 5xx a triage failure. Forward the
-            # original bytes and tell the caller the event was processed.
-            sys.stderr.write(f"[sentinel] pipeline exception: {exc}\n")
+            length = self.headers.get("Content-Length")
             try:
-                self.pipeline.forwarder.forward_raw(body,
-                                                    alert_id="receiver-error")
-            except Exception:
-                pass
-            self._send_json(200, _pd_ok(_body_key(body)))
+                length = int(length) if length else 0
+            except ValueError:
+                length = 0
+            if length > MAX_BODY_BYTES:
+                self._send_json(413, {"status": "error",
+                                      "message": "payload too large"})
+                return
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                if path == "/v2/enqueue":
+                    resp = self.pipeline.handle_pd(body)
+                    self._send_json(200, resp)
+                elif path == "/webhook/generic":
+                    if not self._signature_ok(body):
+                        self._send_json(403, {"status": "error",
+                                              "message": "bad signature"})
+                        return
+                    resp = self.pipeline.handle_generic(body)
+                    self._send_json(200, resp)
+            except Exception as exc:
+                # Absolute last resort: a panicking request must not take down
+                # the process (design §8.1). The request dies as passthrough;
+                # the receiver lives. Never 5xx a triage failure.
+                self.pipeline.metrics["handler_panics"] += 1
+                sys.stderr.write(f"[sentinel] pipeline exception: {exc}\n")
+                try:
+                    self.pipeline.note_forward(
+                        self.pipeline.forwarder.forward_raw(
+                            body, alert_id="receiver-error"))
+                except Exception:
+                    pass
+                self._send_json(200, _pd_ok(_body_key(body)))
+        finally:
+            sem.release()
+
+    def _handle_reload(self) -> None:
+        # SIGHUP-equivalent over HTTP: re-validate config; invalid loads are
+        # rejected with 422 and the live generation is untouched (design §4).
+        if not self._health_auth_ok():
+            self._send_json(401, {"status": "error",
+                                  "message": "unauthorized"})
+            return
+        loader = self.pipeline.config_loader
+        if loader is None:
+            self._send_json(503, {"status": "error",
+                                  "message": "no config loader attached"})
+            return
+        try:
+            policy = loader.reload()
+        except ConfigRejected as exc:
+            self._send_json(422, {"status": "error",
+                                  "message": f"config rejected: {exc}"})
+            return
+        self.pipeline.apply_policy(policy)
+        self._send_json(200, {"status": "ok",
+                              "config_generation": policy.generation})
 
     # -- helpers -----------------------------------------------------
     def _signature_ok(self, body: bytes) -> bool:
@@ -317,11 +417,27 @@ class SentinelHandler(BaseHTTPRequestHandler):
                             hashlib.sha256).hexdigest()
         return hmac.compare_digest(sig[len("sha256="):], expected)
 
-    def _send_json(self, code: int, obj: dict) -> None:
+    def _health_auth_ok(self) -> bool:
+        """Bearer <redacted> for /healthz and /-/reload (design §2.3).
+
+        /livez is deliberately unauthenticated: supervisors must reach it
+        unconditionally. When SENTINEL_HEALTH_TOKEN is unset the deep probe
+        is open (documented; set the token in production).
+        """
+        token = os.environ.get("SENTINEL_HEALTH_TOKEN")
+        if not token:
+            return True
+        presented = self.headers.get("Authorization") or ""
+        return hmac.compare_digest(presented, f"Bearer {token}")
+
+    def _send_json(self, code: int, obj: dict,
+                   headers: dict | None = None) -> None:
         data = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -332,10 +448,25 @@ class SentinelServer(ThreadingHTTPServer):
 
 
 def make_server(port: int, pipeline: Pipeline,
-                bind: str = "127.0.0.1") -> SentinelServer:
-    """Build a bound server (port=0 picks an ephemeral port — handy for tests)."""
+                bind: str = "127.0.0.1",
+                max_inflight: int | None = None) -> SentinelServer:
+    """Build a bound server (port=0 picks an ephemeral port — handy for tests).
+
+    max_inflight bounds concurrent alert-ingress handlers; beyond it the
+    receiver answers 503 (never 429). From SENTINEL_MAX_INFLIGHT when unset.
+    """
     SentinelHandler.pipeline = pipeline
-    return SentinelServer((bind, port), SentinelHandler)
+    server = SentinelServer((bind, port), SentinelHandler)
+    if max_inflight is None:
+        try:
+            max_inflight = int(os.environ.get("SENTINEL_MAX_INFLIGHT",
+                                              str(DEFAULT_MAX_INFLIGHT)))
+        except ValueError:
+            max_inflight = DEFAULT_MAX_INFLIGHT
+    max_inflight = max(1, max_inflight)
+    server.inflight_sem = threading.Semaphore(max_inflight)
+    server.max_inflight = max_inflight
+    return server
 
 
 # ------------------------------------------------------------------ helpers
@@ -379,16 +510,16 @@ def _as_int(value):
 
 # ------------------------------------------------------------------ entrypoint
 
-def _load_json_file(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return default
 
+def build_pipeline_from_env(policy=None,
+                            config_loader: ConfigLoader | None = None,
+                            state_dir: str | None = None) -> Pipeline:
+    """Wire correlator/audit/gate/forwarder from environment (§8).
 
-def build_pipeline_from_env() -> Pipeline:
-    """Wire correlator/audit/gate/forwarder from environment (§8)."""
+    `policy` must be a validated PolicyConfig from ConfigLoader.load_startup()
+    (or a reload). Fail-closed: without one we refuse to build a pipeline —
+    Sentinel never supervises paging with an unvalidated policy.
+    """
     api_key = os.environ.get("TYPESAFE_API_KEY")
     if os.environ.get("SENTINEL_MOCK", "0") == "1":
         # Local dev/demo: mock client with no scripted answers. Every decide()
@@ -402,38 +533,92 @@ def build_pipeline_from_env() -> Pipeline:
             "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
     else:
         client = SystemOneClient(api_key=api_key)
+    if policy is None:
+        raise SystemExit(
+            "no validated policy config: refusing to start without one "
+            "(load thresholds.json via ConfigLoader.load_startup()).")
+    webhook_secret = os.environ.get("SENTINEL_WEBHOOK_SECRET")
+    if webhook_secret is not None and len(webhook_secret) < 16:
+        raise SystemExit(
+            "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
+            "refusing to start with a weak webhook secret.")
     db_path = os.environ.get("SENTINEL_DB", "./sentinel.db")
     audit = AuditLog(db_path)
-    thresholds_data = _load_json_file("thresholds.json", None)
-    thresholds = Thresholds(**thresholds_data) if thresholds_data else Thresholds()
-    allowlist = set(_load_json_file("allowlist.json", []))
     shadow = os.environ.get("SENTINEL_SHADOW", "0") == "1"
-    gate = Gate(client, thresholds, allowlist, audit, shadow=shadow)
+    gate = Gate(client, policy.thresholds, set(policy.allowlist), audit,
+                shadow=shadow)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
         default_routing_key=os.environ.get("PD_ROUTING_KEY"),
     )
     config = ReceiverConfig(
-        webhook_secret=os.environ.get("SENTINEL_WEBHOOK_SECRET"),
+        webhook_secret=webhook_secret,
         shadow=shadow,
     )
-    return Pipeline(Correlator(), gate, forwarder, audit, config)
+    return Pipeline(Correlator(), gate, forwarder, audit, config,
+                    policy=policy, config_loader=config_loader,
+                    state_dir=state_dir)
+
+
+def _install_sighup(loader: ConfigLoader, pipeline: Pipeline) -> None:
+    """SIGHUP -> validated reload; rejected loads keep the live generation."""
+    if not hasattr(signal, "SIGHUP"):
+        return
+
+    def _on_hup(signum, frame):
+        try:
+            policy = loader.reload()
+        except ConfigRejected as exc:
+            print(f"[sentinel] SIGHUP reload rejected, live config kept: "
+                  f"{exc}", file=sys.stderr)
+            return
+        pipeline.apply_policy(policy)
+        print(f"[sentinel] SIGHUP reload applied "
+              f"(generation {policy.generation})", file=sys.stderr)
+
+    signal.signal(signal.SIGHUP, _on_hup)
 
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Sentinel receiver (v0.1)")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--config-dir", default=os.environ.get(
+        "SENTINEL_CONFIG_DIR", "."),
+        help="directory holding thresholds.json / allowlist.json")
+    parser.add_argument("--state-dir", default=os.environ.get(
+        "SENTINEL_STATE_DIR", "./sentinel-state"),
+        help="writable state dir (generations, restarts, events)")
     args = parser.parse_args(argv)
-    pipeline = build_pipeline_from_env()
+
+    # Fail-closed config gate (design 05, §4): invalid config with no
+    # last-good generation -> refuse to start. Never supervise paging with
+    # an unvalidated policy.
+    loader = ConfigLoader(config_dir=args.config_dir, state_dir=args.state_dir)
+    try:
+        policy = loader.load_startup()
+    except ConfigRejected as exc:
+        print(f"[sentinel] refusing to start: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+    pipeline = build_pipeline_from_env(policy=policy, config_loader=loader,
+                                       state_dir=args.state_dir)
+    print(f"[sentinel] serving policy generation {policy.generation}",
+          file=sys.stderr)
+    record_restart(args.state_dir)
+    _install_sighup(loader, pipeline)
+    pipeline.health.start()  # startup gate self-test, then every 5 min
     server = make_server(args.port, pipeline, bind=args.bind)
     print(f"[sentinel] listening on {args.bind}:{server.server_port} "
-          f"(shadow={pipeline.config.shadow})", file=sys.stderr)
+          f"(shadow={pipeline.config.shadow}, "
+          f"max_inflight={server.max_inflight})", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        pipeline.health.stop()
 
 
 if __name__ == "__main__":
