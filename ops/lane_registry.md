@@ -14,6 +14,17 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/platform-arch` | Architect wave (Forge) | done (merged PR #3) | `PLATFORM_ARCHITECTURE.md` frozen + `WAVE_PLAN.md` | `6ed1138` |
 | `lane/ops-deepening` | Architect wave (Relay/Vault) | done (merged PR #4) | `ops/RUNBOOKS.md`, `ops/STANDING_ORDERS.md`, decision-log + constraint-registry deepening | `5020e5a` |
 | `lane/repo-completeness` | Repo completeness coordinator | done (merged PR #6) | company-depth docs: log, master plan, lane registry, repo map, team deepening, lane playbook, briefs archive, onboarding, completeness audit | `0ee0839`, `8ea9845`, `076fd8d`, `1cae269`, `64c078c`, `7a4b275`, `88ee47a` (+ this registry update) |
+| `lane/relay-ops` | Relay (ops) | done (merged PR #7) | ops/milestones.md + ops/blockers.md; independent review APPROVED | `5259afa` |
+| `lane/vault-hardening` | Vault (security) | done (merged PR #8) | docs/SECURITY.md; fabricated citation caught in review, fixed (a38fa05) | `827490c`, `a38fa05` |
+| `lane/tripwire-acceptance` | Tripwire | done (merged PR #13) | acceptance-sunday.md, fault-injection-plan.md, ci-repair.md (escalated: GitHub ghost-record platform bug) | `6c71d0e` |
+| `lane/impl-event-log` | Ledger | in flight | design 02: hash-chained event log + outbox, v0.1 migration, 4 commits | `b2e0005` |
+| `lane/impl-race` | Forge | in flight | design 01: race-to-page B=1000ms | — |
+| `lane/impl-gate` | Oracle/Tripwire | pending review (PR #15) | design 04: ADR-013 quantized probability lock, M-1 fix | `5ada371` |
+| `lane/impl-freshness` | Vault | pending review (PR #14) | design 07: C-1 freshness proofs, stale⇒page | `3803a72` |
+| `lane/impl-shadow-tap` | Prism | in flight | design 06: read-only PD/Opsgenie tap + Shadow Report | — |
+| `lane/oracle-latency` | Oracle | in flight | N=100 latency campaign (measurement) | — |
+| `lane/impl-forwarder` | Pager | in flight | design 03: durable forwarder, PD dedup_key, standby | — |
+| `lane/impl-liveness` | SRE | in flight | design 05: livez/healthz, 503-not-429, config validation | — |
 
 ## Rules
 
