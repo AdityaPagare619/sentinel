@@ -28,6 +28,7 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import sys
 from enum import Enum
 
 
@@ -140,6 +141,9 @@ class PolicyStore:
         self.path = path
         # policy_id -> list[PolicyVersion] (ascending version)
         self._policies: dict[str, list[PolicyVersion]] = {}
+        # policy_id -> signed watchdog baseline dict (B3.3; opaque here —
+        # the watchdog owns the schema). Persisted with the store (B3).
+        self._baselines: dict[str, dict] = {}
         if path and os.path.exists(path):
             self.load()
 
@@ -147,8 +151,10 @@ class PolicyStore:
     def save(self) -> None:
         if not self.path:
             return
-        data = {pid: [v.to_dict() for v in vs]
-                for pid, vs in self._policies.items()}
+        data = {"format": 1,
+                "policies": {pid: [v.to_dict() for v in vs]
+                             for pid, vs in self._policies.items()},
+                "baselines": dict(self._baselines)}
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, sort_keys=True)
@@ -157,8 +163,31 @@ class PolicyStore:
     def load(self) -> None:
         with open(self.path, encoding="utf-8") as fh:
             data = json.load(fh)
+        if isinstance(data, dict) and data.get("format") == 1:
+            policies = data.get("policies", {})
+            self._baselines = {pid: dict(b)
+                               for pid, b in data.get("baselines", {}).items()}
+        else:
+            # Legacy bare shape: {policy_id: [versions]} (pre-baseline).
+            policies = data
+            self._baselines = {}
         self._policies = {pid: [PolicyVersion.from_dict(v) for v in vs]
-                          for pid, vs in data.items()}
+                          for pid, vs in policies.items()}
+
+    # --------------------------------------------------------------- baselines
+    def set_baseline(self, baseline: dict) -> None:
+        """Persist a signed watchdog baseline (B3.3). The dict is opaque to
+        the store — the watchdog owns the schema (SuppressionBaseline)."""
+        pid = baseline.get("policy_id")
+        if not pid:
+            raise PolicyTransitionError("baseline must carry policy_id")
+        self._baselines[pid] = dict(baseline)
+
+    def get_baseline(self, policy_id: str) -> dict | None:
+        return self._baselines.get(policy_id)
+
+    def baselines(self) -> dict[str, dict]:
+        return dict(self._baselines)
 
     # ----------------------------------------------------------------- queries
     def versions(self, policy_id: str) -> list[PolicyVersion]:
@@ -176,6 +205,14 @@ class PolicyStore:
             if v.state in (PolicyState.LIVE.value, PolicyState.REVIEW_DUE.value):
                 return v
         return None
+
+    def effective_policies(self) -> list[str]:
+        """Policy ids with a live or review-due version in force — the set
+        the watchdog must have baselines for (B3 baseless alarm)."""
+        return [pid for pid, vs in self._policies.items()
+                if any(v.state in (PolicyState.LIVE.value,
+                                   PolicyState.REVIEW_DUE.value)
+                       for v in vs)]
 
     def can_suppress(self, policy_id: str) -> tuple[bool, str]:
         """Enforcement hook for the gate. Returns (allowed, reason)."""
@@ -279,7 +316,11 @@ class PolicyStore:
         if hours <= 0 or hours > 24:
             raise PolicyTransitionError(
                 "override time-box must be within (0, 24h]")
-        # Freeze the currently-live version so the tick can restore it.
+        # Record the currently-effective version so the tick's auto-revert
+        # can name what it displaces. Restoration is implicit, not a freeze:
+        # the override EXPIRES (state -> expired) and the previous version's
+        # standing is recomputed from version ordering on the next read —
+        # there is no un-freeze step (N3: the old "freeze" comment was wrong).
         prev = self.effective_version(v.policy_id)
         v.override_from_version = prev.version if prev else None
         v.override_until = (now + _dt.timedelta(hours=hours)).isoformat()
@@ -298,8 +339,11 @@ class PolicyStore:
         return v
 
     def unfreeze(self, policy_id: str, version: int,
-                 attestations: list[PolicyAttestation]) -> PolicyVersion:
-        """Un-freezing re-enables suppression: requires 2 attestors."""
+                 attestations: list[PolicyAttestation],
+                 *, author_id: str = "") -> PolicyVersion:
+        """Un-freezing re-enables suppression: requires 2 attestors distinct
+        from each other AND from the author (N4 — the B3.3 matrix requires
+        author-distinctness for transitions; unfreeze is not exempt)."""
         v = self._get(policy_id, version)
         if not v.frozen:
             raise PolicyTransitionError("policy is not frozen")
@@ -307,6 +351,9 @@ class PolicyStore:
         if len(ids) < 2:
             raise PolicyTransitionError(
                 "unfreeze requires 2 distinct attestors")
+        if author_id and author_id in ids:
+            raise PolicyTransitionError(
+                "unfreeze attestors must be distinct from the author")
         v.frozen = False
         v.frozen_reason = None
         v.attestations = tuple(list(v.attestations) + list(attestations))
@@ -364,3 +411,57 @@ class PolicyStore:
                 return v
         raise PolicyTransitionError(
             f"unknown policy version {policy_id} v{version}")
+
+
+class PolicyGate:
+    """Hot-path enforcement view over the policy-state file (D8/B2).
+
+    This is what the gate's ``policy_gate`` hook consults on every
+    suppress verdict. One-way channel: the watchdog WRITES this file; the
+    gate only READS it — the gate never mutates policy state.
+
+    Freshness (the accepted deviation, Tripwire-ruled with conditions):
+    every ``can_suppress()`` call loads a fresh PolicyStore from the file.
+    A watchdog freeze lands on the hot path within one decision — never
+    served from a boot cache. The read is a few-KB JSON parse (sub-ms
+    against an 800ms Jev call); the resilience rationale — bulkheading the
+    paging path from event-log availability — is what justifies the file,
+    not speed.
+
+    Semantics:
+      - file missing -> (True, "policy_gate_not_configured"): the watchdog
+        was never set up, so there is nothing to enforce; the triple lock
+        stands alone. LOUD one-time stderr warning — initialize the store
+        before the design partner.
+      - file present but unreadable/corrupt -> (False,
+        "policy_state_unreadable"): fail toward the human. A corrupt
+        enforcement file is itself an incident.
+      - file present and readable -> the store's can_suppress verdict.
+
+    Never raises.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._warned_missing = False
+
+    def can_suppress(self, policy_id: str) -> tuple[bool, str]:
+        try:
+            if not os.path.exists(self.path):
+                if not self._warned_missing:
+                    self._warned_missing = True
+                    sys.stderr.write(
+                        "[sentinel] WARNING: policy-state file "
+                        f"{self.path} does not exist — policy-gate "
+                        "enforcement (watchdog freeze, expiry) is DISABLED; "
+                        "suppression is governed by the triple lock alone. "
+                        "Initialize the policy store before the design "
+                        "partner (ADR-022/D8).\n")
+                return True, "policy_gate_not_configured"
+            # Fresh read every call: the watchdog's freeze is visible on
+            # the very next decision. Never a boot-cached verdict.
+            store = PolicyStore(self.path)
+            return store.can_suppress(policy_id)
+        except Exception:
+            # Unreadable/corrupt enforcement file: fail toward the human.
+            return False, "policy_state_unreadable"

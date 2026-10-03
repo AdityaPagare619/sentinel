@@ -156,7 +156,20 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(why.startswith("policy_frozen"))
         with self.assertRaises(pl.PolicyTransitionError):
             store.unfreeze("suppression", 1, _atts()[:1])
-        store.unfreeze("suppression", 1, _atts())
+        # N4: attestors must be distinct from the author too.
+        author_atts = [pl.PolicyAttestation(
+            policy_id="suppression", version=1,
+            from_state="live", to_state="live",
+            preview_hash=None, attestor_ids=("author",),
+            decided_at=_now().isoformat()),
+            pl.PolicyAttestation(
+            policy_id="suppression", version=1,
+            from_state="live", to_state="live",
+            preview_hash=None, attestor_ids=("dave",),
+            decided_at=_now().isoformat())]
+        with self.assertRaises(pl.PolicyTransitionError):
+            store.unfreeze("suppression", 1, author_atts, author_id="author")
+        store.unfreeze("suppression", 1, _atts(), author_id="author")
         allowed, _ = store.can_suppress("suppression")
         self.assertTrue(allowed)
 
@@ -241,7 +254,13 @@ class WatchdogKernelTest(unittest.TestCase):
 class TripOrderingTest(unittest.TestCase):
     """Belt and suspenders: freeze is durable BEFORE the page goes out."""
 
-    def test_freeze_persists_when_page_dies(self):
+    def test_page_dies_stops_heartbeat_and_parks_for_retry(self):
+        # B1 capability semantics: the heartbeat attests CAPABILITY, not
+        # liveness. The page died (save succeeded, so the freeze IS
+        # durable) — the undelivered page parks in _pending and the
+        # heartbeat stops. The dead-man's-switch watcher pages on the
+        # missing beat. When the page path heals, the next run_once
+        # flushes the backlog and the heartbeat resumes.
         with tempfile.TemporaryDirectory() as d:
             store = pl.PolicyStore(os.path.join(d, "policies.json"))
             _walk_to_live(store)
@@ -262,14 +281,87 @@ class TripOrderingTest(unittest.TestCase):
                 w.ingest("suppression", i < 40)
             report = runner.run_once()
             self.assertEqual(len(report["trips"]), 1)
-            # The page died, but the freeze is durable on disk.
+            status = report["trips"][0]
+            # Freeze landed (save worked); the page did not.
+            self.assertTrue(status["freeze_durable"])
+            self.assertFalse(status["paged"])
             store2 = pl.PolicyStore(os.path.join(d, "policies.json"))
             allowed, why = store2.can_suppress("suppression")
             self.assertFalse(allowed)
             self.assertTrue(why.startswith("policy_frozen"))
-            # And the heartbeat kept flowing: the dead-man's-switch watcher
-            # sees a LIVE watchdog whose page path failed — distinct from
-            # a dead watchdog, which the watcher pages on.
+            # Capability degraded: heartbeat WITHHELD, not flowing.
+            self.assertEqual(hb.seq, 0)
+            self.assertFalse(os.path.exists(os.path.join(d, "heartbeat.json")))
+            self.assertTrue(any("withheld" in e for e in report["errors"]))
+            # Heal the page path: the backlog flushes, the beat resumes.
+            # (Clearing the ingested window simulates the realistic
+            # sequence: once the freeze bites, suppressions stop and the
+            # rate normalizes — otherwise the stale window re-trips.)
+            w._windows.clear()
+            runner._page_human = lambda s, det: pages.append(s)
+            report2 = runner.run_once()
+            self.assertEqual(len(runner._pending), 0)
+            self.assertEqual(len(pages), 1)
+            self.assertGreater(hb.seq, 0)
+
+    def test_trip_save_and_page_fail_nothing_delivered_no_heartbeat(self):
+        # B1 exact failing case (Tripwire tw57): persistent save failure
+        # (disk full) + page failure (PD down), process stays alive.
+        # Before the fix: both swallowed, heartbeat kept beating, freeze
+        # never persisted, nobody paged. After: nothing is claimed
+        # delivered, the heartbeat stops, and a fresh store load proves
+        # the freeze is NOT durable (can_suppress still True).
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "policies.json")
+            store = pl.PolicyStore(path)
+            _walk_to_live(store)
+            store.save()
+            w = wd.SuppressionWatchdog({"suppression": _baseline()})
+            hb = wd.HeartbeatEmitter(os.path.join(d, "heartbeat.json"),
+                                     interval_s=3600)
+
+            real_save = store.save
+
+            def dead_save():
+                raise OSError("disk full (persistent)")
+
+            def dead_page(summary, detail):
+                raise RuntimeError("PagerDuty down")
+
+            store.save = dead_save  # noqa: E731 — fault injection
+            runner = wd.WatchdogRunner(
+                watchdog=w, policy_store=store, heartbeat=hb,
+                read_decisions=lambda since: ([], since),
+                page_human=dead_page,
+                append_event=lambda t, b: None)
+            for i in range(100):
+                w.ingest("suppression", i < 40)
+            report = runner.run_once()
+            status = report["trips"][0]
+            self.assertFalse(status["freeze_durable"])
+            self.assertFalse(status["paged"])
+            # Heartbeat stopped: capability lost, watcher must page.
+            self.assertEqual(hb.seq, 0)
+            self.assertFalse(os.path.exists(os.path.join(d, "heartbeat.json")))
+            # The freeze is NOT durable: a fresh load still allows suppress.
+            fresh = pl.PolicyStore(path)
+            allowed, why = fresh.can_suppress("suppression")
+            self.assertTrue(allowed)
+            self.assertEqual(why, "ok")
+            # Heal disk + PD: pending flushes, freeze lands, page goes out,
+            # heartbeat resumes. (Clearing the window simulates the rate
+            # normalizing once the freeze bites — see above.)
+            store.save = real_save
+            pages = []
+            w._windows.clear()
+            runner._page_human = lambda s, det: pages.append(s)
+            runner.run_once()
+            self.assertEqual(len(runner._pending), 0)
+            self.assertEqual(len(pages), 1)
+            fresh2 = pl.PolicyStore(path)
+            allowed2, why2 = fresh2.can_suppress("suppression")
+            self.assertFalse(allowed2)
+            self.assertTrue(why2.startswith("policy_frozen"))
             self.assertGreater(hb.seq, 0)
 
 
@@ -416,6 +508,146 @@ class WatcherScriptTest(unittest.TestCase):
             r = self._run("--heartbeat-file", hb, "--no-page")
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
             self.assertIn("clock skew", r.stdout)
+
+
+class PolicyGateTest(unittest.TestCase):
+    """B2: the hot-path enforcement view. Fresh reads every decision,
+    fail-closed on unreadable, loud-but-allowing on unconfigured."""
+
+    def _live_store(self, d):
+        path = os.path.join(d, "policies.json")
+        store = pl.PolicyStore(path)
+        _walk_to_live(store)
+        store.save()
+        return path, store
+
+    def test_freeze_lands_within_one_decision_no_restart(self):
+        # The accepted deviation: no boot cache — a watchdog freeze is
+        # visible to the very next can_suppress call.
+        with tempfile.TemporaryDirectory() as d:
+            path, store = self._live_store(d)
+            gate = pl.PolicyGate(path)
+            self.assertEqual(gate.can_suppress("suppression"), (True, "ok"))
+            store.freeze("suppression", "watchdog_trip:slo_band")
+            store.save()
+            allowed, why = gate.can_suppress("suppression")
+            self.assertFalse(allowed)
+            self.assertTrue(why.startswith("policy_frozen"))
+
+    def test_unreadable_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "policies.json")
+            with open(path, "w") as fh:
+                fh.write("{corrupt")
+            allowed, why = pl.PolicyGate(path).can_suppress("suppression")
+            self.assertFalse(allowed)
+            self.assertEqual(why, "policy_state_unreadable")
+
+    def test_missing_file_allows_with_loud_warning(self):
+        # Not-configured is not unreadable: the triple lock stands alone
+        # until the store is initialized — but loudly.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nope.json")
+            gate = pl.PolicyGate(path)
+            import io
+            from contextlib import redirect_stderr
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                allowed, why = gate.can_suppress("suppression")
+            self.assertTrue(allowed)
+            self.assertEqual(why, "policy_gate_not_configured")
+            self.assertIn("WARNING", buf.getvalue())
+            # Warned once: the second call stays quiet.
+            buf2 = io.StringIO()
+            with redirect_stderr(buf2):
+                gate.can_suppress("suppression")
+            self.assertEqual(buf2.getvalue(), "")
+
+    def test_gate_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            # A directory is not a readable file.
+            allowed, why = pl.PolicyGate(d).can_suppress("suppression")
+            self.assertFalse(allowed)
+            self.assertEqual(why, "policy_state_unreadable")
+
+
+class BaselinePersistenceTest(unittest.TestCase):
+    """B3: baselines survive restarts; live policies without one alarm LOUD."""
+
+    def _runner(self, d, baselines=None, pages=None, events=None):
+        path = os.path.join(d, "policies.json")
+        store = pl.PolicyStore(path)
+        _walk_to_live(store)
+        store.save()
+        w = wd.SuppressionWatchdog(baselines)
+        hb = wd.HeartbeatEmitter(os.path.join(d, "hb.json"), interval_s=3600)
+        runner = wd.WatchdogRunner(
+            watchdog=w, policy_store=store, heartbeat=hb,
+            read_decisions=lambda since: ([], since),
+            page_human=(lambda s, det: pages.append(s)) if pages is not None
+            else (lambda s, det: None),
+            append_event=(lambda t, b: events.append(t)) if events is not None
+            else (lambda t, b: None))
+        return runner, store, path
+
+    def test_baselines_survive_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            pages, events = [], []
+            runner, store, path = self._runner(d, pages=pages, events=events)
+            runner.register_baseline(_baseline())
+            # "Restart": brand-new watchdog + runner over the same file.
+            w2 = wd.SuppressionWatchdog()
+            hb2 = wd.HeartbeatEmitter(os.path.join(d, "hb2.json"),
+                                      interval_s=3600)
+            runner2 = wd.WatchdogRunner(
+                watchdog=w2, policy_store=pl.PolicyStore(path),
+                heartbeat=hb2,
+                read_decisions=lambda since: ([], since),
+                page_human=lambda s, det: pages.append(s),
+                append_event=lambda t, b: events.append(t))
+            self.assertIn("suppression", w2.baselines)
+            # And it still trips: feed a tripping rate, no baseless alarm.
+            for i in range(100):
+                w2.ingest("suppression", i < 40)
+            report = runner2.run_once()
+            self.assertEqual(len(report["trips"]), 1)
+            self.assertNotIn("watchdog_baseless_policy", events)
+
+    def test_baseless_live_policy_alarms_loud(self):
+        # No baseline registered: the policy is UNWATCHED — audited event
+        # + page, never silent. (Emergency overrides land here by design.)
+        with tempfile.TemporaryDirectory() as d:
+            pages, events = [], []
+            runner, store, path = self._runner(d, pages=pages, events=events)
+            runner.run_once()
+            self.assertIn("watchdog_baseless_policy", events)
+            self.assertTrue(any("BLIND" in p for p in pages))
+            # Throttled: no re-page on the next loop...
+            pages.clear()
+            events.clear()
+            runner.run_once()
+            self.assertNotIn("watchdog_baseless_policy", events)
+            self.assertEqual(pages, [])
+            # ...but a re-baselined-then-lost policy re-arms the alarm.
+            runner.register_baseline(_baseline())
+            runner.run_once()
+            self.assertNotIn("watchdog_baseless_policy", events)
+
+    def test_baseline_version_mismatch_alarms(self):
+        # Baseline signed for v1, policy now at v2: the old numbers don't
+        # govern the new content — alarm.
+        with tempfile.TemporaryDirectory() as d:
+            pages, events = [], []
+            runner, store, path = self._runner(d, pages=pages, events=events)
+            runner.register_baseline(_baseline(version=1))
+            store.create_draft("suppression", {"thresholds": {"y": 2}},
+                               _now())
+            v2 = store._get("suppression", 2)
+            v2.state = "live"
+            store.save()
+            runner.run_once()
+            self.assertIn("watchdog_baseless_policy", events)
+            self.assertTrue(any("BLIND" in p for p in pages))
 
 
 class HeartbeatEmitterTest(unittest.TestCase):

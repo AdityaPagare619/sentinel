@@ -35,6 +35,7 @@ import datetime as _dt
 import json
 import math
 import os
+import sys
 import time
 
 from . import policy_lifecycle as _pl
@@ -227,13 +228,53 @@ class WatchdogRunner:
         self._append_event = append_event
         self._clock = clock or time.time
         self._since_seq = 0
+        # B1: undelivered trip/lifecycle actions. The heartbeat attests
+        # CAPABILITY, not liveness: it flows only when this is empty.
+        self._pending: dict[str, dict] = {}
+        self._pending_seq = 0
+        # B3: baseless-policy pages are throttled per process lifetime;
+        # a re-baselined policy leaves the set so a later loss re-alarms.
+        self._baseless_paged: set[str] = set()
+        # B3: re-register persisted baselines on boot — a restart must not
+        # leave live policies unwatched. Explicitly-constructed baselines
+        # win on conflict (current operator intent beats stored state).
+        for pid, bdict in self.policy_store.baselines().items():
+            if pid not in self.watchdog.baselines:
+                try:
+                    self.watchdog.baselines[pid] = \
+                        SuppressionBaseline.from_dict(bdict)
+                except Exception as exc:  # noqa: BLE001 — loud, not fatal
+                    sys.stderr.write(
+                        f"[sentinel] WARNING: persisted baseline for {pid} "
+                        f"failed to parse ({exc}) — policy unwatched until "
+                        f"re-registered\n")
+
+    def register_baseline(self, baseline: SuppressionBaseline) -> None:
+        """Sign + persist a watchdog baseline (B3.3 canary->live gate).
+
+        Validates the 2-signer rule, registers with the live watchdog,
+        AND persists to the policy-state file — one call, so a baseline
+        can never again be in-memory-only (B3)."""
+        self.watchdog.set_baseline(baseline)  # raises on <2 signers
+        self.policy_store.set_baseline(baseline.to_dict())
+        self.policy_store.save()
 
     def run_once(self) -> dict:
-        """One control-loop iteration. Never raises: a watchdog that crashes
-        its loop is worse than one that logs and continues — the heartbeat
-        keeps flowing while the loop degrades loudly."""
-        report: dict = {"trips": [], "lifecycle": [], "errors": []}
+        """One control-loop iteration. Never raises.
+
+        The heartbeat attests CAPABILITY, not liveness (B1): it flows only
+        when no trip/lifecycle action is undelivered. A freeze that never
+        persisted or a page that never went out stops the beat — the
+        separate dead-man's-switch watcher then pages on the missing
+        heartbeat. A watchdog that claims health while its trip actions
+        are parked is theater.
+        """
+        report: dict = {"trips": [], "lifecycle": [], "errors": [],
+                        "pending": len(self._pending)}
         now = self._clock()
+        # Recovery first: deliver whatever the last loop couldn't, so a
+        # healed disk/PD path resumes the heartbeat ASAP.
+        self._flush_pending(report)
         try:
             events, max_seq = self._read_decisions(self._since_seq)
         except Exception as exc:  # noqa: BLE001 — loop must survive
@@ -261,6 +302,13 @@ class WatchdogRunner:
             if trip is not None:
                 report["trips"].append(self._handle_trip(trip))
 
+        # B3: baseless-policy alarm — a live/review-due policy with no signed
+        # baseline (or a baseline for a different version) is UNWATCHED: no
+        # trips will ever fire for it. LOUD, never silent. Emergency
+        # overrides trip this by construction (no baseline survives the
+        # bypass) — that is intended.
+        self._alarm_baseless_policies(report)
+
         # Lifecycle clock: review-due pages owner, expiry fails loud.
         try:
             for emitted in self.policy_store.tick(
@@ -270,48 +318,153 @@ class WatchdogRunner:
         except Exception as exc:  # noqa: BLE001
             report["errors"].append(f"lifecycle tick: {exc}")
 
-        try:
-            beat = self.heartbeat.maybe_emit()
-        except Exception as exc:  # noqa: BLE001
-            report["errors"].append(f"heartbeat: {exc}")
-            beat = None
-        if beat is not None:
+        # B1: the beat attests that every trip/lifecycle action so far is
+        # delivered. Anything parked in _pending stops the heartbeat.
+        if not self._pending:
             try:
-                self._append_event("watchdog_heartbeat", beat)
+                beat = self.heartbeat.maybe_emit()
             except Exception as exc:  # noqa: BLE001
-                report["errors"].append(f"heartbeat event: {exc}")
+                report["errors"].append(f"heartbeat: {exc}")
+                beat = None
+            if beat is not None:
+                try:
+                    self._append_event("watchdog_heartbeat", beat)
+                except Exception as exc:  # noqa: BLE001
+                    report["errors"].append(f"heartbeat event: {exc}")
+        else:
+            report["errors"].append(
+                f"heartbeat withheld: {len(self._pending)} undelivered "
+                f"action(s) — capability degraded, watcher will page")
         try:
             self.policy_store.save()
         except Exception as exc:  # noqa: BLE001
             report["errors"].append(f"policy store save: {exc}")
+        report["pending"] = len(self._pending)
         return report
 
     # ------------------------------------------------------------ trip handling
+    @staticmethod
+    def _trip_summary(trip: WatchdogTrip) -> str:
+        return (f"suppression watchdog TRIP: policy {trip.policy_id} "
+                f"{trip.reason} (rate {trip.observed_rate:.3f} vs "
+                f"expected {trip.expected_rate:.3f}, "
+                f"n={trip.decisions_in_window})")
+
     def _handle_trip(self, trip: WatchdogTrip) -> dict:
-        # 1. Freeze FIRST — durable before anything else.
-        frozen = self.policy_store.freeze(trip.policy_id,
-                                          f"watchdog_trip:{trip.reason}")
-        try:
-            self.policy_store.save()
-        except Exception:
-            pass  # the audited event below still records the intent
-        # 2. Audited event.
-        try:
-            self._append_event("watchdog_trip", trip.to_dict())
-        except Exception:
-            pass
-        # 3. Page the human. If THIS dies, the heartbeat stops and the
-        # dead-man's-switch watcher pages instead — that is the design.
-        summary = (f"suppression watchdog TRIP: policy {trip.policy_id} "
-                   f"{trip.reason} (rate {trip.observed_rate:.3f} vs "
-                   f"expected {trip.expected_rate:.3f}, "
-                   f"n={trip.decisions_in_window})")
-        try:
-            self._page_human(summary, trip.to_dict())
-        except Exception:
-            pass
-        return {"trip": trip.to_dict(),
-                "frozen": frozen is not None}
+        """Deliver a trip action: freeze (durable first), audited event,
+        page. Returns the delivery status. Anything undelivered is parked
+        in _pending — and a non-empty _pending stops the heartbeat (B1)."""
+        entry: dict = {"kind": "trip", "trip": trip,
+                       "freeze_done": False, "audit_done": False,
+                       "page_done": False, "last_error": None}
+        self._deliver_trip(entry)
+        status = {"trip": trip.to_dict(),
+                  "freeze_durable": entry["freeze_done"],
+                  "audited": entry["audit_done"],
+                  "paged": entry["page_done"],
+                  "last_error": entry["last_error"]}
+        if not (entry["freeze_done"] and entry["page_done"]):
+            self._pending_seq += 1
+            self._pending[f"trip:{trip.policy_id}:{self._pending_seq}"] = entry
+        return status
+
+    def _deliver_trip(self, entry: dict) -> None:
+        """Attempt the missing pieces of a trip action. Idempotent —
+        freeze() on an already-frozen version is a no-op. Never raises."""
+        trip: WatchdogTrip = entry["trip"]
+        if not entry["freeze_done"]:
+            # 1. Freeze FIRST — durable before anything else, so a crash
+            # after this point still leaves suppression blocked.
+            try:
+                self.policy_store.freeze(
+                    trip.policy_id, f"watchdog_trip:{trip.reason}")
+                self.policy_store.save()
+                entry["freeze_done"] = True
+            except Exception as exc:  # noqa: BLE001
+                entry["last_error"] = f"freeze: {exc}"
+        if not entry["audit_done"]:
+            # 2. Audited event — records the detection truthfully,
+            # including whether the freeze actually landed (audit parity:
+            # the file mutation, when it lands, always has its event).
+            try:
+                body = dict(trip.to_dict())
+                body["freeze_durable"] = entry["freeze_done"]
+                self._append_event("watchdog_trip", body)
+                entry["audit_done"] = True
+            except Exception as exc:  # noqa: BLE001
+                entry["last_error"] = f"audit: {exc}"
+        if not entry["page_done"]:
+            # 3. Page the human.
+            try:
+                self._page_human(self._trip_summary(trip), trip.to_dict())
+                entry["page_done"] = True
+            except Exception as exc:  # noqa: BLE001
+                entry["last_error"] = f"page: {exc}"
+
+    def _flush_pending(self, report: dict) -> None:
+        """Retry every undelivered action. Drops entries only when fully
+        delivered — freeze durable AND page sent. Never raises."""
+        for key in list(self._pending):
+            entry = self._pending[key]
+            try:
+                if entry["kind"] == "trip":
+                    self._deliver_trip(entry)
+                elif entry["kind"] == "page":
+                    self._page_human(entry["summary"], entry["detail"])
+                    entry["page_done"] = True
+            except Exception as exc:  # noqa: BLE001
+                entry["last_error"] = str(exc)
+            if entry.get("freeze_done", True) and entry.get("page_done"):
+                del self._pending[key]
+            else:
+                report["errors"].append(
+                    f"pending {key} still undelivered: "
+                    f"{entry.get('last_error')}")
+
+    def _alarm_baseless_policies(self, report: dict) -> None:
+        """B3: a live/review-due policy with no signed baseline — or a
+        baseline signed for a different version — is UNWATCHED. No trips
+        will ever fire for it. This pages LOUD (once per process lifetime
+        per policy; a re-baselined policy re-arms the alarm) and writes an
+        audited event. The page goes through the pending mechanism, so a
+        failed baseless page degrades the heartbeat like any other."""
+        for pid in self.policy_store.effective_policies():
+            baseline = self.watchdog.baselines.get(pid)
+            eff = self.policy_store.effective_version(pid)
+            eff_version = eff.version if eff is not None else None
+            baseless = (baseline is None
+                        or baseline.version != eff_version)
+            if not baseless:
+                self._baseless_paged.discard(pid)
+                continue
+            if pid in self._baseless_paged:
+                continue
+            self._baseless_paged.add(pid)
+            reason = ("no_baseline" if baseline is None
+                      else "baseline_version_mismatch")
+            try:
+                self._append_event("watchdog_baseless_policy",
+                                   {"policy_id": pid, "version": eff_version,
+                                    "reason": reason})
+            except Exception as exc:  # noqa: BLE001
+                report["errors"].append(f"baseless audit {pid}: {exc}")
+            summary = (f"suppression watchdog BLIND: policy {pid} "
+                       f"v{eff_version} has {reason} — no trips will fire")
+            detail = {"policy_id": pid, "version": eff_version,
+                      "reason": reason}
+            # Attempt the page now; park only what fails (same capability
+            # semantics as trips — a failed baseless page stops the beat).
+            entry: dict = {"kind": "page", "summary": summary,
+                           "detail": detail, "page_done": False,
+                           "last_error": None}
+            try:
+                self._page_human(summary, detail)
+                entry["page_done"] = True
+            except Exception as exc:  # noqa: BLE001
+                entry["last_error"] = f"page: {exc}"
+            if not entry["page_done"]:
+                self._pending_seq += 1
+                self._pending[f"baseless:{pid}:{self._pending_seq}"] = entry
 
     def _handle_lifecycle_event(self, emitted: dict) -> None:
         etype = emitted.get("type", "")
@@ -320,7 +473,18 @@ class WatchdogRunner:
         except Exception:
             pass
         if emitted.get("page_owner") or emitted.get("page"):
+            summary = emitted.get("summary", etype)
             try:
-                self._page_human(emitted.get("summary", etype), emitted)
-            except Exception:
-                pass
+                self._page_human(summary, emitted)
+            except Exception as exc:  # noqa: BLE001
+                # The state transition already persisted via the
+                # end-of-loop save; only the notification is missing.
+                # Park it: a failed safety notification degrades the
+                # heartbeat like any undelivered action (B1, generalized).
+                self._pending_seq += 1
+                self._pending[
+                    f"lifecycle:{etype}:{self._pending_seq}"] = {
+                        "kind": "page", "summary": summary,
+                        "detail": dict(emitted),
+                        "page_done": False,
+                        "last_error": f"page: {exc}"}
