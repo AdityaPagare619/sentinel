@@ -96,7 +96,7 @@ skills are mandatory before starting lane work — read the SKILL.md, then apply
   infrastructure, data/AI, and product/design.
 - `~/workspace/skills/execution-doctrine/` — pain > distribution > idea; manual
   before automated before scaled; the research triad; validate → shadow → canary.
-- `~/workspace/skills/principal-gates/` — API contracts, design systems, RFC
+- `~/workspace/skills/principal-governance/` — API contracts, design systems, RFC
   culture, unified telemetry, feature flags, the parallel-teams rule.
 - `~/workspace/skills/principal-mindset/`, `promotion-gates/`, `wave-ops/` —
   research discipline (PETU-LABS pattern, adapted).
