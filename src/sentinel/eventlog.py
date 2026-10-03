@@ -212,8 +212,15 @@ CREATE TABLE IF NOT EXISTS outcomes (
 
 # Disposable Type-2 shim (design §6.4): platform queries not yet migrated read
 # this VIEW, never the table. Projections are never the truth.
+#
+# The VIEW also projects v0.1-compat columns (action, reason, q1_*, jev_model,
+# input_sha256) from the body JSON so pre-migration call sites and their
+# tests keep working through the migration window. The compat namespace
+# lives under body.v01_compat — the design's top-level body vocabulary is
+# untouched; only this disposable VIEW reaches into the compat corner.
 _DECISIONS_VIEW = """
-CREATE VIEW IF NOT EXISTS decisions AS
+DROP VIEW IF EXISTS decisions;
+CREATE VIEW decisions AS
 SELECT seq        AS id,
        ts         AS received_at,
        ts         AS created_at,
@@ -226,7 +233,14 @@ SELECT seq        AS id,
        outbox_id,
        body,
        prev_hash,
-       row_hash
+       row_hash,
+       json_extract(body, '$.disposition')        AS action,
+       json_extract(body, '$.v01_compat.reason')  AS reason,
+       json_extract(body, '$.input_sha256')       AS input_sha256,
+       json_extract(body, '$.jev_model')          AS jev_model,
+       json_extract(body, '$.v01_compat.q1_choice') AS q1_severity,
+       json_extract(body, '$.v01_compat.q1_probs')  AS q1_probs,
+       json_extract(body, '$.v01_compat.q1_confidence') AS q1_conf
 FROM events;
 """
 
@@ -282,7 +296,13 @@ class EventLog:
         self._conn.execute("PRAGMA busy_timeout=5000;")
         with self._lock:
             self._conn.executescript(_SCHEMA)
-            self._conn.executescript(_DECISIONS_VIEW)
+            # The disposable decisions VIEW must not collide with a v0.1
+            # `decisions` TABLE — migrate_v01() renames that table first and
+            # re-creates the VIEW afterwards.
+            tables = {r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "decisions" not in tables:
+                self._conn.executescript(_DECISIONS_VIEW)
         # Chain head cache (single writer — no staleness possible).
         with self._lock:
             row = self._conn.execute(

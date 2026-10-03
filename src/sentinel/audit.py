@@ -50,6 +50,13 @@ def _answer_confidence(answer):
     return getattr(answer, "confidence", None) if answer is not None else None
 
 
+def _answer_probs(answer):
+    if answer is None:
+        return None
+    probs = getattr(answer, "probabilities", None)
+    return json.dumps(probs, sort_keys=True) if probs else None
+
+
 class AuditLog:
     def __init__(self, db_path: str = "sentinel.db"):
         self.db_path = db_path
@@ -60,6 +67,7 @@ class AuditLog:
     def record(self, rec) -> int:
         """Write one decision_made event. Returns the event seq."""
         disp = rec.disposition
+        q1 = rec.q_severity
         return self._log.append_event(
             "decision_made", actor="engine",
             alert_id=rec.alert.alert_id,
@@ -85,6 +93,15 @@ class AuditLog:
                 "threshold_counterfactual": {},
                 "outbox_id": None,
                 "links": {"decision_requested_seq": None},
+                # v0.1-compat corner (Type 2): the disposable decisions VIEW
+                # projects these for pre-migration call sites. The design's
+                # top-level body vocabulary is untouched.
+                "v01_compat": {
+                    "reason": disp.reason,
+                    "q1_choice": _answer_choice(q1),
+                    "q1_probs": _answer_probs(q1),
+                    "q1_confidence": _answer_confidence(q1),
+                },
             })
 
     # ------------------------------------------------------------------ reads
@@ -92,29 +109,23 @@ class AuditLog:
     def get(self, row_id: int) -> dict:
         """Fetch one decision from the decisions VIEW by id (= event seq).
         Raises KeyError if missing."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            row = conn.execute(
+        # NOTE: reads go through the log's own single connection — a fresh
+        # sqlite3.connect(":memory:") would be a different, empty database.
+        with self._log._lock:
+            row = self._log._conn.execute(
                 "SELECT * FROM decisions WHERE id = ?", (row_id,)).fetchone()
-        finally:
-            conn.close()
         if row is None:
             raise KeyError(f"no decision row {row_id}")
         return dict(row)
 
     def decisions_for_fingerprint(self, fp: str, limit: int = 100) -> list[dict]:
         """Most recent decision_made events for a fingerprint, newest first."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(
+        with self._log._lock:
+            cur = self._log._conn.execute(
                 "SELECT * FROM decisions WHERE fingerprint = ? "
                 "AND type = 'decision_made' ORDER BY id DESC LIMIT ?",
                 (fp, limit))
             return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
 
     @property
     def log(self) -> EventLog:
