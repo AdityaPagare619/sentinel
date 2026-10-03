@@ -27,6 +27,8 @@ import random
 
 from sentinel.client import Answer, DecisionResponse, MockSystemOneClient
 from sentinel.models import Thresholds
+from sentinel.quantized import AllowlistEntry, Attestation
+from datetime import datetime, timedelta, timezone
 
 try:
     from sentinel.gate import Gate  # real one, when it lands
@@ -164,7 +166,19 @@ def run_batch(pairs: list[tuple], *, seed: int = 7, flip_rate: float = 0.0,
     rng = random.Random(seed + 1)
     thresholds = thresholds or Thresholds()
     if allowlist is None:
-        allowlist = {a.fingerprint for a, lab in pairs if lab.get("allowlist_candidate")}
+        # ADR-013: bare fingerprints no longer suppress (M-1 fix). The harness
+        # builds dual-attested entries for allowlist candidates so the
+        # "known noise -> suppress" fixtures exercise the attestation path.
+        now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        allowlist = [
+            AllowlistEntry(
+                fingerprint=a.fingerprint, author="harness",
+                attestations=[
+                    Attestation("alice", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+                    Attestation("bob", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+                ])
+            for a, lab in pairs if lab.get("allowlist_candidate")
+        ]
 
     script = {}
     states = {}

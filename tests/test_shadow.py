@@ -18,12 +18,14 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from sentinel.audit import AuditLog
 from sentinel.correlator import Correlator, fingerprint_for
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate
 from sentinel.models import Thresholds
+from sentinel.quantized import AllowlistEntry, Attestation
 from sentinel.receiver import Pipeline, ReceiverConfig, make_server
 from sentinel.shadow import (
     REQUIRED_PD_EVENTS,
@@ -42,6 +44,25 @@ from tests.test_gate import canned
 
 
 # ---------------------------------------------------------------- fixtures
+
+def _attested_entries(fingerprints):
+    """Dual-attested allowlist entries (ADR-013 interim path).
+
+    A bare fingerprint in the allowlist no longer suppresses — that was
+    the M-1 units error. Fixtures that script would-suppress verdicts
+    must carry the dual human attestation the quantized prob lock
+    requires pre-fit (design §2.3). Attestations are dated relative to
+    now so the 30-day TTL never rots the fixture.
+    """
+    now = datetime.now(timezone.utc)
+    return [AllowlistEntry(
+        fingerprint=fp, author="fixture-author",
+        attestations=[
+            Attestation("alice", now - timedelta(days=1),
+                        "lrq-shadow-fixture-01", 30),
+            Attestation("bob", now - timedelta(days=1),
+                        "lrq-shadow-fixture-01", 30),
+        ]) for fp in (fingerprints or [])]
 
 class FixedClient:
     """Deterministic stand-in: one canned response for every call."""
@@ -153,7 +174,7 @@ class ShadowTestBase(unittest.TestCase):
                og_token=None, am_token="am-token"):
         self.write_path = RefusingForwarder()
         audit = AuditLog(":memory:")
-        gate = Gate(jev_client, Thresholds(), set(allowlist or []), audit,
+        gate = Gate(jev_client, Thresholds(), _attested_entries(allowlist), audit,
                     shadow=True)
         pipeline = Pipeline(Correlator(), gate, self.write_path, audit,
                             ReceiverConfig())
@@ -162,7 +183,7 @@ class ShadowTestBase(unittest.TestCase):
                               alertmanager_token=am_token)
         config.validate()
         pipeline.shadow_pipeline = ShadowPipeline(
-            gate=Gate(jev_client, Thresholds(), set(allowlist or []), audit,
+            gate=Gate(jev_client, Thresholds(), _attested_entries(allowlist), audit,
                       shadow=True),
             correlator=Correlator(), store=ShadowStore(), config=config,
             allowlist=set(allowlist or []))
@@ -416,7 +437,7 @@ class TestReadOnlyProof(unittest.TestCase):
     def _build(self, jev_client, allowlist=None):
         write_path = RefusingForwarder()
         audit = AuditLog(":memory:")
-        gate = Gate(jev_client, Thresholds(), set(allowlist or []), audit,
+        gate = Gate(jev_client, Thresholds(), _attested_entries(allowlist), audit,
                     shadow=True)
         pipeline = Pipeline(Correlator(), gate, write_path, audit,
                             ReceiverConfig())

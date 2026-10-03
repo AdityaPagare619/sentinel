@@ -27,13 +27,15 @@ from sentinel.shadow_report import (generate_shadow_report,
                                     zero_sev12_divergence_bar)
 
 from tests.test_gate import canned
-from tests.test_shadow import PD_SECRET, ScriptedClient, _pd_sig, _pd_v3
+from tests.test_shadow import (PD_SECRET, ScriptedClient, _attested_entries,
+                               _pd_sig, _pd_v3)
 
 
 def _build_pipeline(by_title, allowlist):
     audit = AuditLog(":memory:")
     client = ScriptedClient(by_title, default=canned(p1=0.9, conf=0.95))
-    gate = Gate(client, Thresholds(), set(allowlist), audit, shadow=True)
+    gate = Gate(client, Thresholds(), _attested_entries(allowlist), audit,
+                shadow=True)
     config = ShadowConfig(enabled=True, pd_secret=PD_SECRET)
     return ShadowPipeline(gate=gate, correlator=Correlator(),
                           store=ShadowStore(), config=config,
