@@ -54,12 +54,19 @@ eval "$SENTINEL_RESTART_CMD"
 
 echo "deploy: health-gating on :$PORT/healthz"
 ok=0
+HB="$(mktemp)"; trap 'rm -f "$HB"' EXIT
 for _ in $(seq 1 24); do
-  if [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' \
+  code="$(curl -s -m 3 -o "$HB" -w '%{http_code}' \
       -H "Authorization: Bearer $SENTINEL_HEALTH_TOKEN" \
-      "http://127.0.0.1:$PORT/healthz")" = "200" ]; then ok=1; break; fi
+      "http://127.0.0.1:$PORT/healthz")"
+  # HTTP 200 AND top-level ok:true — a 503 (failed predicate) is unhealthy.
+  if [ "$code" = "200" ] && python3 -c "
+import json, sys
+sys.exit(0 if json.load(open('$HB')).get('ok') is True else 1)
+" 2>/dev/null; then ok=1; break; fi
   sleep 5
 done
+rm -f "$HB"; trap - EXIT
 if [ "$ok" = "1" ]; then
   echo "deploy: GREEN — $SHA live at $ART (previous: $PREV)"
   echo "$TS $SHA $PREV" >> "$ROOT/deploy.log"

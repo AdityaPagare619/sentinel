@@ -75,6 +75,23 @@ fi
 
 stage "boot-smoke" ./scripts/ops/receiver-smoke.sh
 
+# Ops scripts self-check: every script we ship must at least parse.
+echo "── stage: ops-scripts ──"
+OPS_OK=1
+for py in ./scripts/ops/*.py; do
+  python3 -m py_compile "$py" || OPS_OK=0
+done
+for sh in ./scripts/ops/*.sh; do
+  bash -n "$sh" || OPS_OK=0
+done
+if [ "$OPS_OK" = "1" ]; then
+  echo "PASS: ops-scripts (py_compile + bash -n)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: ops-scripts"
+  FAIL=$((FAIL+1))
+fi
+
 # Config schema validation on a fresh bootstrap tree.
 echo "── stage: config-schemas ──"
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT

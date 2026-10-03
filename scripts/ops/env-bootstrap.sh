@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # env-bootstrap.sh — build a working Sentinel environment tree from zero.
 #
-# Creates: <config-dir>/{thresholds.json,allowlist.json,flags.json},
+# Creates: <config-dir>/{thresholds.json,allowlist.json,flags.json,heartbeats.json},
 #          <state-dir>/, and an env template (PLACEHOLDERS, never values).
 # Idempotent: never overwrites existing files; exits non-zero on a bad tree.
 #
@@ -106,6 +106,26 @@ write_once "$CONFIG_DIR/flags.json" <<'EOF'
   },
   "changed_by": "env-bootstrap",
   "changed_at": null
+}
+EOF
+
+# --- heartbeats.json (A3 per-source dead-man's-switch, devops-foundation.md §10)
+write_once "$CONFIG_DIR/heartbeats.json" <<'EOF'
+{
+  "version": 1,
+  "_comment": "Per-source heartbeat expectations. Cadences are MEASURED (p99 inter-arrival over 30d of shadow data), not guessed; silent_after_s ~= 3-5x p99. Checked externally by scripts/ops/heartbeat-check.py — never through the receiver.",
+  "sources": {
+    "pagerduty:prod": {
+      "expected_interval_s": 300,
+      "stale_after_s": 1800,
+      "silent_after_s": 3600
+    }
+  },
+  "defaults": {
+    "expected_interval_s": 3600,
+    "stale_after_s": 7200,
+    "silent_after_s": 14400
+  }
 }
 EOF
 

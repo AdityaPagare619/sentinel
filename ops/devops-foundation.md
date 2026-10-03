@@ -496,6 +496,145 @@ which pages went via secondary, drill freshness at cutover time.
 
 ---
 
+## 10. A3 — per-source heartbeat / dead-man's-switch
+
+**Binding input:** Petu 2026-10-04 (Aditya's order), adopting the external
+redesign proposal's A3 item: *"per-source heartbeat / dead-man's-switch
+('prometheus silent 7m, expected every 60s')"*. **Type:** the heartbeat
+contract (subjects, semantics, placement) is Type 1; cadence values are
+Type 2 (measured per org).
+
+**The failure mode this kills:** everything upstream of the paging decision
+can die silently — the alert source (Prometheus/Alertmanager stops firing),
+the path (webhook auth breaks, routing key rotated, network partition), or
+Sentinel's receiver itself. Fail-open covers the *decision* path, but a
+silent source means there is nothing to decide on: pages are lost, not
+delayed. The receiver-down (RB-4) and disk-full (RB-6) runbooks both *start*
+from "something went silent" — this is the tripwire that tells the on-call
+which one they're in.
+
+### 10.1 Subjects and cadences
+
+A heartbeat subject is one `source_integration` value as recorded on
+`decision_requested` events — e.g. `pagerduty:prod`, `alertmanager:eu-west`,
+`webhook:acme-siem` — plus two synthetic subjects:
+
+| Subject | What it watches |
+|---|---|
+| `source_integration` values | each alert source's path into Sentinel, end to end |
+| `__pipeline__` | any event at all in the log — the pipeline is writing |
+| `__shadow_tap__` | (when the tap emits marker events) the shadow feed's freshness — stale tap ⇒ shadow-diff evidence is void (§2.3) |
+
+Cadences live in `heartbeats.json` (versioned, config dir; written by
+`env-bootstrap.sh`). Three numbers per subject, all **measured, not guessed**:
+
+- `expected_interval_s` — normal inter-arrival (p99 over 30d of shadow data).
+- `stale_after_s` — quieter than usual; warning, investigate low-priority.
+- `silent_after_s` — the dead-man trip; page. ≈ 3–5× p99 inter-arrival.
+  (The proposal's example: expected every 60s, silent at 7m.)
+
+States: `ok` → `stale` → `silent`, plus `unknown` (no rows yet — the script
+never cries wolf on missing instrumentation).
+
+### 10.2 Where the switch lives
+
+On the **external watcher** — a cron on a different fate domain from the
+Sentinel box (the operator's existing monitoring host; ₹0). It runs
+`scripts/ops/heartbeat-check.py --db <SENTINEL_DB> --heartbeats
+heartbeats.json`, which reads the SQLite file **directly** (read-only URI
+mode). The verdict never traverses the receiver: no `/healthz`, no `/livez`
+in the decision path. If the receiver is down, the script still runs and
+reports the log stopped growing — which is exactly the information the
+on-call needs.
+
+The check script is also allowed to *consult* `/livez` for diagnosis, but
+the trip verdict comes from the log file alone.
+
+**Dead-man for the watcher itself:** the script appends its run timestamp to
+its own state file (`heartbeat-check.state`, next to the DB — never into the
+event log; the engine owns that). The weekly on-call review checks the state
+file is fresh. With budget, the first purchase is a hosted dead-man service
+for the watcher; until then the weekly review + the monthly drill (§2.5)
+cover it, and the gap is stated here rather than hidden.
+
+### 10.3 Silent vs stale — what fires, how the on-call tells them apart
+
+| State | Meaning | Fires |
+|---|---|---|
+| `stale` | source quieter than usual; could be a quiet night | warning: ticket/note, check the sender side when convenient |
+| `silent` | dead-man trip: the source, the path, or the receiver is dead | **page the on-call** — treat as paging-path-down until proven otherwise |
+
+Disambiguation is RB-8's job (below): `/livez` dead → RB-4 (receiver down);
+sender side dead → fix the sender; both alive → the path between them
+(webhook auth, routing key, network) is broken.
+
+### 10.4 Instrumentation gap (honest)
+
+`decision_requested` already carries `source_integration` as a required body
+key, but **nothing in `src/` writes `decision_requested` yet** — the live
+path writes `decision_made`, which has no source field. Until the receiver
+calls `record_request()` (or `decision_made` carries the source), per-source
+subjects report `unknown` and the script watches only `__pipeline__`.
+**Flagged request L3-A3-1 (build coordinator):** emit `decision_requested`
+with `source_integration` at receiver ingest (the contract exists in
+`eventlog.py`; the call site is missing). The script is forward-compatible:
+the day the events appear, per-source heartbeats start working with no
+script change.
+
+---
+
+## 6. Operational runbooks (continued)
+
+### RB-8: Alert source silent (dead-man trip)
+
+**Trigger.** `heartbeat-check.py` exits 2: some subject is `silent`
+("DEAD-MAN TRIP: a source is silent — page the on-call"). Treat as
+paging-path-down until proven otherwise — a silent source loses pages, it
+doesn't delay them.
+
+**Diagnosis — disambiguate the three deaths (~3 min).**
+1. **Is the receiver alive?** `curl -m 5 http://<host>:<port>/livez`.
+   Dead → this is RB-4 (receiver down), not a source problem. Follow RB-4;
+   the heartbeat did its job by telling you where to look.
+2. **Is the sender alive?** Check the source directly, bypassing Sentinel:
+   Alertmanager/Prometheus UI or API for the silent
+   `source_integration`; PagerDuty console for a `pagerduty:*` source.
+   Sender dead → fix the sender (their runbook); Sentinel is innocent.
+   Note it in `ops/incidents/` — the heartbeat proved the *path* was clean.
+3. **Both alive?** Then the path between them is broken. Suspects in order:
+   webhook HMAC (secret rotated on the sender side but not the receiver —
+   check for 403s in the receiver log), routing key changed, network/egress
+   change, the sender's Sentinel webhook URL misconfigured. Check
+   `webhook_auth_fail_open` on `/healthz` while you're here.
+
+**Stale (exit 1) is not this runbook:** a `stale` source gets a low-priority
+ticket — "source X quieter than usual, last event <ts>" — and the on-call
+checks the sender side when convenient. Do not page for stale. If a source
+is `stale` every night at 3 AM, its `expected_interval_s` was measured wrong;
+fix the cadence in `heartbeats.json` (Type 2), don't train the team to
+ignore the warning.
+
+**Actions on a confirmed silent.**
+1. Page the on-call (the trip already did). Declare in the room:
+   `SOURCE SILENT: <source_integration> — <which of the three deaths>`.
+2. If the receiver is implicated at all, keep RB-4/RB-7 ready — a silent
+   source during a receiver outage is the double-fault pre-mortem.
+3. While diagnosing, confirm `__pipeline__` is `ok`: other sources still
+   flowing means the blast radius is the one source, not the box.
+
+**Escalation.** On-call → Petu after 15 min of unidentified silence.
+Customer notice if their source is the silent one and the cause is on our
+side.
+
+**Fixed when.** `heartbeat-check.py` reports the subject `ok` for two
+consecutive runs 5 min apart AND the disambiguated cause has a logged fix
+(sender fixed, secret re-synced, path restored). Log the incident in
+`ops/incidents/` with the timeline and which of the three deaths it was —
+the ratio of the three, over quarters, tells us where the paging path is
+actually fragile.
+
+---
+
 ## 7. Done-checklist (principal-systems)
 
 - **10× scale without rewrite?** The ops story assumes single-box v0.1.
@@ -548,6 +687,6 @@ which pages went via secondary, drill freshness at cutover time.
 ---
 
 *Delivered: `ops/devops-foundation.md` + `scripts/ops/` (bootstrap, gate,
-secrets-grep, disk-watermark, flagctl, receiver-smoke, deploy, rollback).
-Every script below was executed against `origin/main @ 605793f` in this lane's
-worktree before commit.*
+secrets-grep, disk-watermark, flagctl, heartbeat-check, receiver-smoke,
+deploy, rollback). Every script below was executed against `origin/main @
+605793f` in this lane's worktree before commit.*

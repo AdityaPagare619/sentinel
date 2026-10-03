@@ -40,7 +40,12 @@ ok=0; body=""
 for _ in $(seq 1 24); do
   body="$(curl -s -m 3 -H "Authorization: Bearer $SENTINEL_HEALTH_TOKEN" \
     "http://127.0.0.1:$PORT/healthz" || true)"
-  if echo "$body" | grep -q '"ok": *true'; then ok=1; break; fi
+  # Top-level .ok only — a nested predicate's "ok":true must not mask a
+  # failed deep check.
+  if echo "$body" | python3 -c "
+import json, sys
+sys.exit(0 if json.load(sys.stdin).get('ok') is True else 1)
+" 2>/dev/null; then ok=1; break; fi
   sleep 5
 done
 if [ "$ok" = "1" ]; then
