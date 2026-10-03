@@ -13,6 +13,9 @@ Run:  PYTHONPATH=src python -m sentinel.receiver --port 8080
 Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1), SENTINEL_WEBHOOK_SECRET (optional),
       PD_EVENTS_URL, PD_ROUTING_KEY (optional, for generic alerts),
       SENTINEL_DB (default ./sentinel.db), SENTINEL_SHADOW (0/1).
+      Stage-0 shadow tap (design 06): SENTINEL_SHADOW_TAP (0/1),
+      SENTINEL_SHADOW_PD_SECRET, SENTINEL_SHADOW_OG_TOKEN,
+      SENTINEL_SHADOW_AM_TOKEN, SENTINEL_SHADOW_WRITE_CREDENTIALS (must stay empty).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from .correlator import Correlator, fingerprint_for, fingerprint_of
 from .forwarder import Forwarder
 from .gate import Gate
 from .models import Alert, Thresholds
+from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
 from .state import build_state
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -63,6 +67,11 @@ class Pipeline:
         self.forwarder = forwarder
         self.audit = audit
         self.config = config or ReceiverConfig()
+        # Stage-0 read-only tap (design 06). Attached by
+        # build_pipeline_from_env(); None when SENTINEL_SHADOW_TAP != 1.
+        # The shadow pipeline's object graph contains no paging/write
+        # path — see sentinel/shadow.py.
+        self.shadow_pipeline: ShadowPipeline | None = None
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -278,6 +287,12 @@ class SentinelHandler(BaseHTTPRequestHandler):
                                   "message": "payload too large"})
             return
         body = self.rfile.read(length) if length > 0 else b""
+        # Stage-0 shadow tap: a SEPARATE route with its own failure
+        # semantics. It must NEVER fall through to the paging receiver's
+        # fail-open last resort (which pages the original bytes).
+        if path.startswith("/shadow/"):
+            self._do_shadow_post(path, body)
+            return
         try:
             if path == "/v2/enqueue":
                 resp = self.pipeline.handle_pd(body)
@@ -304,6 +319,37 @@ class SentinelHandler(BaseHTTPRequestHandler):
             self._send_json(200, _pd_ok(_body_key(body)))
 
     # -- helpers -----------------------------------------------------
+    def _do_shadow_post(self, path: str, body: bytes) -> None:
+        """Stage-0 tap ingress (design 06 §a). Read-only by construction.
+
+        Shadow failures return 5xx WITHOUT the paging fail-open: the
+        vendor retries the delivery and ingest is idempotent, so nothing
+        is lost and nothing is ever paged from this path.
+        """
+        sp = self.pipeline.shadow_pipeline
+        if sp is None:
+            self._send_json(404, {"status": "error",
+                                  "message": "shadow tap disabled"})
+            return
+        try:
+            if path == "/shadow/pagerduty":
+                code, resp = sp.handle("pagerduty", body, dict(self.headers))
+            elif path == "/shadow/opsgenie":
+                code, resp = sp.handle("opsgenie", body, dict(self.headers))
+            elif path == "/shadow/alertmanager":
+                code, resp = sp.handle("alertmanager", body, dict(self.headers))
+            else:
+                self._send_json(404, {"status": "error",
+                                      "message": "not found"})
+                return
+            self._send_json(code, resp)
+        except Exception as exc:
+            # The tap's last resort is retry, never paging: a 500 triggers
+            # a vendor retry; idempotent ingest collapses the duplicate.
+            sys.stderr.write(f"[sentinel] shadow handler exception: {exc}\n")
+            self._send_json(500, {"status": "error",
+                                  "message": "shadow ingest failed"})
+
     def _signature_ok(self, body: bytes) -> bool:
         secret = self.pipeline.config.webhook_secret
         if not secret:
@@ -418,7 +464,28 @@ def build_pipeline_from_env() -> Pipeline:
         webhook_secret=os.environ.get("SENTINEL_WEBHOOK_SECRET"),
         shadow=shadow,
     )
-    return Pipeline(Correlator(), gate, forwarder, audit, config)
+    pipeline = Pipeline(Correlator(), gate, forwarder, audit, config)
+    pipeline.shadow_pipeline = build_shadow_pipeline_from_env(
+        client=client, thresholds=thresholds, allowlist=allowlist, audit=audit)
+    return pipeline
+
+
+def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
+                                   audit) -> ShadowPipeline | None:
+    """Stage-0 read-only tap (design 06 §a). None unless SENTINEL_SHADOW_TAP=1.
+
+    The shadow gate runs in shadow mode (verdicts recorded, never
+    executed). Refuses to boot when SENTINEL_SHADOW_WRITE_CREDENTIALS is
+    non-empty — the tap may not hold write credentials (design 06 §a.4).
+    """
+    config = shadow_config_from_env()
+    if config is None:
+        return None
+    shadow_gate = Gate(client, thresholds, set(allowlist or []), audit,
+                       shadow=True)
+    return ShadowPipeline(gate=shadow_gate, correlator=Correlator(),
+                          store=ShadowStore(), config=config,
+                          allowlist=set(allowlist or []))
 
 
 def main(argv=None) -> None:
@@ -429,7 +496,9 @@ def main(argv=None) -> None:
     pipeline = build_pipeline_from_env()
     server = make_server(args.port, pipeline, bind=args.bind)
     print(f"[sentinel] listening on {args.bind}:{server.server_port} "
-          f"(shadow={pipeline.config.shadow})", file=sys.stderr)
+          f"(shadow={pipeline.config.shadow}, "
+          f"shadow_tap={'on' if pipeline.shadow_pipeline else 'off'})",
+          file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
