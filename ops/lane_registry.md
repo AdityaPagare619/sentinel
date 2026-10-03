@@ -25,6 +25,7 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/oracle-latency` | Oracle | in flight | N=100 latency campaign (measurement) | — |
 | `lane/impl-forwarder` | Pager | in flight | design 03: durable forwarder, PD dedup_key, standby | — |
 | `lane/impl-liveness` | SRE | in flight | design 05: livez/healthz, 503-not-429, config validation | — |
+| `lane/remove-ci` | Petu (coordinator) | done (merged PR #20) | removed .github/workflows/ per Aditya 13:42 order; METHODOLOGY.md gate → local tests | `squash-merge` |
 
 ## Rules
 
