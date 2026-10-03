@@ -329,13 +329,24 @@ class TestStream(AppCase):
         self.assertNotIn("event: decision", text)
 
     def test_sse_gap_when_cursor_ancient(self):
+        # Force the replay bound low: a cursor older than head - bound
+        # must yield exactly one gap event, then live events.
+        orig = _app.MAX_REPLAY
+        _app.MAX_REPLAY = 3
+        self.addCleanup(setattr, _app, "MAX_REPLAY", orig)
         r = self.call(self.app, "/api/stream", query="since_id=0",
                       sse_seconds=3, headers={"Last-Event-ID": "0"})
-        # head < MAX_REPLAY here, so no gap; force one via huge head is
-        # covered in test_store (retention bound constant). Just check
-        # the stream is well-formed.
         text = r["body"].decode()
         self.assertIn("retry: 3000", text)
+        self.assertIn("event: gap", text)
+        gap_line = next(l for l in text.splitlines()
+                        if l.startswith("data: {") and "resume_since_id" in l)
+        gap = json.loads(gap_line[len("data: "):])
+        self.assertIn("resume_since_id", gap)
+        self.assertIn("missed", gap)
+        self.assertGreater(gap["missed"], 0)
+        # ...and live decisions still stream after the gap.
+        self.assertIn("event: decision", text)
 
     def test_live_write_appears_on_stream(self):
         # Open the tail FIRST, then write through the real engine path;
