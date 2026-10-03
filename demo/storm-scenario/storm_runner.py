@@ -150,20 +150,25 @@ def attested_noise_allowlist() -> list[AllowlistEntry]:
 
 
 def sink_into(log: EventLog):
-    """emit= callback: gate payloads -> append-only event log.
+    """emit= callback: gate payloads -> the shared append-only event log.
 
-    Returns the sink function; the function's ``payloads`` attribute holds
-    every emitted envelope in order (for reading the real budget_outcome),
-    and ``decision_seqs`` holds (alert_id, seq) for decision_made events in
-    emission order — so answer rows key to the exact decision, even when
-    one alert is decided several times (the flip beat).
+    decision_made payloads are NOT written here — the runner enriches them
+    with v01_compat (via sentinel.audit's own helpers, from the returned
+    DecisionRecord) after evaluate() returns, then appends. This matches
+    what the engine's canonical audit path writes, with two corrections
+    the audit path lacks: the TRUE budget_outcome (audit._budget_outcome
+    mislabels timer_won as structural_passthrough) and the REAL
+    lock_evaluation (audit writes only a note).
+    shadow_decision payloads are complete as emitted and go straight in.
+    Single EventLog instance throughout: the chain can never diverge.
     """
-    payloads: list[dict] = []
-    decision_seqs: list[tuple[str, int]] = []
+    pending_decisions: list[dict] = []
 
-    def _emit(payload: dict) -> int:
-        payloads.append(payload)
-        seq = log.append_event(
+    def _emit(payload: dict) -> None:
+        if payload["type"] == "decision_made":
+            pending_decisions.append(payload)
+            return
+        log.append_event(
             payload["type"],
             actor=payload.get("actor", "engine"),
             alert_id=payload["alert_id"],
@@ -173,12 +178,39 @@ def sink_into(log: EventLog):
             body=payload["body"],
             ts=payload.get("ts"),
         )
-        if payload["type"] == "decision_made":
-            decision_seqs.append((payload["alert_id"], seq))
-        return seq
-    _emit.payloads = payloads
-    _emit.decision_seqs = decision_seqs
+    _emit.pending_decisions = pending_decisions
+    _emit.log = log
     return _emit
+
+
+def append_decision(sink, disp, rec) -> int:
+    """Enrich the just-emitted decision_made payload and append it.
+
+    v01_compat is derived from the REAL DecisionRecord via sentinel.audit's
+    own helpers — the same derivation the engine's canonical audit path
+    uses. Nothing is invented. Returns the event seq.
+    """
+    from sentinel.audit import (_answer_choice, _answer_confidence,
+                                _answer_probs)
+    payload = sink.pending_decisions.pop()
+    q1 = rec.q_severity
+    body = dict(payload["body"])
+    body["v01_compat"] = {
+        "reason": disp.reason,
+        "q1_choice": _answer_choice(q1),
+        "q1_probs": _answer_probs(q1),
+        "q1_confidence": _answer_confidence(q1),
+    }
+    return sink.log.append_event(
+        "decision_made",
+        actor=payload.get("actor", "engine"),
+        alert_id=payload["alert_id"],
+        fingerprint=payload["fingerprint"],
+        episode_id=payload.get("episode_id") or "",
+        outbox_id=payload.get("outbox_id"),
+        body=body,
+        ts=payload.get("ts"),
+    )
 
 
 def river_row(alert, disp, budget_outcome: str, latency_ms) -> str:
@@ -219,14 +251,6 @@ def _record_json(seq: int, alert_id: str, rec) -> dict:
     }
 
 
-def _last_seq(sink, alert_id: str) -> int:
-    """Seq of the most recent decision_made for this alert."""
-    for aid, seq in reversed(sink.decision_seqs):
-        if aid == alert_id:
-            return seq
-    raise AssertionError(f"no decision_made recorded for {alert_id}")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", type=int, default=40)
@@ -263,12 +287,11 @@ def main() -> None:
     t0 = time.monotonic()
     disp1, rec1 = flip_gate.evaluate(flip_alert, flip_state,
                                     {}, {"org": "demo-org"})
-    answer_rows = [_record_json(_last_seq(flip_sink, flip_alert.alert_id),
-                               flip_alert.alert_id, rec1)]
-    row1 = next(p for p in reversed(flip_sink.payloads)
-                if p["type"] == "decision_made"
-                and p["alert_id"] == flip_alert.alert_id)
-    print(river_row(flip_alert, disp1, row1["body"]["budget_outcome"],
+    seq1 = append_decision(flip_sink, disp1, rec1)
+    answer_rows = [_record_json(seq1, flip_alert.alert_id, rec1)]
+    # The REAL budget outcome, off the just-written event — never assumed.
+    b1 = json.loads(log.get_event(seq1)["body"])
+    print(river_row(flip_alert, disp1, b1["budget_outcome"],
                     disp1.latency_ms))
     # Wait for the detached late answer (real Jev, real shadow decision).
     deadline = time.monotonic() + LATE_ANSWER_WAIT_S
@@ -306,8 +329,8 @@ def main() -> None:
         d, rec = main_gate.evaluate(flip_alert, build_eval_state(flip_alert),
                                     {}, {"org": "demo-org"})
         reask.append(d)
-        answer_rows.append(_record_json(_last_seq(main_sink, flip_alert.alert_id),
-                                       flip_alert.alert_id, rec))
+        seqk = append_decision(main_sink, d, rec)
+        answer_rows.append(_record_json(seqk, flip_alert.alert_id, rec))
         print(f"  ask {k + 1}: {d.action} ({d.reason}) "
               f"conf={d.confidence} latency={d.latency_ms:.0f}ms")
         time.sleep(CALL_GAP_S)
@@ -324,14 +347,11 @@ def main() -> None:
     for i, (alert, label) in enumerate(storm):
         disp, rec = main_gate.evaluate(alert, build_eval_state(alert),
                                        {}, {"org": "demo-org"})
-        answer_rows.append(_record_json(_last_seq(main_sink, alert.alert_id),
-                                       alert.alert_id, rec))
-        # The REAL budget outcome, off the emitted decision_made envelope —
-        # never assumed.
-        row = next(p for p in reversed(main_sink.payloads)
-                   if p["type"] == "decision_made"
-                   and p["alert_id"] == alert.alert_id)
-        print(river_row(alert, disp, row["body"]["budget_outcome"],
+        seqi = append_decision(main_sink, disp, rec)
+        answer_rows.append(_record_json(seqi, alert.alert_id, rec))
+        # The REAL budget outcome, off the just-written event.
+        bi = json.loads(log.get_event(seqi)["body"])
+        print(river_row(alert, disp, bi["budget_outcome"],
                         disp.latency_ms))
         time.sleep(CALL_GAP_S)
     main_gate.close()

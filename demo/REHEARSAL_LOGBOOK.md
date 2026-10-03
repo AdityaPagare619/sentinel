@@ -214,3 +214,76 @@ stand-in, labeled as such in every envelope.
 **Verdict:** the demo's data path is rehearsed end to end — real engine
 → real event log → frozen contract → (UI when a browser looks at it).
 The Sun 21:00 checkpoint shows this REAL state, warts included.
+
+## Rehearsal 5 — INTEGRATED STACK, live flip beat (2026-10-03 ~20:50 IST)
+
+**The gating dependency resolved:** platform API merged (PR #44, commit
+f69e116). Server: `python3 platform/server/__main__.py --port 18082 --db
+demo/storm-scenario/storm.db --context-json demo/storm-scenario/alert-context.jsonl`.
+The stack is now engine → event log → platform API → Prism UI, all real.
+
+**Platform-fidelity work done before the rehearsal (honest, documented):**
+1. My runner's emit sink was writing the gate's lean payloads (no
+   v01_compat) while the gate's internal audit.record went to :memory:.
+   The platform projects reason/Q1 from v01_compat — so the UI showed
+   `cannot_determine` severity on EVERY row and `unknown` reasons.
+   Fixed: runner now enriches decision_made bodies with v01_compat
+   derived from the REAL DecisionRecord via sentinel.audit's own
+   helpers (same derivation the engine's canonical audit path uses).
+   The gate's TRUE budget_outcome (timer_won) and REAL lock_evaluation
+   are kept — the audit path mislabels timer_won as structural_passthrough
+   (verified) and writes only a lock note.
+2. One-time verified migration of the existing 43 events
+   (`migrate_v01compat.py`): 42 enriched, chain recomputed, backup kept
+   as storm.db.pre-v01compat. Asserted: seq↔alert_id match, 43/43 events
+   migrated.
+3. Outcomes: loaded 40 synthetic reference labels into the outcomes
+   table (`load_outcomes.py`) — the platform's own labels-v3 precedent
+   ("seeded synthetic labels; data_source=synthetic, loudly"). labeled_at
+   is the rehearsal timestamp; never presented as real incidents.
+
+**Live flip beat** (`demo/flip_beat_live.py`, real Jev, real gate):
+- 1a: B=500ms → timer won → passthrough, seq 44. No late answer within
+  40s (noted honestly on screen) — the shadow_decision landed just after
+  the window as seq 45: real Jev, 849ms, q1=0.0, conf=0.61,
+  shadow_disposition=passthrough, would_have_suppressed=false.
+- 1b: two live re-asks at B=2700ms → seqs 46, 47, both passthrough
+  (uncertain), conf 0.66/0.61, latencies 651/501ms — modal outcome,
+  [LIVE] badges, no fallback needed.
+- Flip-audit via the API: the alert now has 6 repeats (seqs 1,3,4,44,46,47),
+  `flipped: true`, full decision list including both timer-win rows.
+
+**Verified through the REAL platform API (all against storm.db):**
+- /api/decisions — 45 decisions, real reasons (uncertain/threshold/timer_won),
+  real severities (known_noise), real teams, titles joined from context.
+- /api/decision/1 and /44 — flip rows read `reason: timer_won`.
+- /api/decision/5 — REAL Q1 prob_map (known_noise 0.57 / p3_medium 0.28 /
+  p2_high 0.15), not the uniform fabrication.
+- /api/analytics/flips — 6-repeat audit with flipped=true.
+- /api/analytics/noise — real breakdown (uncertain 64.4%, threshold 31.1%,
+  timer_won 4.4%), 25 top checks.
+- /api/calibration — n_decisions=45, n_labeled=45, ece=0.05, bin n=43 with
+  Wilson CI [0.0, 0.082], data_source=synthetic. Denominators on every card.
+- /api/stream (SSE) — replays the log live.
+- / serves the Prism UI (200).
+
+**Warts, logged honestly:**
+- W1 (OPEN, platform lane): timer-win rows still get fabricated UNIFORM
+  prob_maps (0.2/0.2/…), unlabeled in the response. jev_model=null and
+  latency_ms=null are the honest signals; the uniform bars are not. The
+  demoist does NOT open the prob drawer on the timer-win row, or names
+  the reconstruction if asked. Recommended fix: when jev_model is null,
+  the store should return prob_map null (or a marked reconstruction).
+- W2 (OPEN, contract): budget_outcome has no first-class contract field;
+  the flip story rides on the reason chip (now truthful: timer_won).
+- W3 (resolved): the 40s late-answer window missed the shadow by seconds;
+  the event still landed (seq 45) and is visible — the beat's honesty copy
+  already covers this ("the machine's late answer is recorded, never acting").
+- W4 (simulator): platform simulate.py == tuner.classify (pre-ADR-013
+  continuous gate), not the live kernel — Finding 3 stands, UI lane's call.
+
+**What smelled fake and was killed:** the lean emit bodies (severity
+cannot_determine everywhere, unknown reasons) — killed via the v01_compat
+enrichment. The uniform prob_maps on answered rows — killed (now real).
+No mocks, no recordings, no key in the repo. The one recording on disk
+(flip-beat-recording-20261003T144811) remains the LABELED fallback only.

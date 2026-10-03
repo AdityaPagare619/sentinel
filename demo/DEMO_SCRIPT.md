@@ -156,6 +156,13 @@ REHEARSAL_LOGBOOK.md Rehearsal 3.)
 **Reads (UI path):** `GET /api/decisions?limit=50` + `SSE /api/stream`.
 **Strip:** *"The budget fired first: the page went out. The machine's
 late answer is recorded below — it never acts."*
+**Known wart (platform lane, logged):** on the timer-win row the
+platform's prob drawer shows reconstructed uniform bars (no Jev answer
+exists on that path — `jev_model: null`, `latency_ms: null` are the
+honest signals). The demoist does NOT open the prob drawer on this row;
+if asked: "No model answer was evaluated on the timer-win path — those
+bars are the platform's documented reconstruction placeholder, not a
+model output."
 
 **Exit condition:** the viewer has seen the timer win and the late
 answer, and can say what a shadow decision is. ("The machine showed me a
