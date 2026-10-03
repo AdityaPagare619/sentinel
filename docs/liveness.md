@@ -24,6 +24,19 @@ in the state dir).
 Jev path errored and the gate is passing through). Degraded still pages —
 it is not UNHEALTHY.
 
+## `webhook_auth_fail_open` (ADR-005 D11)
+
+`/healthz` carries a top-level `webhook_auth_fail_open` boolean on **every**
+response (both the 200 and the 503 body). It is `true` only when the receiver
+was started with `SENTINEL_WEBHOOK_ONBOARDING=1` — the explicit flagged
+onboarding window in which unsigned/legacy-timestamp-less deliveries are
+accepted loudly instead of refused. It is not a predicate failure: the
+process can still do its job, so onboarding does not 503. In production the
+field must read `false`; a supervisor, external watcher, or design-partner
+drill that sees `true` knows webhook auth is fail-open and the onboarding
+window has not been closed. Paired with the CRITICAL boot-time warning and
+the per-request `webhook_auth_bypassed` metric.
+
 ## The 503-not-429 receiver contract (release-blocking)
 
 Alertmanager **drops** alerts on 429 (unrecoverable verdict) but **retries**
