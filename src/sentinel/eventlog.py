@@ -272,6 +272,9 @@ class EventLog:
             "shadow_drops": 0,
             "coalesced_duplicates": 0,
         }
+        # Re-entrancy guard: the degraded path's own commits must not
+        # re-trip the watchdog (infinite recursion on a sick disk).
+        self._in_watchdog_trip = False
         self._conn = sqlite3.connect(db_path, check_same_thread=False,
                                      isolation_level=None)  # autocommit; we txn explicitly
         self._conn.row_factory = sqlite3.Row
@@ -299,13 +302,19 @@ class EventLog:
         is told via WatchdogTrip so the caller can engage file-03's degraded
         ladder. The event itself IS durable — this is recorded, not lost.
         """
-        if self._test_commit_delay_s:
-            time.sleep(self._test_commit_delay_s)
         t0 = time.perf_counter()
+        if self._test_commit_delay_s:
+            # Fault-injection seam: simulate a sick disk INSIDE the timed
+            # region so the watchdog sees the slow commit. Test-only.
+            time.sleep(self._test_commit_delay_s)
         self._conn.execute("COMMIT;")
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        if elapsed_ms > COMMIT_WATCHDOG_MS:
-            self._on_watchdog_trip(elapsed_ms)
+        if elapsed_ms > COMMIT_WATCHDOG_MS and not self._in_watchdog_trip:
+            self._in_watchdog_trip = True
+            try:
+                self._on_watchdog_trip(elapsed_ms)
+            finally:
+                self._in_watchdog_trip = False
 
     def _on_watchdog_trip(self, elapsed_ms: float) -> None:
         """Degraded path + evidence-loss page (design §4). Unsuppressible."""
@@ -609,6 +618,15 @@ class EventLog:
             self.metrics["events_written"] += 1
             return seq
 
+    def note_evidence_drop(self, kind: str = "shadow") -> None:
+        """Count a dropped off-hot-path event (design §3, Pair F).
+
+        A dropped shadow event is counted, and sustained loss pages via the
+        evidence-loss machinery (wired by the coordinator). Calibration
+        degrades gracefully; the paging path never depends on it.
+        """
+        self.metrics["shadow_drops"] += 1
+
     # ------------------------------------------------------------- reaper
 
     def startup_sweep(self) -> list[dict]:
@@ -781,6 +799,45 @@ def _iso_age_s(ts: str, now_iso: str) -> float | None:
 
 
 # ------------------------------------------------------------------ reaper
+# (Reaper class below)
+
+
+def detect_flips(events: list[dict]) -> list[dict]:
+    """Pure function of the log: find non-determinism (design §3, Pair G).
+
+    Groups decision_made + shadow_decision answers by input_sha256 and
+    reports differing q1/q3/disposition fields. The flip pipeline may live
+    off the hot path precisely because it is re-derivable by replay —
+    a crash loses at most one derived observation, never evidence.
+    """
+    by_input: dict[str, list[tuple[dict, dict]]] = {}
+    for e in events:
+        if e["type"] not in ("decision_made", "shadow_decision"):
+            continue
+        body = json.loads(e["body"])
+        key = body.get("input_sha256")
+        if key:
+            by_input.setdefault(key, []).append((e, body))
+    flips = []
+    for key, answers in by_input.items():
+        for i in range(len(answers)):
+            for j in range(i + 1, len(answers)):
+                (e1, b1), (e2, b2) = answers[i], answers[j]
+                for field, v1, v2 in (
+                        ("q1", b1.get("q1_reported"), b2.get("q1_reported")),
+                        ("q3", b1.get("q3_confidence"),
+                         b2.get("q3_confidence")),
+                        ("disposition",
+                         b1.get("disposition") or b1.get("decided_disposition"),
+                         b2.get("disposition") or b2.get("shadow_disposition"))):
+                    if v1 is not None and v2 is not None and v1 != v2:
+                        flips.append({
+                            "input_sha256": key,
+                            "first_seq": e1["seq"], "second_seq": e2["seq"],
+                            "differing_field": field,
+                            "first_value": v1, "second_value": v2,
+                        })
+    return flips
 
 class Reaper:
     """Pair-B crash-window closer (design §3).

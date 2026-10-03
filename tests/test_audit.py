@@ -1,4 +1,10 @@
-"""Tests for sentinel.audit (§3.8): exact schema, append-only, thread-safe."""
+"""Tests for sentinel.audit — the v0.1-compat facade over the event log.
+
+The schema changed (ADR-011): decisions are decision_made EVENTS in the
+hash-chained log, read back through the disposable `decisions` VIEW. The
+suite's intent is unchanged: exact schema, append-only, thread-safe,
+record/get roundtrip.
+"""
 
 import os
 import sys
@@ -14,7 +20,7 @@ import tempfile
 import threading
 import unittest
 
-from sentinel.audit import AuditLog
+from sentinel.audit import AuditLog, body_of
 from sentinel.client import Answer
 from sentinel.models import DecisionRecord, Disposition
 
@@ -40,26 +46,29 @@ class TestSchema(unittest.TestCase):
         self.audit = AuditLog(self.tmp.name)
         self.addCleanup(os.unlink, self.tmp.name)
 
-    def test_tables_and_index_exist(self):
+    def test_tables_indexes_and_view_exist(self):
         conn = sqlite3.connect(self.tmp.name)
         tables = {r[0] for r in
                   conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertIn("decisions", tables)
-        self.assertIn("outcomes", tables)
+        for t in ("events", "outbox", "raw_payloads", "outcomes"):
+            self.assertIn(t, tables, f"missing table {t}")
+        views = {r[0] for r in
+                 conn.execute("SELECT name FROM sqlite_master WHERE type='view'")}
+        self.assertIn("decisions", views)  # disposable compat shim (§6.4)
         indexes = {r[0] for r in
                    conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-        self.assertIn("idx_fp", indexes)
+        for i in ("idx_events_fp", "idx_events_alert", "idx_events_type",
+                  "idx_outbox_episode_live", "idx_outbox_due"):
+            self.assertIn(i, indexes, f"missing index {i}")
         conn.close()
 
-    def test_decisions_columns_match_spec(self):
+    def test_events_envelope_columns_match_spec(self):
         conn = sqlite3.connect(self.tmp.name)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(decisions)")]
-        expected = ["id", "received_at", "alert_id", "fingerprint", "input_sha256",
-                    "jev_model", "q1_severity", "q1_probs", "q1_conf",
-                    "q2_team", "q2_probs", "q2_conf",
-                    "q3_disposition", "q3_probs", "q3_conf",
-                    "action", "reason", "latency_ms", "created_at"]
-        self.assertEqual(cols, expected)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(events)")]
+        self.assertEqual(cols, ["seq", "event_id", "schema_v", "ts", "actor",
+                                "type", "alert_id", "fingerprint",
+                                "episode_id", "outbox_id", "body",
+                                "prev_hash", "row_hash"])
         conn.close()
 
     def test_outcomes_columns_match_spec(self):
@@ -79,19 +88,24 @@ class TestRecordGet(unittest.TestCase):
     def setUp(self):
         self.audit = AuditLog(":memory:")
 
-    def test_record_returns_row_id_and_get_roundtrips(self):
-        row_id = _record(self.audit)
-        self.assertEqual(row_id, 1)
-        row = self.audit.get(row_id)
-        self.assertEqual(row["action"], "page_now")
-        self.assertEqual(row["reason"], "threshold")
-        self.assertEqual(row["q1_severity"], "p1_critical")
-        self.assertEqual(json.loads(row["q1_probs"]),
-                         {"p1_critical": 0.9, "p2_high": 0.1})
-        self.assertAlmostEqual(row["q1_conf"], 0.9)
-        self.assertEqual(row["jev_model"], "jev-1.13.0")
-        self.assertEqual(row["input_sha256"], "abc123")
-        self.assertIsNotNone(row["created_at"])
+    def test_record_returns_seq_and_get_roundtrips(self):
+        seq = _record(self.audit)
+        self.assertEqual(seq, 1)
+        row = self.audit.get(seq)
+        self.assertEqual(row["alert_id"], "a1")
+        self.assertEqual(row["type"], "decision_made")
+        self.assertEqual(row["actor"], "engine")
+        body = body_of(row)
+        self.assertEqual(body["disposition"], "page_now")
+        self.assertEqual(body["budget_outcome"], "answered_in_time")
+        self.assertEqual(body["jev_model"], "jev-1.13.0")
+        self.assertEqual(body["input_sha256"], "abc123")
+        self.assertAlmostEqual(body["latency_ms"], 12.5)
+        # v0.1 never recorded lock evidence — the shim says so, not invents.
+        self.assertIn("pre-lock era", body["lock_evaluation"]["note"])
+        # The chain columns are populated.
+        self.assertEqual(row["prev_hash"], "GENESIS")
+        self.assertEqual(len(row["row_hash"]), 64)
 
     def test_get_missing_row_raises_keyerror(self):
         with self.assertRaises(KeyError):
@@ -104,11 +118,23 @@ class TestRecordGet(unittest.TestCase):
         rec = DecisionRecord(alert=alert, input_sha256="x", jev_model=None,
                              q_severity=None, q_team=None, q_disposition=None,
                              disposition=disp)
-        row_id = self.audit.record(rec)
-        row = self.audit.get(row_id)
-        self.assertIsNone(row["q1_severity"])
-        self.assertIsNone(row["q1_probs"])
-        self.assertIsNone(row["jev_model"])
+        seq = self.audit.record(rec)
+        body = body_of(self.audit.get(seq))
+        self.assertIsNone(body["q2_team"])
+        self.assertIsNone(body["jev_model"])
+        self.assertEqual(body["budget_outcome"], "error_passthrough")
+
+    def test_structural_passthrough_outcome(self):
+        alert = make_alert(alert_id="s1")
+        disp = Disposition(action="suppress", reason="allowlist", team=None,
+                           confidence=0.95, latency_ms=0.5)
+        rec = DecisionRecord(alert=alert, input_sha256="y", jev_model=None,
+                             q_severity=None, q_team=None, q_disposition=None,
+                             disposition=disp)
+        seq2 = self.audit.record(rec)
+        body = body_of(self.audit.get(seq2))
+        self.assertEqual(body["budget_outcome"], "structural_passthrough")
+        self.assertEqual(body["disposition"], "suppress")
 
 
 class TestDecisionsForFingerprint(unittest.TestCase):
@@ -153,6 +179,9 @@ class TestThreadSafety(unittest.TestCase):
         rows = audit.decisions_for_fingerprint(make_alert().fingerprint,
                                                limit=1000)
         self.assertEqual(len(rows), 160)
+        # Chain intact after concurrent writes: seqs unique and ordered.
+        seqs = sorted(r["id"] for r in rows)
+        self.assertEqual(len(set(seqs)), 160)
 
 
 if __name__ == "__main__":
