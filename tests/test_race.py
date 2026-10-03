@@ -144,26 +144,27 @@ class RaceTestBase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRaceConfigGuards(unittest.TestCase):
-    def test_default_is_1000(self):
-        self.assertEqual(RaceConfig.from_raw(None).budget_ms, 1000)
+    def test_default_is_2700(self):
+        # N=100 re-derivation (PR #19): max(1000, 2*1339)=2678 -> 2700ms.
+        self.assertEqual(RaceConfig.from_raw(None).budget_ms, 2700)
 
     def test_zero_means_default_not_disabled(self):
         # There is no way to disable the race via config.
-        self.assertEqual(RaceConfig.from_raw(0).budget_ms, 1000)
+        self.assertEqual(RaceConfig.from_raw(0).budget_ms, 2700)
 
     def test_disabled_string_means_default(self):
-        self.assertEqual(RaceConfig.from_raw("disabled").budget_ms, 1000)
+        self.assertEqual(RaceConfig.from_raw("disabled").budget_ms, 2700)
 
     def test_below_floor_refused_to_default(self):
         m = race.Metrics()
         cfg = RaceConfig.from_raw(200, metrics=m)
-        self.assertEqual(cfg.budget_ms, 1000)
+        self.assertEqual(cfg.budget_ms, 2700)
         self.assertEqual(m.get("race.budget_refused_low"), 1)
 
     def test_above_ceiling_refused_to_default(self):
         m = race.Metrics()
         cfg = RaceConfig.from_raw(9999, metrics=m)
-        self.assertEqual(cfg.budget_ms, 1000)
+        self.assertEqual(cfg.budget_ms, 2700)
         self.assertEqual(m.get("race.budget_refused_high"), 1)
 
     def test_below_recommended_allowed_with_warning_metric(self):
@@ -180,23 +181,23 @@ class TestRaceConfigGuards(unittest.TestCase):
 
     def test_sane_value_passes_clean(self):
         m = race.Metrics()
-        cfg = RaceConfig.from_raw(2000, metrics=m)
-        self.assertEqual(cfg.budget_ms, 2000)
+        cfg = RaceConfig.from_raw(3000, metrics=m)
+        self.assertEqual(cfg.budget_ms, 3000)
         self.assertEqual(m.snapshot(), {})
 
     def test_garbage_refused(self):
         m = race.Metrics()
-        self.assertEqual(RaceConfig.from_raw("abc", metrics=m).budget_ms, 1000)
+        self.assertEqual(RaceConfig.from_raw("abc", metrics=m).budget_ms, 2700)
         self.assertEqual(m.get("race.budget_refused_invalid"), 1)
 
     def test_nan_and_inf_refused(self):
         m = race.Metrics()
-        self.assertEqual(RaceConfig.from_raw(float("nan"), metrics=m).budget_ms, 1000)
-        self.assertEqual(RaceConfig.from_raw(float("inf"), metrics=m).budget_ms, 1000)
+        self.assertEqual(RaceConfig.from_raw(float("nan"), metrics=m).budget_ms, 2700)
+        self.assertEqual(RaceConfig.from_raw(float("inf"), metrics=m).budget_ms, 2700)
         self.assertEqual(m.get("race.budget_refused_invalid"), 2)
 
     def test_bool_refused(self):
-        self.assertEqual(RaceConfig.from_raw(True).budget_ms, 1000)
+        self.assertEqual(RaceConfig.from_raw(True).budget_ms, 2700)
 
     def test_gate_applies_refused_default(self):
         # B=200 refused at load → the gate races with 1000 ms.
@@ -204,7 +205,7 @@ class TestRaceConfigGuards(unittest.TestCase):
         gate = Gate(SlowClient(0.01, canned()), Thresholds(), set(), audit,
                     race_config=200)
         self.addCleanup(gate.close)
-        self.assertEqual(gate._runner.config.budget_ms, 1000)
+        self.assertEqual(gate._runner.config.budget_ms, 2700)
 
     def test_epsilon_default(self):
         self.assertEqual(RaceConfig.from_raw(None).epsilon_ms, 500)

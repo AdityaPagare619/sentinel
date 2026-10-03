@@ -86,7 +86,7 @@ TIMER_WIN_OUTCOMES = frozenset({TIMER_WON, TIMER_WON_SHED})
 
 #: Seeded default: 2× the vendor spec max (70–500 ms). Re-derived from
 #: Oracle's N≥100 campaign as max(1000 ms, 2 × measured healthy p99).
-DEFAULT_BUDGET_MS = 1000
+DEFAULT_BUDGET_MS = 2700  # N=100 re-derivation (PR #19): max(1000, 2*1339)=2678 -> 2700
 #: Below the vendor's own spec max the race is meaningless.
 MIN_BUDGET_MS = 500
 #: Above this the "bounded latency" promise is hollow.
