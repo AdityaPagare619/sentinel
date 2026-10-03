@@ -47,3 +47,35 @@ and replanned. Verified 2026-10-02 against `ARCHITECTURE.md` + the research repo
   `ARCHITECTURE.md`, `_shims.py` while the build coordinator is mid-flight.
 - **No secrets in git.** `.gitignore` + CI secrets-grep. `TYPESAFE_API_KEY` via env
   only; never in code, logs, audit rows, or error messages.
+
+## Platform tier (added 2026-10-02 evening — the platform pivot)
+
+- **Hot-path/process separation.** The dashboard/platform tier runs as a SEPARATE
+  OS process from the paging path. It reads ONLY from the audit log. It never
+  imports hot-path modules in a way that couples deploys. UI load can never slow
+  a page — this is enforced by Forge at review, not hoped for.
+- **Audit log is the ONLY bridge.** Engine writes; platform reads. SQLite WAL mode
+  + a read-only connection for the platform tier so dashboard queries never
+  contend with the audit writer. (Postgres read replica is the SaaS upgrade.)
+- **Jev call budget: ONE parallel call per alert.** The three questions (severity,
+  team, disposition) go in a single parallel call — never sequential, never
+  chained. The platform tier makes ZERO Jev calls on the read path; the simulator
+  recomputes from stored probabilities, never re-calls.
+- **Timeout policy protects the paging path, not hope.** The 11.4s first-real-call
+  measurement (2026-10-02) vs the 70–500ms spec is an open question until Oracle's
+  latency campaign (p50/p95/p99, cold vs warm) reports. Until then: tight client
+  timeout, fail open fast. A slow Jev call delays NOTHING — it becomes a passthrough.
+- **Backpressure, never drops.** On alert spikes: storm-collapse before the Jev
+  call (one call per storm — load-bearing at 40 req/s, not an optimization);
+  bounded receiver queue; shed *dashboard/API* traffic first under load, never
+  paging-path traffic. The receiver never returns 5xx for a triage failure.
+- **No new dependencies for the platform tier without Forge + a logged decision.**
+  Default: stdlib HTTP server + vanilla JS + SSE. ₹0, zero supply-chain surface,
+  same as the engine.
+- **Sunday scope boundary is a constraint, not a suggestion.** Sunday 9 PM =
+  working interactive platform a design partner can click through and run.
+  Explicitly OUT: multi-tenancy, billing, SSO, production PagerDuty integration,
+  the fine-tuned-encoder exit. Post-Sunday list lives in PLATFORM_ARCHITECTURE.md §8.
+- **Every dashboard number has a source label.** Synthetic vs shadow vs production
+  data is labeled ON THE VIEW. Prism + Oracle co-enforce. Presenting demo data as
+  production data is a trust incident.
