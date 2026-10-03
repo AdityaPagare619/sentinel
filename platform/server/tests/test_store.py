@@ -305,5 +305,87 @@ class TestMissingDb(unittest.TestCase):
         self.assertEqual(store.calibration()["n_labeled"], 0)
 
 
+def _insert_timer_win_row(db_path: str) -> int:
+    """Clone a decision row into a faithful timer-win shape: the race budget
+    fired before Jev answered, so jev_model/latency are null and no Jev
+    answer fields (q1_probs, q2_team, q3_*) exist in the event body."""
+    conn = sqlite3.connect(db_path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(events)")]
+    src = dict(zip(cols, conn.execute(
+        "SELECT * FROM events WHERE type = 'decision_made' LIMIT 1"
+    ).fetchone()))
+    body = json.loads(src["body"])
+    body["budget_outcome"] = "timer_won"
+    body["jev_model"] = None
+    body["latency_ms"] = None
+    for key in ("q1_reported", "q2_team", "q3_disposition", "q3_confidence"):
+        body.pop(key, None)
+    vc = dict(body.get("v01_compat") or {})
+    for key in ("q1_choice", "q1_confidence", "q1_probs"):
+        vc.pop(key, None)
+    vc["reason"] = "timer_won"
+    body["v01_compat"] = vc
+    new_id = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events"
+                          ).fetchone()[0]
+    row = dict(src)
+    row.update(seq=new_id, event_id=f"ev-timer-win-{new_id}",
+               alert_id="alt-timer-win", body=json.dumps(body))
+    conn.execute(
+        "INSERT INTO events (%s) VALUES (%s)"
+        % (",".join(cols), ",".join("?" * len(cols))),
+        [row[c] for c in cols],
+    )
+    conn.commit()
+    conn.close()
+    return new_id
+
+
+class TestTimerWinProbMap(unittest.TestCase):
+    """Demo wart W1: timer-win rows (Jev never answered) shipped unlabeled
+    UNIFORM prob_maps. The contract is frozen with prob_map non-nullable,
+    so the fix labels the reconstruction in-band: reconstruction=True."""
+
+    def setUp(self):
+        self.db = make_store_db()
+        self.addCleanup(os.unlink, self.db)
+        self.timer_id = _insert_timer_win_row(self.db)
+        self.store = ReadStore(self.db)
+
+    def _timer_item(self):
+        rows = self.store.decisions(limit=500)
+        return next(i for i in rows if i["alert_id"] == "alt-timer-win")
+
+    def test_timer_win_nulls_stay_honest(self):
+        item = self._timer_item()
+        self.assertIsNone(item["jev_model"])
+        self.assertIsNone(item["latency_ms"])
+        self.assertEqual(item["reason"], "timer_won")
+
+    def test_timer_win_prob_map_labeled_reconstruction(self):
+        item = self._timer_item()
+        pm = item["prob_map"]
+        self.assertTrue(pm.get("reconstruction"),
+                        "timer-win prob_map must be labeled a reconstruction")
+        for q in ("severity", "owning_team", "disposition"):
+            triple = pm[q]
+            self.assertIn("choice", triple)
+            self.assertIn("confidence", triple)
+            self.assertIn("probs", triple)
+            self.assertAlmostEqual(sum(triple["probs"].values()), 1.0,
+                                   places=6)
+
+    def test_timer_win_detail_labels_reconstruction(self):
+        detail = self.store.decision(self.timer_id)
+        self.assertIsNotNone(detail)
+        self.assertTrue(detail["prob_map"].get("reconstruction"))
+
+    def test_answered_rows_not_labeled(self):
+        rows = self.store.decisions(limit=500)
+        answered = [i for i in rows if i["alert_id"] != "alt-timer-win"]
+        self.assertTrue(answered)
+        self.assertTrue(all("reconstruction" not in i["prob_map"]
+                            for i in answered))
+
+
 if __name__ == "__main__":
     unittest.main()
