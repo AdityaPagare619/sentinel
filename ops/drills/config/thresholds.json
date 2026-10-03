@@ -1,0 +1,7 @@
+{
+  "suppress_p1_max": 0.002,
+  "suppress_conf_min": 0.9,
+  "page_p1p2_min": 0.3,
+  "uncertain_conf_max": 0.5,
+  "queue_conf_min": 0.7
+}
