@@ -12,6 +12,8 @@ one clause of the ratification contract:
       operator evidence on the decision context;
   (e) kernel-level: a missing FreshnessReport fails the freshness legs
       closed even when every value lock passes.
+  (f) kernel-level: locks ABSENT from a report veto exactly like stale
+      locks (Tripwire probe tw52 — an absent leg is not a passing leg).
 """
 
 import os
@@ -27,7 +29,15 @@ from datetime import datetime, timedelta, timezone
 
 from sentinel.audit import AuditLog
 from sentinel.client import MockSystemOneClient
-from sentinel.freshness import FreshnessMonitor, FreshnessValidator
+from sentinel.freshness import (
+    LOCK1_CALIBRATION,
+    LOCK2_THRESHOLD,
+    LOCK3_ALLOWLIST,
+    FreshnessMonitor,
+    FreshnessReport,
+    FreshnessValidator,
+    LockFreshness,
+)
 from sentinel.gate import Gate, evaluate_policy
 from sentinel.models import Thresholds
 from sentinel.quantized import AllowlistEntry, Attestation
@@ -202,6 +212,86 @@ class TestFailClosed(unittest.TestCase):
             freshness_report=None)
         self.assertEqual(verdict.action, "page_now")
         self.assertTrue(verdict.reason.startswith("freshness:"))
+
+    def test_kernel_absent_locks_veto_like_stale(self):
+        # (f) Tripwire probe tw52: a FreshnessReport carrying ONLY lock3
+        # (fresh) — lock1 + lock2 ABSENT — with every value lock green must
+        # page, never suppress. An absent leg is not a passing leg.
+        from sentinel.client import Answer
+        alert = make_alert()
+        sev = Answer(qid="severity", qtype="choice", choice="p3_medium",
+                     noul=None,
+                     probabilities={"p1_critical": 0.0, "p2_high": 0.0,
+                                    "p3_medium": 0.9, "p4_low": 0.1},
+                     confidence=0.95)
+        team = Answer(qid="owning_team", qtype="choice", choice="platform",
+                      noul=None, probabilities={"platform": 1.0},
+                      confidence=0.99)
+        disp_a = Answer(qid="disposition", qtype="choice",
+                        choice="page_business_hours", noul=None,
+                        probabilities={"page_business_hours": 1.0},
+                        confidence=0.95)
+        lock3_only = FreshnessReport(
+            evaluated_at="2026-10-03T00:00:00+00:00",
+            config_manifest_sha256="test",
+            locks={LOCK3_ALLOWLIST: LockFreshness(
+                verdict="fresh", reason="lock3 fresh (test)",
+                proof_id="test",
+                entries={alert.fingerprint: LockFreshness(
+                    verdict="fresh", reason="entry fresh (test)",
+                    proof_id="test")})})
+        verdict = evaluate_policy(
+            alert, jev_model="jev-1.13.0",
+            q_severity=sev, q_team=team, q_disposition=disp_a,
+            thresholds=Thresholds(), allowlist={alert.fingerprint},
+            latency_ms=1.0, prob_lock_pass=True,
+            freshness_report=lock3_only)
+        self.assertEqual(verdict.action, "page_now")
+        self.assertIn("lock1_missing", verdict.reason)
+        self.assertIn("lock2_missing", verdict.reason)
+
+    def test_kernel_complete_fresh_report_still_suppresses(self):
+        # Control for (f): the veto is about ABSENCE, not about building the
+        # report by hand — a complete all-fresh report still suppresses.
+        from sentinel.client import Answer
+        alert = make_alert()
+        sev = Answer(qid="severity", qtype="choice", choice="p3_medium",
+                     noul=None,
+                     probabilities={"p1_critical": 0.0, "p2_high": 0.0,
+                                    "p3_medium": 0.9, "p4_low": 0.1},
+                     confidence=0.95)
+        team = Answer(qid="owning_team", qtype="choice", choice="platform",
+                      noul=None, probabilities={"platform": 1.0},
+                      confidence=0.99)
+        disp_a = Answer(qid="disposition", qtype="choice",
+                        choice="page_business_hours", noul=None,
+                        probabilities={"page_business_hours": 1.0},
+                        confidence=0.95)
+        full = FreshnessReport(
+            evaluated_at="2026-10-03T00:00:00+00:00",
+            config_manifest_sha256="test",
+            locks={
+                LOCK1_CALIBRATION: LockFreshness(
+                    verdict="fresh", reason="lock1 fresh (test)",
+                    proof_id="test"),
+                LOCK2_THRESHOLD: LockFreshness(
+                    verdict="fresh", reason="lock2 fresh (test)",
+                    proof_id="test"),
+                LOCK3_ALLOWLIST: LockFreshness(
+                    verdict="fresh", reason="lock3 fresh (test)",
+                    proof_id="test",
+                    entries={alert.fingerprint: LockFreshness(
+                        verdict="fresh", reason="entry fresh (test)",
+                        proof_id="test")}),
+            })
+        verdict = evaluate_policy(
+            alert, jev_model="jev-1.13.0",
+            q_severity=sev, q_team=team, q_disposition=disp_a,
+            thresholds=Thresholds(), allowlist={alert.fingerprint},
+            latency_ms=1.0, prob_lock_pass=True,
+            freshness_report=full)
+        self.assertEqual(verdict.action, "suppress")
+        self.assertEqual(verdict.reason, "allowlist")
 
 
 if __name__ == "__main__":
