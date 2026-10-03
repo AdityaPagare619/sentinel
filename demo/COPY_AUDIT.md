@@ -146,6 +146,50 @@ A calibration card that ships without its denominator fails the demo's
 QA gate, same class as a suppression row without its counterfactual
 (design 08 §4 rendering-defect rule).
 
+## Finding 5 — Root DEMO_SCRIPT.md (sibling lane's file, audited in place)
+
+The worktree also carries a root-level `DEMO_SCRIPT.md` (Tripwire lane,
+committed in this worktree before lane 3's work began; narrative lane
+placeholders reference `demo/storm-scenario/storm_runner.py`). It is not
+lane 3's file to edit — but Petu's ruling covers all demo copy, so the
+audit records the findings here for coordinator adjudication:
+
+1. **Beat 4 — "The simulator: drag a threshold, watch last week's noise
+   re-price."** CONFLICTS with Finding 3. The simulator as specified
+   would project via `tuner.classify` (pre-ADR-013 continuous gate), not
+   the live quantized kernel. **This line must be cut or relabeled
+   before Sunday.** Recommended relabel: *"The simulator projects only
+   the live kernel — quantized gate, dual attestation, the real race.
+   That wiring lands with D1; tonight the storm is the demo."* If the
+   UI lane wires the real kernel before Sunday, the beat is reinstated
+   with the kernel named on screen.
+2. **Beat 3 — "Click a SUPPRESS row."** Conditional copy. Two full
+   rehearsals (42 real Jev calls) produced **zero real suppressions** —
+   the triple lock held. The beat must carry the honest branch: if the
+   live storm suppresses, click the real row; if not, the demoist reads
+   the triple-lock honesty beat (demo/DEMO_SCRIPT.md beat 2) and never
+   manufactures a receipt. A SUPPRESS row that is not in the event log
+   is a fake, however it is clicked.
+3. **Beat 1b recorded fallback** ("recorded real-Jev re-ask from rehearsal
+   <timestamp> — live path down right now"). The recording artifact was
+   inspected: real Jev answers, timestamped, source-labeled — it is a
+   labeled recording of the real engine (design 08 §6.3's principle),
+   not a mock. No-fake status: ACCEPTABLE with the verbatim label and
+   the LIVE badge withheld. Residual tension with lane 3's runner
+   contract (exit 2 on absent credential, never silently mock): the
+   runner keeps exit-2 — the fallback is a presentation-layer decision
+   for the demoist, not a silent engine substitution. Coordinator to
+   confirm the precedence on demo night.
+4. **Beat 2** references `demo/storm-scenario/storm_runner.py --n 40
+   --seed 42` — consistent with lane 3's rehearsed configuration. The
+   "SUPPRESS / QUEUE" river-row language in the beat should match the
+   real disposition vocabulary (`page_now`, `suppress`,
+   `page_business_hours`, `passthrough`) — cosmetic, flagged.
+5. **File consolidation:** two DEMO_SCRIPT.md files now exist (root =
+   beat structure + failure choreography; `demo/` = narrative copy per
+   lane 3's task contract). Coordinator to designate the single source
+   of truth before Sun 09:30 brief; until then both are cited here.
+
 ---
 
 ## Summary of cuts/relabels in lane-3 assets
@@ -155,7 +199,9 @@ QA gate, same class as a suppression row without its counterfactual
 | DEMO_SCRIPT.md beat 6 | — | No change: triple-lock copy already matches the built kernel |
 | DEMO_SCRIPT.md beats 1–5 | — | No D1/D3 implication found |
 | storm_runner.py printed copy | — | No D1/D3 implication found; allowlist labeled `demo-*` |
-| Threshold simulator screen | Simulates the pre-ADR-013 continuous gate via `tuner.classify` | **CUT from the Sunday demo** until it runs the real kernel (Finding 3) |
+| Threshold simulator screen | Simulates the pre-ADR-013 continuous gate via `tuner.classify` | **CUT from the Sunday demo** until it runs the real kernel (Finding 3); root DEMO_SCRIPT.md beat 4 line flagged for cut/relabel (Finding 5.1) |
+| Root DEMO_SCRIPT.md beat 3 | "Click a SUPPRESS row" assumes a suppression exists | Conditional copy required — honest-absence branch (Finding 5.2) |
+| Root DEMO_SCRIPT.md beat 1b | Recorded fallback vs lane-3 exit-2 contract | Acceptable labeled; precedence to coordinator (Finding 5.3) |
 | Calibration dashboard (unmerged UI) | — | Binding denominator contract issued (Finding 4); nothing to cut yet |
 
 *Auditor: Lane 3. No screen implies D1/D3 as live. The simulator is the
