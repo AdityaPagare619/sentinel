@@ -138,3 +138,11 @@ Latest decisions on top.
   (4) the 11.4s real-key latency vs "sub-second inline" is the biggest technical
   risk to the thesis — handled by timeout policy + honest measurement, not assumed
   away. (This decision.)
+- 2026-10-03 ~13:42 IST — **GitHub is PRs + code maintenance only; local test suite is the gate.**
+  Aditya's standing order: GitHub Actions CI is a noise source and goes — the
+  `.github/workflows/` directory is removed. ALL real work happens locally on
+  our CPUs. PRs gate on LOCAL `python3 -m unittest discover tests` green +
+  different-agent review. Never wait on a CI run again. METHODOLOGY.md §1
+  updated ("Green CI required" → "Local test suite green required"). The
+  ghost-record platform bug (ops/ci-repair.md) is now moot for the gate but
+  retained as history. (Aditya's order.)
