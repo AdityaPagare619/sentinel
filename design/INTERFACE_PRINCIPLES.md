@@ -306,6 +306,69 @@ A real operator, a stopwatch, the five questions (P1), timed. Results go in the 
 
 ---
 
+## §11 — What each team owes: inbound requirements
+
+The principles above are laws for the interface lanes. Laws need supplies. This section lists the actual requirements each team must provide — without these, the interface team cannot execute, and "waiting on backend" becomes a real dependency instead of an excuse. Each item has an owner, a consumer, and an acceptance check. A missing item is logged in the lane registry the same hour (parallel-teams rule, §10) — flagged, never silently waited on.
+
+### 11.1 Platform team → interface team
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R1 | Frozen, versioned OpenAPI contract for the read API + SSE event schemas, with freshness fields (`as_of`, `freshness_state`) on every data payload | F8, §4.1 | Console generates types from it in CI; contract drift fails the build |
+| R2 | Contract-shaped mocks: a mock server or fixture set **generated from the same contract**, never hand-written | F8, §10 | Interface lanes build screens from hour one; mock-vs-contract conformance test green |
+| R3 | Freshness budgets per surface (S1–S5): the number each FreshnessBadge renders against | §4.1 | Stated in each surface contract; badge behavior tested against it |
+| R4 | Error catalog: every handled failure mode with operator-language message, what-to-do-next, and what's unaffected | §4.3 (state 4) | For each catalog entry a designed error state exists; an unlisted failure is a platform-side bug |
+| R5 | Disposition + severity vocabularies: exact enums, labels, ordering | §3, §8 | The console renders them; the console never defines new ones |
+| R6 | Policy version identifiers + counterfactual receipt schema | P2; S2/S3 | Every rendered decision carries its policy version |
+| R7 | Load-shedding signals: how the platform tells the console to degrade, in the §6 order | §6 | Under stubbed stress the console degrades river-last (drill-verified) |
+| R8 | Console authN/Z contract: identity and roles — who may attest a mute, change a threshold, appeal | ADR-007/022 governance | Destructive actions gate on role; unauthenticated console exposes nothing sensitive |
+
+### 11.2 Design team → the build
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R9 | Token values: the complete token file with real values for every token in §2.2, contrast pairings verified | §2 | One `tokens.json` in one repo location; contrast CI green |
+| R10 | Component catalog (F10): every shared component with contract docs and all five states designed | §4.3, F10 | Each catalog entry passes the §8 checklist in review |
+| R11 | The five screens, built against R1/R2 from hour one — before the platform endpoints exist | §3, §10 | Screens render against mocks; zero "waiting on backend" stalls |
+| R12 | Icon set: drawn shapes, one set, consistent stroke and geometry — severity and freshness icons included | §8 item 3 | No emoji anywhere in the console (lint-enforced) |
+| R13 | Microcopy in operator language, reviewed by someone who understands the domain | §8 item 8 | The postmortem test: an SRE would actually say these sentences |
+| R14 | Design review as a gate: a named reviewer on every console PR | §8, §10 | No console PR merges without the checklist pass |
+
+### 11.3 Product (Aditya) → the teams
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R15 | A real operator, quarterly, for the 3 AM test | §9.4 | A timed run with written results exists in the repo |
+| R16 | Severity taxonomy sign-off: what critical/major/minor/info mean for the design partners | §3 | Documented; the R5 enums trace to it |
+| R17 | Type 1 decisions on RFCs inside an agreed window — or explicit delegation of the call | §10 | No RFC waits past the window without a named reason |
+| R18 | Validation of the five 3 AM questions (P1): are these the right five for the buyers? | P1 | Signed off or amended in writing |
+
+### 11.4 QA (Tripwire) → the gates
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R19 | The honesty invariants implemented as automated CI gates | §9.2 | All five invariants run on every PR; violation blocks merge |
+| R20 | Visual regression baselines: five surfaces × freshness states × component states | §9.3 | Baseline set exists; diffs get human review |
+| R21 | Playwright critical flows | §9.1 | All five flows green on every PR |
+| R22 | Quarterly 3 AM test execution, with written results committed to the repo | §9.4 | One dated result file per quarter |
+
+### 11.5 Security (Vault) → the console
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R23 | AuthN/Z implementation, content-security policy, and a guarantee of no secrets in the frontend bundle | F8 boundary | Secrets-grep in CI; console auth pen-tested before design-partner exposure |
+| R24 | Audit schema for console actions (mute, threshold change, appeal): what gets event-logged and where | ADR-007/022 | Every destructive console action writes its event; asserted in CI |
+
+### 11.6 Telemetry → debuggability
+
+| ID | Requirement | Serves | Acceptance |
+|---|---|---|---|
+| R25 | Trace-ID from console interaction through platform to store | principal-governance §3 | The actual test: a spinner on screen is diagnosable to the slow query in one lookup |
+
+**The rule for missing requirements:** any R-item not provided when a lane needs it is (a) logged in the lane registry the same hour, (b) worked around against the contract + mocks — and (c) never a license to violate P2/P3. "We didn't have R4, so we rendered a raw error" fails review. The interface team owns the honesty contract even when the platform team is late; the platform team owns the unblocking, on the record.
+
+---
+
 ## Appendix A — Component contracts (initial set)
 
 Each component documents: props, the five states (§4.3), accessibility notes. New shared components get a contract entry before code.
@@ -332,3 +395,4 @@ Each component documents: props, the five states (§4.3), accessibility notes. N
 ## Changelog
 
 - **2026-10-04 v1.0** — Initial ratification. Written after the design showcase failed Aditya's visual judgment; replaces taste-based direction with contracts, budgets, and gates.
+- **2026-10-04 v1.1** — Added §11: inbound requirements each team owes (R1–R25) — the supplies without which the laws can't execute.
