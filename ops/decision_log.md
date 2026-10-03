@@ -3,6 +3,34 @@
 Format: date — **decision** (rationale, who called it). Written at decision time.
 Latest decisions on top.
 
+## 2026-10-03 — Saturday wave (Tripwire)
+
+- 2026-10-03 — **Sunday go/no-go checklist owned by Tripwire.**
+  `ops/acceptance-sunday.md`: the 10 exit bars as executable rows (bar, exact
+  verification step, command/click-path, pass criterion, owner); Phase A
+  non-negotiables (bars 10/7/8/9) run first with automatic NO-GO on any red;
+  two-key signatures per row (builder "built as specified" + Tripwire "verified
+  broken-safe"). (Saturday Wave Coordinator brief; Tripwire.)
+- 2026-10-03 — **The live-kill ritual.** Go/no-go requires re-running
+  kill-the-client + platform-tier-death LIVE at the 20:30 table (demonstrated,
+  not asserted), a named adversarial chair who must concede on the record, and
+  the flip-ledger recital (Law 3: flips audited, never hidden).
+  (`ops/fault-injection-plan.md`; Tripwire.)
+- 2026-10-03 — **CI `startup_failure` root cause: dead workflow record, not the
+  file.** GitHub registered the workflow as `BuildFailed` on first ingestion
+  (2026-10-02 18:41:07, transient, repo-creation race); all 16 runs bound to
+  the dead record 373379524; the file bytes were always valid (active record
+  373379827 since 18:41:30). No file fix needed — a fresh run is the
+  verification; escalation = forced re-ingest. (`ops/ci-repair.md`; Tripwire.)
+- 2026-10-03 — **CI fix, second attempt: workflow renamed to
+  `sentinel-ci.yml`.** The "transient" hypothesis was FALSIFIED — fresh runs at
+  18:59 UTC still bound to the dead record, so the (repo, path) → record
+  mapping is permanently poisoned and re-pushing the same path can never fix
+  it. `git mv .github/workflows/ci.yml .github/workflows/sentinel-ci.yml`
+  (zero content change); cross-lane path references in METHODOLOGY.md §3 and
+  LOCAL-OPS.md §4 updated and flagged. Tripwire owns `ci.yml` test gates
+  (TEAMS.md), so the rename is in-lane. (`ops/ci-repair.md`; Tripwire.)
+
 ## 2026-10-02 — base setup
 
 - 2026-10-02 — **Repo is the source of truth, the room is the workbench.**
