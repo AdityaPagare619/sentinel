@@ -16,7 +16,10 @@ A pure READ projection over the engine's append-only event log. Design rules:
   probability map but only choice+confidence for Q2/Q3 (see
   src/sentinel/audit.py — v01_compat). The residual mass on Q2/Q3 is
   distributed uniformly and this is documented in README.md (engine gap
-  E1). The same holds for alert context (service/check/region/title):
+  E1). Timer-win rows (demo W1): when jev_model is null, no Jev answer
+  exists on that path at all — the uniform bars in the prob_map are
+  labeled with "reconstruction": True so the screen can show a dead
+  state instead of silently rendering invented probabilities. The same holds for alert context (service/check/region/title):
   the engine does not persist it; the resolver below tries raw_payloads
   first and falls back to honest "unknown" markers (engine gap E2).
 
@@ -252,6 +255,26 @@ class ReadStore:
             else "cannot_determine")
         confidence = body.get("q3_confidence")
         confidence = float(confidence) if confidence is not None else 0.0
+        jev_model = body.get("jev_model")
+
+        prob_map = {
+            "severity": _triple(severity,
+                                compat.get("q1_confidence"), SEV_OPTIONS,
+                                q1_probs),
+            "owning_team": _triple(team, confidence, TEAM_OPTIONS),
+            "disposition": _triple(_clamp(q3_choice, DISP_OPTIONS,
+                                         "passthrough"),
+                                  confidence, DISP_OPTIONS),
+        }
+        if jev_model is None:
+            # Demo W1: the timer won (or a deterministic pre-Jev path) — no
+            # Jev answer exists, so the bars above are a uniform-spread
+            # reconstruction, never measured data. The contract (frozen)
+            # forbids prob_map: null, so the reconstruction is labeled
+            # in-band instead. UI ignores the extra key; it renders the
+            # drawer dead state from the missing triples / nulls, not
+            # from invented bars.
+            prob_map["reconstruction"] = True
 
         summary = {
             "id": row["id"],
@@ -264,18 +287,10 @@ class ReadStore:
             "disposition": disposition,
             "confidence": confidence,
             "reason": reason,
-            "prob_map": {
-                "severity": _triple(severity,
-                                    compat.get("q1_confidence"), SEV_OPTIONS,
-                                    q1_probs),
-                "owning_team": _triple(team, confidence, TEAM_OPTIONS),
-                "disposition": _triple(_clamp(q3_choice, DISP_OPTIONS,
-                                             "passthrough"),
-                                      confidence, DISP_OPTIONS),
-            },
+            "prob_map": prob_map,
             "fingerprint": row["fingerprint"],
             "input_sha256": body.get("input_sha256"),
-            "jev_model": body.get("jev_model"),
+            "jev_model": jev_model,
             "latency_ms": body.get("latency_ms"),
             "shadow": reason == "shadow",
         }
