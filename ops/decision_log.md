@@ -3,6 +3,28 @@
 Format: date — **decision** (rationale, who called it). Written at decision time.
 Latest decisions on top.
 
+## 2026-10-03 — ADR adjudication panel (Forge · Vault · Pager · Tripwire)
+
+- 2026-10-03 ~20:50 IST — **ADR adjudication panel verdicts (Aditya's 20:08 order: decided tonight by
+  group discussion; Petu ratifies by PR review).** Full record: `docs/adr-decisions-2026-10-03.md`.
+  Ratified as implemented: ADR-010/011/012/013 (race B=2700, event log, durable forwarder, quantized
+  gate); conditionally ratified: 014 (wire precondition into live gate), 016 (structural aggregate
+  bypass + regression), 018 (first drilled ack + named watcher owner before design partner).
+  Adopted-as-design, explicitly NOT implemented: 015, 017, 019, 020, 021, 023; partial: 022
+  (floors + two-person ack real; canary/watchdog/auto-revert required pre-cutover).
+  ADR-001 ADOPTED with conditions (flap-reopen bumps flap count not severity; P1/P2 carve out of
+  change windows — reconciles DR-13; Sentinel-side windows only). ADR-005 ADOPTED: HMAC hardening
+  required; **IP allowlist REJECTED entirely** (Forge+Vault beat Petu's opt-in prior — opt-in is
+  theater-or-footgun; strike ARCHITECTURE.md §7 mention); code must be fixed to refuse on empty
+  secret + add 5-min timestamp tolerance (current fail-open contradicts DR-27). ADR-007 ADOPTED:
+  mute is a platform-tier rendering label (engine enum stays 4-valued), event-logged transitions
+  with reason/attestor/TTL, no auto-mute ever, weekly mute review with named owner. ADR-024/O-1:
+  RFC REQUIRED before first design partner, Vault-led, with Type-2 interim disk guard first;
+  status OPEN by evidence not vote. **Prior lost:** "ratify 010–024 as implemented" rejected 4–0
+  with code evidence — a fictional register is what Tripwire exists to prevent. Implementation debt
+  D1–D14 registered in the decision doc; Sunday wave coordinator owns scheduling. (Panel; Petu
+  ratifies.)
+
 ## 2026-10-03 — Saturday wave (Tripwire)
 
 - 2026-10-03 — **Sunday go/no-go checklist owned by Tripwire.**
