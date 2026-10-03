@@ -62,6 +62,7 @@ from .forwarder import Forwarder
 from .gate import Gate
 from .health import HealthMonitor
 from .models import Alert, Thresholds
+from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
 from .state import build_state
 
@@ -776,9 +777,16 @@ def build_pipeline_from_env(policy=None,
     db_path = os.environ.get("SENTINEL_DB", "./sentinel.db")
     audit = AuditLog(db_path)
     shadow = os.environ.get("SENTINEL_SHADOW", "0") == "1"
+    # B2: the D8 enforcement hook, wired on the hot path. The gate reads a
+    # fresh PolicyStore from this file on EVERY suppress verdict (never
+    # boot-cached); the watchdog writes it. One-way channel. Missing file
+    # -> loud warning, triple lock stands alone; unreadable file ->
+    # fail-closed to passthrough.
+    policy_gate = PolicyGate(os.environ.get("SENTINEL_POLICY_STATE",
+                                             "./policy-state.json"))
     freshness_monitor = _freshness_monitor_from_env()
     gate = Gate(client, policy.thresholds, set(policy.allowlist), audit,
-                shadow=shadow,
+                shadow=shadow, policy_gate=policy_gate,
                 freshness_monitor=freshness_monitor)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
@@ -820,8 +828,12 @@ def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
     config = shadow_config_from_env()
     if config is None:
         return None
+    # B2: the shadow gate consults the same enforcement file — shadow
+    # would-be verdicts evaluate identical policy state to production.
     shadow_gate = Gate(client, thresholds, set(allowlist or []), audit,
-                       shadow=True, freshness_monitor=freshness_monitor)
+                       shadow=True, freshness_monitor=freshness_monitor,
+                       policy_gate=PolicyGate(os.environ.get(
+                           "SENTINEL_POLICY_STATE", "./policy-state.json")))
     return ShadowPipeline(gate=shadow_gate, correlator=Correlator(),
                           store=ShadowStore(), config=config,
                           allowlist=set(allowlist or []))

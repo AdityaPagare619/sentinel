@@ -7,6 +7,7 @@ candidates) never gates the disposition.
 """
 
 import inspect
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from sentinel.audit import AuditLog
 from sentinel.correlator import Correlator, fingerprint_for
 from sentinel.eventlog import DISPOSITIONS
 from sentinel.forwarder import Forwarder
+from sentinel.freshness import FreshnessMonitor, FreshnessValidator
 from sentinel.gate import Gate, evaluate_policy
 from sentinel.models import Disposition, Thresholds
 from sentinel.quantized import AllowlistEntry, Attestation
@@ -24,6 +26,12 @@ from sentinel.state import build_state, input_sha256
 from sentinel.storm_digest import (storm_digest_disposition,
                                    storm_root_cause_payload)
 
+from tests.freshness_fixtures import (
+    LABEL_PIPELINE,
+    FixtureClock,
+    build_bundle,
+    make_allowlist_entry,
+)
 from tests.helpers import FakeClock, make_alert
 from tests.test_gate import _answer, canned
 
@@ -288,9 +296,21 @@ class TestShadowDigestMirror(unittest.TestCase):
         fps = [fingerprint_for(f"svc-{i}", "pagerduty.incident",
                                "critical", "")
                for i in range(3)]
+        # D1: suppress is unreachable without a freshness monitor (fail
+        # closed). This test needs the pre-storm alerts to suppress, so it
+        # runs against an all-fresh bundle — the freshness legs are not
+        # the variable under test here.
+        bundle_dir = build_bundle(
+            tempfile.mkdtemp(prefix="sentinel-sd-"),
+            entries=[(fp, "prod", make_allowlist_entry(fp)) for fp in fps])
+        validator = FreshnessValidator(
+            clock=FixtureClock(),
+            deployed_label_pipeline_version=LABEL_PIPELINE)
+        monitor = FreshnessMonitor(validator, bundle_dir)
+        monitor.boot()
         gate = Gate(self.client, Thresholds(),
                     [_attested_entry(fp) for fp in fps],
-                    audit, shadow=True)
+                    audit, shadow=True, freshness_monitor=monitor)
         corr = Correlator(storm_fingerprints=2, storm_window_s=3600)
         config = ShadowConfig(enabled=True)
         return ShadowPipeline(gate=gate, correlator=corr,
