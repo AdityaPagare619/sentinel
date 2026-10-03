@@ -108,7 +108,10 @@ class ShadowConfig:
     """
     enabled: bool = False
     pd_secret: str | None = None          # HMAC key for x-pagerduty-signature
-    opsgenie_token: str | None = None     # Bearer <redacted>; optional per estate
+    opsgenie_token: str | None = None     # Bearer <redacted> for the OG route; REQUIRED
+                                          # to serve it — a missing token 401s
+                                          # every OG delivery (fail closed,
+                                          # consistent with PD and AM).
     alertmanager_token: str | None = None  # Bearer <redacted>; required when the AM route is used
     write_credentials: list = field(default_factory=list)
     severity_map: dict = field(default_factory=lambda: dict(DEFAULT_SEVERITY_MAP))
@@ -374,10 +377,10 @@ class ShadowStore:
     """Thread-safe in-memory store of shadow observations and episodes.
 
     The event-log lane owns the durable `events` table; this store is the
-    tap's working set and the Shadow Report's input. An optional
-    `event_sink` (duck-typed: append_event(event_type, ...)) lets the
-    coordinator forward `shadow_decision` events once the event log
-    merges — the tap never depends on it.
+    tap's working set and the Shadow Report's input. Forwarding of
+    `shadow_decision` events to the log happens on ShadowPipeline via its
+    `event_sink` constructor arg (exact append_event contract documented
+    on ShadowPipeline.__init__) — the tap never depends on it.
     """
 
     def __init__(self):
@@ -603,6 +606,23 @@ class ShadowPipeline:
     def __init__(self, gate, correlator: Correlator | None,
                  store: ShadowStore, config: ShadowConfig,
                  allowlist: set[str] | None = None, event_sink=None):
+        """event_sink: optional duck-typed event-log sink. EXACT contract
+        (must match EventLog.append_event, eventlog.py from the event-log
+        lane — checked by tests/test_shadow.py::TestEventSink with a
+        strict fake):
+
+            append_event(event_type: str, *, actor: str, alert_id: str,
+                         fingerprint: str, episode_id: str,
+                         outbox_id: str | None = None, body: dict,
+                         ts: str | None = None) -> int
+
+        All kwargs after event_type are keyword-only. The tap calls it as
+        append_event("shadow_decision", actor="engine", alert_id=...,
+        fingerprint=..., episode_id=..., body={...}) — nothing else. The
+        "shadow_decision" body must carry "links" (required by the
+        event-log schema). The tap never depends on the sink: exceptions
+        are swallowed (stderr) so the sink can never sink the tap.
+        """
         if not getattr(gate, "shadow", False):
             raise ValueError("ShadowPipeline requires a gate in shadow mode")
         self.gate = gate
@@ -610,7 +630,7 @@ class ShadowPipeline:
         self.store = store
         self.config = config
         self.allowlist = set(allowlist or [])
-        self.event_sink = event_sink  # duck-typed: append_event(...) or None
+        self.event_sink = event_sink  # duck-typed per the contract above
         # Fingerprint -> the last full (non-duplicate) evaluation's inputs,
         # so duplicates reuse the original evidence/counterfactual inputs.
         self._eval_cache: dict[str, dict] = {}
@@ -639,10 +659,10 @@ class ShadowPipeline:
                 events = [parse_pd_event(data, headers, self.config.severity_map)]
             elif vendor == "opsgenie":
                 events = [parse_opsgenie_event(data, self.config.severity_map)]
-            elif vendor == "alertmanager":
-                events = parse_alertmanager_events(data, self.config.severity_map)
             else:
-                return 404, {"status": "error", "message": "unknown vendor"}
+                # alertmanager — _verify 401s any other vendor before we
+                # get here, so no else branch is needed.
+                events = parse_alertmanager_events(data, self.config.severity_map)
         except ValueError as exc:
             self.store.drop("dropped_unparseable")
             return 400, {"status": "error", "message": str(exc)}
@@ -663,9 +683,10 @@ class ShadowPipeline:
         if vendor == "pagerduty":
             return verify_pd_signature(body, self.config.pd_secret, headers)
         if vendor == "opsgenie":
+            # Fail closed: no token means the OG route refuses every
+            # delivery (401), never silently accepts them unauthenticated.
             return verify_bearer(headers, self.config.opsgenie_token,
-                                 required=self.config.opsgenie_token is not None,
-                                 what="opsgenie")
+                                 required=True, what="opsgenie")
         if vendor == "alertmanager":
             return verify_bearer(headers, self.config.alertmanager_token,
                                  required=True, what="alertmanager")
@@ -787,16 +808,23 @@ class ShadowPipeline:
     def _emit_shadow_decision(self, ep: ShadowEpisode, ev: VendorEvent,
                               obs: ShadowObservation) -> None:
         """Forward a shadow_decision event to the event log IF the
-        coordinator wired an event sink. The tap never depends on it."""
+        coordinator wired an event sink. The tap never depends on it.
+
+        The call matches the EventLog.append_event contract exactly:
+        positional event_type, everything else keyword-only; actor is
+        always "engine"; "shadow_decision" bodies carry "links" per the
+        event-log schema.
+        """
         if self.event_sink is None:
             return
+        alert = alert_from_vendor_event(ev)
         try:
             self.event_sink.append_event(
                 "shadow_decision",
-                episode_key=ep.key, vendor=ev.vendor,
-                event_type=ev.event_type,
-                links={"incident_url": ev.incident_url,
-                       "observation_id": obs.observation_id},
+                actor="engine",
+                alert_id=alert.alert_id,
+                fingerprint=alert.fingerprint,
+                episode_id=ep.key,
                 body={"would": obs.gate_would,
                       "confidence": obs.gate_confidence,
                       "threshold_counterfactual": obs.threshold_counterfactual,

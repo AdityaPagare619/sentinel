@@ -596,5 +596,149 @@ class TestPolicyMirror(unittest.TestCase):
         self.assertEqual(cf["conf>=0.99"], "page_business_hours")
 
 
+# ---------------------------------------------------------------- event sink
+
+class StrictFakeSink:
+    """Strict duck-type of EventLog.append_event (eventlog.py, event-log
+    lane). Keyword-only kwargs after event_type, exactly like the real
+    one — a wrong call raises TypeError HERE instead of being swallowed
+    by the tap's except-clause. Regression guard for the PR #18 review
+    blocker (every shadow_decision silently dropped).
+
+    If EventLog.append_event's signature changes, update this fake to
+    match (the strict test below fails loudly until you do).
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def append_event(self, event_type, *, actor, alert_id, fingerprint,
+                     episode_id, outbox_id=None, body, ts=None):
+        call = {"event_type": event_type, "actor": actor,
+                "alert_id": alert_id, "fingerprint": fingerprint,
+                "episode_id": episode_id, "outbox_id": outbox_id,
+                "body": body, "ts": ts}
+        self.calls.append(call)
+        return len(self.calls)
+
+
+class ExplodingSink:
+    """The sink must never sink the tap."""
+
+    def append_event(self, *args, **kwargs):
+        raise RuntimeError("disk is on fire")
+
+
+class TestEventSink(unittest.TestCase):
+    def _pipeline(self, sink):
+        audit = AuditLog(":memory:")
+        gate = Gate(FixedClient(canned(p1=0.9, conf=0.95)), Thresholds(),
+                    set(), audit, shadow=True)
+        config = ShadowConfig(enabled=True, pd_secret=PD_SECRET)
+        config.validate()
+        return ShadowPipeline(gate=gate, correlator=Correlator(),
+                              store=ShadowStore(), config=config,
+                              event_sink=sink)
+
+    def _pd_handle(self, pipeline, payload, secret=PD_SECRET):
+        body = json.dumps(payload).encode()
+        headers = dict(_pd_sig(body, secret))
+        headers["X-Webhook-Subscription"] = "sub-1"
+        return pipeline.handle("pagerduty", body, headers)
+
+    def test_shadow_decision_written_with_exact_contract(self):
+        sink = StrictFakeSink()
+        pipeline = self._pipeline(sink)
+        code, _ = self._pd_handle(
+            pipeline, _pd_v3(event_type="incident.triggered",
+                             incident_id="P-SINK", priority="P4"))
+        self.assertEqual(code, 202)
+        self.assertEqual(len(sink.calls), 1)
+        call = sink.calls[0]
+        self.assertEqual(call["event_type"], "shadow_decision")
+        self.assertEqual(call["actor"], "engine")
+        self.assertEqual(call["alert_id"], "pagerduty:P-SINK")
+        self.assertEqual(call["episode_id"], "pd:inc/P-SINK")
+        # Exactly the append_event vocabulary — no bogus kwargs
+        # (episode_key / vendor / event_type / links were the PR #18
+        # blocker) and nothing missing.
+        self.assertEqual(set(call), {"event_type", "actor", "alert_id",
+                                     "fingerprint", "episode_id",
+                                     "outbox_id", "body", "ts"})
+        self.assertIsNone(call["outbox_id"])
+        self.assertIsNone(call["ts"])
+        # Fingerprint is the one the gate actually evaluated.
+        self.assertEqual(call["fingerprint"],
+                         fingerprint_for("payments-api", "pagerduty.incident",
+                                         "P4", ""))
+        # Body carries the shadow_decision vocabulary: "links" is REQUIRED
+        # by the event-log schema.
+        body = call["body"]
+        self.assertEqual(set(body), {"would", "confidence",
+                                     "threshold_counterfactual", "links"})
+        obs = pipeline.store.observations[-1]
+        self.assertEqual(body["would"], obs.gate_would)
+        self.assertEqual(body["confidence"], obs.gate_confidence)
+        self.assertEqual(body["links"]["incident_url"],
+                         "https://example.pagerduty.com/incidents/P-SINK")
+        self.assertEqual(body["links"]["observation_id"],
+                         obs.observation_id)
+
+    def test_sink_is_optional(self):
+        # No sink wired: ingest still records the observation.
+        pipeline = self._pipeline(None)
+        code, _ = self._pd_handle(
+            pipeline, _pd_v3(event_type="incident.triggered",
+                             incident_id="P-NOSINK"))
+        self.assertEqual(code, 202)
+        self.assertEqual(len(pipeline.store.observations), 1)
+
+    def test_exploding_sink_never_sinks_the_tap(self):
+        pipeline = self._pipeline(ExplodingSink())
+        code, resp = self._pd_handle(
+            pipeline, _pd_v3(event_type="incident.triggered",
+                             incident_id="P-BOOM"))
+        self.assertEqual(code, 202)
+        self.assertEqual(resp["events"], 1)
+        self.assertEqual(len(pipeline.store.observations), 1)
+
+    def test_non_evaluated_events_emit_nothing(self):
+        sink = StrictFakeSink()
+        pipeline = self._pipeline(sink)
+        code, _ = self._pd_handle(
+            pipeline, _pd_v3(event_type="incident.test_webhook",
+                             incident_id="P-T"))
+        self.assertEqual(code, 202)
+        self.assertEqual(sink.calls, [])  # not_evaluated -> no decision
+
+
+# ---------------------------------------------------------------- OG fail-closed
+
+class TestOpsgenieFailClosed(ShadowTestBase):
+    def setUp(self):
+        # No OG token configured — the OG route must refuse every
+        # delivery (401), never silently accept them unauthenticated
+        # (coordinator's auth decision on the PR #18 review; consistent
+        # with PD and AM, which already fail closed).
+        self._start(FixedClient(canned(p1=0.9, conf=0.95)))  # og_token=None
+
+    def test_missing_token_401s_og_deliveries(self):
+        body = json.dumps(_og()).encode()
+        code, resp = self._post("/shadow/opsgenie", body)
+        self.assertEqual(code, 401)
+        self.assertIn("no opsgenie token configured", resp["message"])
+        health = self.store.tap_health()
+        self.assertEqual(health["dropped"], 1)
+        self.assertEqual(health["dropped_by_reason"]["unauthenticated"], 1)
+        self.assertEqual(self.store.episodes, {})
+
+    def test_missing_token_refuses_even_a_plausible_bearer(self):
+        body = json.dumps(_og()).encode()
+        code, _ = self._post("/shadow/opsgenie", body,
+                             {"Authorization": "Bearer og-secret"})
+        self.assertEqual(code, 401)
+        self.assertEqual(self.store.episodes, {})
+
+
 if __name__ == "__main__":
     unittest.main()

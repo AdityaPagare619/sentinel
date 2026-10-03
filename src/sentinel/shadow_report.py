@@ -247,8 +247,15 @@ def _inventory_hash(inventory: dict) -> str:
 
 # ---------------------------------------------------------------- rendering
 
-def render_report_markdown(report: dict) -> str:
-    """Render the report in the exact §b format: one page, same every week."""
+def render_report_markdown(report: dict, race_budget_ms: int = 2700) -> str:
+    """Render the report in the exact §b format: one page, same every week.
+
+    race_budget_ms: the race-to-page budget B whose p99 gate latency the
+    report compares against (2700ms default per the race-to-page lane,
+    PR #19 — the Oracle N=100 re-derivation; the old 1000ms seed is
+    retired). Pass B explicitly when rendering against a different
+    budget so the number never silently drifts.
+    """
     h = report["header"]
     th = report["tap_health"]
     inv = report["credential_inventory"]
@@ -280,7 +287,7 @@ def render_report_markdown(report: dict) -> str:
     A("")
     if h["gate_p99_latency_ms"] is not None:
         A(f"Gate p99 decision latency: **{h['gate_p99_latency_ms']}ms** "
-          f"(race-to-page budget 1000ms — measured on your traffic).")
+          f"(race-to-page budget {race_budget_ms}ms — measured on your traffic).")
         A("")
     A("Calibration: " + ("**HOLD — miscalibration beyond 5pp in a band with "
                          "N≥30: shadow continues, backtest is blocked until "

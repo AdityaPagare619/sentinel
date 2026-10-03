@@ -214,6 +214,22 @@ class TestShadowReport(unittest.TestCase):
         self.assertGreater(band["delta_pp"], 5.0)
         self.assertTrue(report["header"]["calibration_hold"])
 
+    def test_race_budget_ms_is_a_parameter(self):
+        # The p99-vs-budget line must render the passed B, not a hardcoded
+        # 1000ms (PR #18 review nit; B=2700ms per the race-to-page lane).
+        by_title = {"b": canned(p1=0.9, conf=0.95)}
+        sp = _build_pipeline(by_title, set())
+        _ingest(sp, _pd_v3(event_type="incident.triggered", incident_id="P-B",
+                            title="b", priority="P4", service="web"))
+        report = generate_shadow_report(
+            sp.store, org="x", week_label="w", window_start="a",
+            window_end="b")
+        self.assertIsNotNone(report["header"]["gate_p99_latency_ms"])
+        default_md = render_report_markdown(report)
+        self.assertIn("(race-to-page budget 2700ms", default_md)
+        custom_md = render_report_markdown(report, race_budget_ms=1000)
+        self.assertIn("(race-to-page budget 1000ms", custom_md)
+
 
 if __name__ == "__main__":
     unittest.main()
