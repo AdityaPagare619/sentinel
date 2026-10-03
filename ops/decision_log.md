@@ -3,6 +3,33 @@
 Format: date — **decision** (rationale, who called it). Written at decision time.
 Latest decisions on top.
 
+## 2026-10-03 — D11: ADR-005 webhook auth fail-closed (Sunday wave, P0)
+
+- 2026-10-03 ~21:00 IST — **D11 implemented (ADR-005 ADOPT-WITH-CONDITIONS, branch
+  `lane/sun-d11-sigfix`). Type: 1** — receiver auth is a trust-boundary contract;
+  the old fail-open (`if not sig: return True`) was a silent trust violation, not
+  a tuning knob. (a) `_signature_ok` is fail-closed in production: empty secret,
+  absent/malformed signature, absent/malformed/stale/future-skewed timestamp,
+  bad MAC, and legacy timestamp-less signatures all → 403 `bad signature`
+  (the receiver's existing error convention). (b) Empty secret refuses startup
+  (SystemExit) unless `SENTINEL_WEBHOOK_ONBOARDING=1`. (c) Onboarding mode is an
+  explicit env flag that MAY fail open, but ONLY with a CRITICAL boot-time
+  stderr warning, a per-request WARNING, the `webhook_auth_bypassed` metric,
+  and `webhook_auth_fail_open: true` surfaced on /healthz. (d) Canonical scheme
+  is now timestamped: `X-Sentinel-Timestamp` + `X-Sentinel-Signature:
+  sha256=<hex>` over `<ts>.<raw-body>`, |now−ts| ≤ 300s. (e) ARCHITECTURE.md §7
+  "optional IP allowlist config" mention struck (panel condition (d); also §3.9
+  updated to the fail-closed contract — same frozen-spec edit). **Replay
+  analysis** (panel condition (c)): a timestamp-less HMAC over the raw body has
+  an INDEFINITE replay window — any captured valid signature replays forever;
+  idempotent ingest dedupes identical alerts but cannot distinguish a replay
+  from a genuine resend. The 300s bound shrinks the window to 5 minutes;
+  Tripwire's caveat stands (5 min without nonces is a 5-minute replay window —
+  nonces are a named follow-up, not this lane). Reference:
+  `docs/adr-decisions-2026-10-03.md` ADR-005 + D11; design evidence in
+  `docs/SECURITY.md` §2.1–§2.4. (Sunday Wave Coordinator; Petu P0 —
+  exception to the 20:28 no-crunch order, kept P0 by name.)
+
 ## 2026-10-03 — ADR adjudication panel (Forge · Vault · Pager · Tripwire)
 
 - 2026-10-03 ~20:50 IST — **ADR adjudication panel verdicts (Aditya's 20:08 order: decided tonight by

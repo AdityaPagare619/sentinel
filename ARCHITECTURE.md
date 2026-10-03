@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS outcomes (   -- joined later by the label pipeline
 Stdlib `http.server.ThreadingHTTPServer`. Routes:
 
 - `POST /v2/enqueue` — PagerDuty Events API v2 shape. Required JSON: `routing_key`, `event_action` ("trigger"), `payload.summary`, `payload.source`, `payload.severity`. Responds `{"status":"success","message":"Event processed","dedup_key":"..."}` (mirrors PD so existing integrations don't break). `dedup_key` optional → else generated.
-- `POST /webhook/generic` — `{service, check, title, severity, labels{}, metric{}}`; optional `X-Sentinel-Signature: sha256=<hex>` HMAC of body with `SENTINEL_WEBHOOK_SECRET`.
+- `POST /webhook/generic` — `{service, check, title, severity, labels{}, metric{}}`; requires `X-Sentinel-Signature: sha256=<hex>` (HMAC-SHA256 of `<unix-ts>.<raw-body>` with `SENTINEL_WEBHOOK_SECRET`) + `X-Sentinel-Timestamp` (unix seconds, |now−ts| ≤ 300s). Fail-closed: absent/invalid/stale → 403; empty secret refuses startup. See §7.
 - `GET /healthz` → `{"ok": true}`.
 
 Pipeline per request: parse → normalize to `Alert` (unparseable → **passthrough**: forward original bytes to PagerDuty + metric, never drop) → correlator → (new/storm → gate) → forwarder → respond. Every step wrapped; the receiver never returns 5xx for a triage failure — worst case it forwards the original payload.
@@ -380,7 +380,7 @@ python -m sentinel.evalharness --n 2000 --seed 7 -o calibration-report.md
 ## 7. Security
 
 - **BYOK:** key arrives only via `TYPESAFE_API_KEY` env var (or `client_from_env()`). Never in code, logs, audit rows, or error messages. HTTP-layer redaction: the `Authorization` header is stripped before any request/response logging. v0.1 runs single-tenant (one key per deployment); per-tenant KMS envelope is the SaaS upgrade (documented, not built).
-- **Webhook auth:** generic webhook supports HMAC-SHA256 (`X-Sentinel-Signature`); PD path relies on the customer's routing key + optional IP allowlist config.
+- **Webhook auth:** generic webhook requires HMAC-SHA256 (`X-Sentinel-Signature` + `X-Sentinel-Timestamp`, |now−ts| ≤ 300s) — fail-closed: empty secret refuses startup, absent/invalid/stale signature is a 403. Flagged onboarding (`SENTINEL_WEBHOOK_ONBOARDING=1`) may fail open only with a CRITICAL boot warning + `/healthz` surfacing. PD path relies on the customer's routing key. *(ADR-005, adjudicated 2026-10-03: the IP allowlist was REJECTED entirely — struck here per panel condition (d). Egress IPs rotate; an unmaintained pinning knob fails closed on rotation and turns PD IP changes into dropped-alert incidents. HMAC is the real authentication; no allowlist knob ships.)*
 - **Audit integrity:** append-only writes; no UPDATE/DELETE paths in `AuditLog`.
 
 ## 8. Deployment (v0.1)
