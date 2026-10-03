@@ -16,9 +16,9 @@ v0.1 honesty notes (each predicate says what it actually measures):
   * forwarder_draining — v0.1 has no outbox (design 03 lane); the predicate
     is a consecutive-forward-error tripwire plus an explicit statement of
     what is not yet measured (outbox lag, synthetic canary).
-  * evidence_flowing — v0.1 has no WAL (design 02 lane); the proxy is an
-    audit round-trip (write a decision row, read it back) inside the
-    gate self-test.
+  * webhook_auth_fail_open — top-level /healthz field (ADR-005 D11): true
+    while SENTINEL_WEBHOOK_ONBOARDING=1 lets webhook auth fail open. Not a
+    predicate failure; a mode flag the supervisor must not miss.
 """
 
 from __future__ import annotations
@@ -122,18 +122,27 @@ class HealthMonitor:
         degraded = bool(results["gate_constructed"].get("degraded"))
         degraded_reason = (results["gate_constructed"].get("degraded_reason")
                            if degraded else None)
+        # ADR-005 (D11): the flagged onboarding mode is fail-open webhook
+        # auth. It is not a predicate failure (the process can do its job),
+        # but it is unmissable on the health endpoint — a supervisor or
+        # design-partner drill that sees this flag knows auth is not enforced.
+        webhook_fail_open = bool(
+            getattr(getattr(self._pipeline, "config", None),
+                    "webhook_onboarding", False))
         if failed:
             return 503, {
                 "ok": False,
                 "failed": failed,
                 "degraded": degraded,
                 "degraded_reason": degraded_reason,
+                "webhook_auth_fail_open": webhook_fail_open,
                 "checks": results,
             }
         return 200, {
             "ok": True,
             "degraded": degraded,
             "degraded_reason": degraded_reason,
+            "webhook_auth_fail_open": webhook_fail_open,
             "config_generation": results["config_current"].get(
                 "config_generation"),
             "gate_selftest_age_s": results["gate_constructed"].get(

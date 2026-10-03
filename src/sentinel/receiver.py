@@ -10,12 +10,27 @@ Stdlib ThreadingHTTPServer. Pipeline per request:
     not triaged.
 
 Run:  PYTHONPATH=src python -m sentinel.receiver --port 8080
-Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1), SENTINEL_WEBHOOK_SECRET (optional),
+Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1),
+      SENTINEL_WEBHOOK_SECRET (required in production — an empty secret
+        refuses startup unless SENTINEL_WEBHOOK_ONBOARDING=1),
+      SENTINEL_WEBHOOK_ONBOARDING (0/1; explicit flagged onboarding mode —
+        webhook auth MAY fail open, but only with a CRITICAL boot-time
+        warning and /healthz surfacing; onboarding only, never default),
       PD_EVENTS_URL, PD_ROUTING_KEY (optional, for generic alerts),
       SENTINEL_DB (default ./sentinel.db), SENTINEL_SHADOW (0/1).
       Stage-0 shadow tap (design 06): SENTINEL_SHADOW_TAP (0/1),
       SENTINEL_SHADOW_PD_SECRET, SENTINEL_SHADOW_OG_TOKEN,
       SENTINEL_SHADOW_AM_TOKEN, SENTINEL_SHADOW_WRITE_CREDENTIALS (must stay empty).
+
+Webhook auth contract (ADR-005, adjudicated 2026-10-03):
+  X-Sentinel-Timestamp: <unix seconds>
+  X-Sentinel-Signature: sha256=<hex> where hex =
+      HMAC-SHA256(SENTINEL_WEBHOOK_SECRET, b"<timestamp>.<raw body>")
+  |server_now - timestamp| <= 300s (SIGNATURE_MAX_SKEW_S) — the replay bound.
+  Production refuses (403) on: empty secret, absent/malformed signature,
+  absent/malformed/stale/future-skewed timestamp, bad MAC, and legacy
+  timestamp-less (raw-body) signatures. Replay analysis: a timestamp-less
+  HMAC has an INDEFINITE replay window; the 300s bound is the fix.
 """
 
 from __future__ import annotations
@@ -49,6 +64,17 @@ from .state import build_state
 MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_INFLIGHT = 64  # alert-ingress admission bound (503, never 429)
 
+# ADR-005 (D11): the replay bound. A captured timestamp-less HMAC is
+# replayable FOREVER; binding the MAC to a timestamp and requiring
+# |now - ts| <= this window bounds the replay window to 5 minutes.
+# Tripwire's caveat stands: 5 minutes without nonces is a 5-minute replay
+# window — idempotent ingest dedupes identical alerts but cannot tell a
+# replay from a genuine resend inside the window.
+SIGNATURE_MAX_SKEW_S = 300
+SIGNATURE_HEADER = "X-Sentinel-Signature"
+TIMESTAMP_HEADER = "X-Sentinel-Timestamp"
+ONBOARDING_ENV = "SENTINEL_WEBHOOK_ONBOARDING"
+
 
 class Unparseable(Exception):
     """The payload could not be normalized to an Alert (fail open)."""
@@ -60,6 +86,12 @@ class Unparseable(Exception):
 class ReceiverConfig:
     webhook_secret: str | None = None
     shadow: bool = False
+    # Explicit flagged onboarding mode (SENTINEL_WEBHOOK_ONBOARDING=1):
+    # webhook auth MAY fail open (unsigned deliveries and legacy raw-body
+    # signatures accepted), but ONLY with a CRITICAL boot-time warning,
+    # a per-request WARNING, a webhook_auth_bypassed metric, and
+    # webhook_auth_fail_open=true on /healthz. Production default: False.
+    webhook_onboarding: bool = False
 
 
 class Pipeline:
@@ -95,6 +127,9 @@ class Pipeline:
             "change_window": 0,
             "unparseable": 0,
             "handler_panics": 0,
+            # Onboarding-mode counter: deliveries accepted WITHOUT valid
+            # auth (unsigned, or legacy signature). Must be 0 in production.
+            "webhook_auth_bypassed": 0,
         }
         # (timestamp, failed) per forward attempt; feeds the
         # forwarder_draining health predicate (design §1.2.3).
@@ -465,17 +500,79 @@ class SentinelHandler(BaseHTTPRequestHandler):
                                   "message": "shadow ingest failed"})
 
     def _signature_ok(self, body: bytes) -> bool:
-        secret = self.pipeline.config.webhook_secret
-        if not secret:
+        """HMAC-SHA256 auth for /webhook/generic — fail-closed (ADR-005, D11).
+
+        Canonical scheme (production):
+          X-Sentinel-Timestamp: <unix seconds>
+          X-Sentinel-Signature: sha256=<hex> where hex =
+              HMAC-SHA256(secret, b"<timestamp>.<raw body>"),
+          |server_now - timestamp| <= 300s (the replay bound).
+
+        Production refuses on: empty secret, absent/malformed signature,
+        absent/malformed timestamp, stale or future-skewed timestamp, bad
+        MAC, and legacy timestamp-less (raw-body) signatures. The old
+        `if not sig: return True` fail-open is the hole D11 closes.
+
+        Onboarding mode (SENTINEL_WEBHOOK_ONBOARDING=1) additionally accepts
+        unsigned deliveries and legacy raw-body signatures — loudly: a
+        WARNING per accepted-unauthenticated request and the
+        webhook_auth_bypassed metric. A bad MAC still refuses even in
+        onboarding (forgery is not a migration).
+        """
+        reason = self._signature_failure_reason(body)
+        if reason is None:
             return True
-        sig = self.headers.get("X-Sentinel-Signature")
+        if reason in ("no_secret", "no_signature", "legacy_signature"):
+            # Onboarding fail-open (explicit flag only): accept loudly.
+            self.pipeline.metrics["webhook_auth_bypassed"] += 1
+            sys.stderr.write(
+                "[sentinel] WARNING: webhook auth bypassed "
+                f"(SENTINEL_WEBHOOK_ONBOARDING=1, reason={reason}); "
+                "this flag is onboarding-only — disable after migration.\n")
+            return True
+        # Structured failure log (SECURITY.md §2.3): reason only — never the
+        # secret, never the presented signature value.
+        sys.stderr.write(f"[sentinel] webhook_signature_invalid "
+                         f"reason={reason}\n")
+        return False
+
+    def _signature_failure_reason(self, body: bytes) -> str | None:
+        """None when the delivery verifies; otherwise a terse reason code."""
+        secret = self.pipeline.config.webhook_secret
+        onboarding = self.pipeline.config.webhook_onboarding
+        if not secret:
+            # Empty secret: production refuses (startup already refuses too;
+            # this is defense-in-depth for ad-hoc constructions). Onboarding
+            # may fail open — the caller logs it loudly.
+            return "no_secret" if onboarding else "no_secret_prod"
+        sig = self.headers.get(SIGNATURE_HEADER)
         if not sig:
-            return True  # fail open: no signature presented
+            return "no_signature" if onboarding else "missing_signature"
         if not sig.startswith("sha256="):
-            return False
+            return "bad_signature_format"
+        presented = sig[len("sha256="):]
+        ts_raw = self.headers.get(TIMESTAMP_HEADER)
+        if ts_raw is not None:
+            # Timestamped scheme: MAC binds timestamp to the raw body.
+            try:
+                ts = int(ts_raw.strip())
+            except (ValueError, AttributeError):
+                return "bad_timestamp"
+            if abs(time.time() - ts) > SIGNATURE_MAX_SKEW_S:
+                return "stale_timestamp"
+            signed = str(ts).encode("ascii") + b"." + body
+            expected = hmac.new(secret.encode("utf-8"), signed,
+                                hashlib.sha256).hexdigest()
+            return None if hmac.compare_digest(presented, expected) \
+                else "bad_mac"
+        # Legacy timestamp-less scheme (HMAC over raw body only): indefinite
+        # replay window — rejected in production; onboarding accepts it loudly
+        # so migrating senders don't go dark mid-cutover.
         expected = hmac.new(secret.encode("utf-8"), body,
                             hashlib.sha256).hexdigest()
-        return hmac.compare_digest(sig[len("sha256="):], expected)
+        if hmac.compare_digest(presented, expected):
+            return "legacy_signature" if onboarding else "legacy_unsigned_ts"
+        return "bad_mac"
 
     def _health_auth_ok(self) -> bool:
         """Bearer <redacted> for /healthz and /-/reload (design §2.3).
@@ -598,7 +695,29 @@ def build_pipeline_from_env(policy=None,
             "no validated policy config: refusing to start without one "
             "(load thresholds.json via ConfigLoader.load_startup()).")
     webhook_secret = os.environ.get("SENTINEL_WEBHOOK_SECRET")
-    if webhook_secret is not None and len(webhook_secret) < 16:
+    onboarding = os.environ.get(ONBOARDING_ENV, "0") == "1"
+    if onboarding:
+        # Unmissable boot-time warning (ADR-005 condition (b)): fail-open
+        # auth is permitted ONLY behind this explicit flag, and ONLY this
+        # loudly. ERROR/CRITICAL level, before the server accepts a byte.
+        sys.stderr.write(
+            "[sentinel] CRITICAL: SENTINEL_WEBHOOK_ONBOARDING=1 — webhook "
+            "auth is FAIL-OPEN: unsigned deliveries and legacy raw-body "
+            "signatures will be ACCEPTED, and secretless startup is "
+            "permitted. This flag is for onboarding only — disable it "
+            "immediately after sender migration. Bypassed deliveries are "
+            "counted in webhook_auth_bypassed and the mode is surfaced on "
+            "/healthz as webhook_auth_fail_open=true.\n")
+    if not webhook_secret and not onboarding:
+        # ADR-005 fail-closed (D11): "no secret, no check" turns a deployment
+        # mistake into an open endpoint — we turn it into a loud, immediate
+        # startup refusal instead (SECURITY.md §2.2 rule 3).
+        raise SystemExit(
+            "SENTINEL_WEBHOOK_SECRET is not set: refusing to start with an "
+            "unauthenticated generic-webhook route (ADR-005 fail-closed). "
+            "Set the secret, or set SENTINEL_WEBHOOK_ONBOARDING=1 for a "
+            "flagged, loudly-warned onboarding window.")
+    if webhook_secret and len(webhook_secret) < 16:
         raise SystemExit(
             "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
             "refusing to start with a weak webhook secret.")
@@ -615,6 +734,7 @@ def build_pipeline_from_env(policy=None,
     config = ReceiverConfig(
         webhook_secret=webhook_secret,
         shadow=shadow,
+        webhook_onboarding=onboarding,
     )
     pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
                         policy=policy, config_loader=config_loader,
