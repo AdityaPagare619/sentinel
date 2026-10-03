@@ -1,0 +1,51 @@
+/* Prism design tokens — Sentinel platform v0.1
+ * Verbatim from design/DESIGN_SYSTEM.md §2. Rebrand = change this file. */
+:root {
+  --bg-0: #06090F;
+  --bg-1: #0B111A;
+  --bg-2: #111826;
+  --bg-3: #1A2436;
+  --line-0: #1E2A3E;
+  --line-1: #2C3B55;
+  --tx-0: #E8EEF7;
+  --tx-1: #9AA9C4;
+  --tx-2: #5D6E8C;
+  --tx-dim: #3A4A63;
+
+  --sev-1: #FF5470;
+  --sev-2: #FF9F43;
+  --sev-3: #FFD166;
+  --sev-4: #7BDFF2;
+
+  --disp-page: #FF5470;
+  --disp-suppress: #8A99B5;
+  --disp-escalate: #FF9F43;
+  --disp-defer: #5D6E8C;
+
+  --src-synthetic: #B28DFF;
+  --src-shadow: #FFB86B;
+  --src-production: #5EEAD4;
+
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --radius-chip: 4px;
+  --radius-card: 8px;
+  --space: 8px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--tx-0);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.mono, code, pre, kbd, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+a { color: var(--sev-4); text-decoration: none; }
+a:hover { text-decoration: underline; }
+::selection { background: var(--bg-3); }
+:focus-visible { outline: 1px solid var(--sev-4); outline-offset: 1px; }
