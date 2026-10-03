@@ -142,9 +142,12 @@ class Alert:
 
 @dataclass
 class Disposition:
-    action: str      # "page_now" | "page_business_hours" | "suppress" | "passthrough"
+    action: str      # "page_now" | "page_business_hours" | "suppress" | "passthrough" | "folded"
+                     # "folded" (D3): storm-continuation absorbed into the
+                     # aggregate page — not forwarded, but NOT suppression.
     reason: str      # "threshold" | "allowlist" | "uncertain" | "shadow" |
-                     # "dedup" | "change_window" | "storm" | "error:<code>"
+                     # "dedup" | "change_window" | "storm" | "storm_digest" |
+                     # "error:<code>"
     team: str | None
     confidence: float | None
     latency_ms: float
@@ -230,7 +233,11 @@ class Correlator:
     # CorrelationResult.kind: "new" | "duplicate" | "storm" | "change_window"
     # "duplicate": same fingerprint inside window_s -> inherit, no Jev call
     # "storm": >storm_fingerprints distinct fingerprints in storm_window_s ->
-    #          single aggregate disposition request (counts by service), page once
+    #          single aggregate disposition request (counts by service), page once.
+    #          D3: the declaring aggregate takes Gate.digest_storm — a separate
+    #          code path (never the race/triple lock); suppress unreachable by
+    #          construction. Continuations fold (action="folded", not
+    #          "suppress") into the aggregate page with no Jev call.
     # "change_window": deploy/change window open for service -> page_business_hours,
     #          reason="change_window", NO Jev call (deterministic, auditable)
 ```
@@ -321,7 +328,7 @@ Stdlib `http.server.ThreadingHTTPServer`. Routes:
 - `POST /webhook/generic` — `{service, check, title, severity, labels{}, metric{}}`; requires `X-Sentinel-Signature: sha256=<hex>` (HMAC-SHA256 of `<unix-ts>.<raw-body>` with `SENTINEL_WEBHOOK_SECRET`) + `X-Sentinel-Timestamp` (unix seconds, |now−ts| ≤ 300s). Fail-closed: absent/invalid/stale → 403; empty secret refuses startup. See §7.
 - `GET /healthz` → `{"ok": true}`.
 
-Pipeline per request: parse → normalize to `Alert` (unparseable → **passthrough**: forward original bytes to PagerDuty + metric, never drop) → correlator → (new/storm → gate) → forwarder → respond. Every step wrapped; the receiver never returns 5xx for a triage failure — worst case it forwards the original payload.
+Pipeline per request: parse → normalize to `Alert` (unparseable → **passthrough**: forward original bytes to PagerDuty + metric, never drop) → correlator → (new/storm-continuation/change_window → gate; storm-declaring aggregate → `Gate.digest_storm`, the deterministic digest path that cannot suppress by construction, D3) → forwarder → respond. Every step wrapped; the receiver never returns 5xx for a triage failure — worst case it forwards the original payload.
 
 ---
 

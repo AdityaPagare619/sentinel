@@ -532,9 +532,11 @@ def _error_class(exc: BaseException) -> str:
 
 class RaceRunner:
     """Owns the scheduler, the inference pool and the watchdog; runs one
-    race per alert. The ONLY Jev-call site in the gate is the pool
-    submission in :meth:`run` — any inline ``client.decide`` on the hot
-    path is a P0 defect (design §10.1)."""
+    race per alert. The ONLY Jev-call sites in the gate are the pool
+    submissions in :meth:`run` (the race — gates the disposition) and
+    :meth:`submit_advisory` (detached advisory — never gates anything);
+    any inline ``client.decide`` on the hot path is a P0 defect
+    (design §10.1)."""
 
     def __init__(self, client, config: RaceConfig | None = None, *,
                  clock=monotonic, metrics: Metrics | None = None,
@@ -778,6 +780,44 @@ class RaceRunner:
                 pass  # the watchdog must not die either
 
     # ------------------------------------------------------------------ misc
+
+    def submit_advisory(self, *, state, questions, on_answer) -> bool:
+        """Detached Jev call for advisory enrichment (D3 storm digest).
+
+        The answer is delivered to ``on_answer`` and NOTHING else: there
+        is no disposition for it to gate, no race to win, no budget to
+        beat. Returns True when submitted, False when shed (pool full).
+
+        Never raises. A shed or failed advisory drops an enrichment,
+        never a page — the digest disposition is already decided before
+        this is called. The client's socket timeout (asserted > 0 at
+        construction) bounds the detached thread's lifetime.
+        """
+        def worker():
+            try:
+                resp = self._client.decide(state, questions)
+            except Exception as exc:
+                log.warning("[sentinel] storm advisory Jev call failed: %r "
+                            "(enrichment dropped, page unaffected)", exc)
+                return
+            try:
+                on_answer(resp)
+            except Exception:
+                log.warning("[sentinel] storm advisory on_answer raised; "
+                            "swallowed so the pool thread never dies loud",
+                            exc_info=True)
+
+        try:
+            fut = self._pool.submit(worker)
+        except Exception:
+            log.warning("[sentinel] storm advisory pool submit raised; "
+                        "shedding", exc_info=True)
+            return False
+        if fut is None:
+            log.warning("[sentinel] storm advisory shed: inference pool "
+                        "full (enrichment dropped, page unaffected)")
+            return False
+        return True
 
     def close(self) -> None:
         self._stop.set()
