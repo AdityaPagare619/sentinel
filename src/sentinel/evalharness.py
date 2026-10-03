@@ -461,6 +461,56 @@ def write_report(m: dict, path: str) -> None:
     print(f"wrote calibration report -> {path}")
 
 
+def _run_ab_passthrough(args) -> None:
+    """--ab: delegate to the question-variant A/B harness (sentinel.ab).
+
+    Dry-run only (scripted mock, no credentials). Live runs go through
+    research/jev-behavior/bin/ab_run.py --live, which shares this core.
+    """
+    import os
+    from datetime import datetime, timezone
+    from sentinel import ab as _ab
+
+    stems = [s.strip() for s in args.ab_arms.split(",") if s.strip()]
+    if len(stems) < 3:
+        raise SystemExit("--ab-arms needs at least 3 variant stems (A1,A2,B)")
+    vdir = os.path.join("research", "jev-behavior", "variants")
+    arms = [_ab.load_variant(os.path.join(vdir, s + ".json")) for s in stems]
+    _ab.assert_variant_effective(arms[0], arms[2])  # K4
+    items = _ab.build_evalset(args.ab_n, args.seed)
+    script, srng = {}, random.Random(args.seed + 1)
+    for it in items:
+        script[state_key(it.state)] = script_response(
+            it.alert, it.label, srng, label_noise=0.0)
+
+    def factory(variant, arm_name):
+        return FlipMock(script=script, flip_rate=0.02,
+                        rng=random.Random(
+                            _ab.variant_rng_seed(
+                                args.seed, arm_name + "|" + variant.ref)))
+
+    results, meta = _ab.run_ab(items, arms, factory, seed=args.seed)
+    meta["n_alerts_requested"] = args.ab_n
+    meta["seed"] = args.seed
+    metrics = _ab.paired_metrics(results)  # A1/A2/B
+    toks = metrics["input_tokens_per_arm"]["A1"]
+    cost = _ab.cost_accounting(toks["mean"])
+    conditions = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "mode": "dry-run (via evalharness --ab)",
+        "conditions_text": (
+            "dry-run through the evalharness --ab passthrough: scripted "
+            "FlipMock answers (flip_rate=0.02, seeded per arm); variant "
+            "transforms structurally applied but the mock keys answers off "
+            "state fingerprints, so variant effects are zero by construction. "
+            "Plumbing + statistics only. Live: bin/ab_run.py --live."),
+    }
+    _ab.write_ab_report(metrics, meta, cost, args.ab_report, conditions)
+    print(f"ab: n_paired={metrics['n_paired']} "
+          f"noise_flip={metrics['noise_floor']['disposition_flip_rate']:.4f} "
+          f"variant_flip={metrics['variant']['disposition_flip_rate']:.4f}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Sentinel calibration eval harness")
     ap.add_argument("--n", type=int, default=2000)
@@ -468,7 +518,18 @@ def main() -> None:
     ap.add_argument("--flip-rate", type=float, default=0.02)
     ap.add_argument("--label-noise", type=float, default=0.0)
     ap.add_argument("-o", "--output", default="calibration-report.md")
+    ap.add_argument("--ab", action="store_true",
+                    help="run the question-variant A/B harness (sentinel.ab, "
+                         "dry-run) instead of the calibration eval")
+    ap.add_argument("--ab-arms", default="control-v1,control-v1,q123-shuffle-v1",
+                    help="comma-separated variant file stems (A1,A2,B)")
+    ap.add_argument("--ab-n", type=int, default=200)
+    ap.add_argument("--ab-report",
+                    default="research/jev-behavior/ab-2026-10-04.md")
     args = ap.parse_args()
+    if args.ab:
+        _run_ab_passthrough(args)
+        return
     m = run_eval(n=args.n, seed=args.seed, flip_rate=args.flip_rate,
                  label_noise=args.label_noise, out_path=args.output)
     print(f"severity_acc={m['accuracy']['severity']:.4f} "
