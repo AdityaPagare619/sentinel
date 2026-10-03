@@ -293,3 +293,66 @@ a.hcard:hover { border-color: var(--line-1); text-decoration: none; }
   .sim-layout { flex-direction: column; }
   .sim-controls { width: auto; border-right: none; border-bottom: 1px solid var(--line-0); }
 }
+
+/* ---------- payload viewer (payload.js) + field pins (pins.js) ----------
+ * Anti-slop: flat token colors only, no gradients, no emoji, tabular numerals,
+ * semantic color only. §8 checklist. */
+.pv { font-size: 12px; }
+.pv-table { border-collapse: collapse; width: 100%; }
+.pv-table td { border-bottom: 1px solid var(--line-0); padding: 3px 8px 3px 0; vertical-align: top; }
+.pv-k { color: var(--tx-2); white-space: nowrap; padding-right: 12px; }
+.pv-v { color: var(--tx-0); word-break: break-word; }
+.pv-row { display: flex; gap: 12px; padding: 3px 0; border-bottom: 1px solid var(--line-0); align-items: baseline; }
+.pv-row .pv-k { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+.pv-nested { margin: 2px 0; }
+.pv-sum { cursor: pointer; color: var(--tx-1); }
+.pv-sum:hover { color: var(--tx-0); }
+.pv-body { padding-left: 14px; border-left: 1px solid var(--line-0); margin: 4px 0 4px 2px; }
+.pv-list { margin: 2px 0; padding-left: 22px; color: var(--tx-0); }
+.pv-list li { padding: 1px 0; }
+.pv-dash { color: var(--tx-dim); }
+.pv-why { color: var(--tx-2); font-size: 10px; }
+.pv-str { color: var(--tx-0); word-break: break-word; }
+.pv-num, .pv-bool { color: var(--tx-0); }
+.pv-ts { color: var(--tx-1); }
+.pv-link { color: var(--sev-4); word-break: break-all; }
+.pv-redact { color: var(--tx-1); letter-spacing: 2px; }
+.pv-cap, .pv-trunc { color: var(--sev-2); }
+.pv-trunc { padding: 8px 0; border-top: 1px dashed var(--sev-2); margin-top: 8px; }
+.pv-err { color: var(--sev-1); padding: 8px 0; }
+.pv-skel { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+
+/* field pins — display bindings, visually distinct from contract chrome */
+.pin-cell { display: inline-flex; align-items: baseline; gap: 6px; font-size: 11px;
+  border: 1px dashed var(--line-1); border-radius: var(--radius-chip); padding: 2px 8px; }
+.pin-integ { color: var(--tx-dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; }
+.pin-integ-unlabeled { font-style: italic; }
+.pins-rail .pin-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; }
+.pins-rail .pin-path { color: var(--tx-2); }
+.pin-preview { background: var(--bg-0); border: 1px solid var(--line-0); border-radius: var(--radius-chip);
+  padding: 8px; margin-top: 8px; font-size: 11px; }
+.pin-form input { width: 100%; background: var(--bg-0); border: 1px solid var(--line-0); color: var(--tx-0);
+  border-radius: var(--radius-chip); padding: 5px 8px; font-family: var(--font-mono); font-size: 11px; margin: 3px 0; }
+.pin-warn { color: var(--sev-2); font-size: 10px; margin-top: 6px; }
+.pin-err { color: var(--sev-1); font-size: 10px; margin-top: 6px; }
+
+/* contract-drift row — a decision the frozen contract cannot describe.
+ * Rendered honestly, never as a decision, never silently. */
+.row.drift { border-left: 3px solid var(--sev-2); cursor: default; }
+.row.drift:hover { background: none; }
+.drift-msg { color: var(--sev-2); font-size: 12px; }
+.drift-detail { color: var(--tx-2); font-size: 10px; flex-basis: 100%; }
+
+/* ---------- B1 three-channel separation: severity = signal bars, neutral ink ----------
+ * Decision keeps the color channel (dispChip); severity is shape + neutral label.
+ * System health reserves its own channel (token follow-up). */
+.sev-sig { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.sev-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
+.sev-bar { width: 3px; background: var(--line-1); border-radius: 1px; }
+.sev-bar:nth-child(1) { height: 5px; } .sev-bar:nth-child(2) { height: 8px; }
+.sev-bar:nth-child(3) { height: 11px; } .sev-bar:nth-child(4) { height: 14px; }
+.sev-bar.on { background: var(--tx-1); }
+.sev-label { font-family: var(--font-mono); font-size: 11px; color: var(--tx-1); }
+.tail-banner { border: 1px dashed var(--sev-2); color: var(--sev-2); border-radius: var(--radius-chip);
+  padding: 8px 12px; margin: 8px 0; font-size: 11px; }
+.tail-banner[hidden] { display: none; }
