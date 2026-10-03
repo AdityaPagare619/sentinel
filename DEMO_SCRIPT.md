@@ -98,16 +98,51 @@ alert 10 vs alert 40.*
 → timeline → provenance → raw). Click a SUPPRESS row → the reason code and
 the confidence bar. Click a PAGE row → the timeline.
 
-*Narrative lane: the two rows to click and the one-line plain-language
-verdict for each.*
+**The two rows to click (real rows from the rehearsed storm, event-log
+seq cited — narrative lane filled 2026-10-03):**
+
+- **Row 1 — the flip-beat row** (`passthrough`, reason `timer_won`):
+  one-line verdict — *"The budget fired first: the page went out on
+  time. The machine's own late answer sits one row below — recorded,
+  never acting."* Open the drawer: `budget_outcome: timer_won`,
+  `timer_fired_at_ms: 500`, model/latency null *by schema* (no Jev answer
+  was evaluated on this path — the nulls are the honesty, not a gap).
+- **Row 5 — the uncertainty page** (`page_now`, reason `threshold`):
+  one-line verdict — *"Jev called it noise but only at 0.29 confidence —
+  uncertainty pages. The gate does not gamble on a shrug."* Open the
+  drawer: q1 `known_noise`, q3 `page_now` conf 0.29 < 0.50
+  (`uncertain_conf_max`) → the policy paged on the uncertainty clause,
+  and the lock evaluation shows exactly which clause fired.
+
+**If the live storm produced zero suppressions** (as in all three
+rehearsals — the triple lock held): there is no SUPPRESS row to click,
+and the demoist does NOT manufacture one. Read the triple-lock honesty
+beat instead: *"Tonight the engine suppressed nothing. The bar is
+reported-P(p1) exactly 0.00, confidence ≥ 0.90, dual-attested allowlist —
+and the lock held on every alert. A demo that manufactured a suppression
+would be the fake we refused to build."* Then click row 5 above.
 
 ## Beat 4 — Shadow Report + calibration (the trust layer)
 
 Flip-audit view (`/api/analytics/flips`), calibration panel, the 1.3–2.2%
-floor disclosed on screen (Law 3). The simulator: drag a threshold, watch
-last week's noise re-price.
+floor disclosed on screen (Law 3).
 
-*Narrative lane: which threshold to drag and the sentence that lands it.*
+**The simulator — conditional, not promised** (narrative lane rewrite
+2026-10-03, per the built-only audit): the simulator beat runs ONLY IF
+its projection engine is the live gate kernel (quantized
+integer-hundredths gate + dual attestation + the B=2700 ms race). The
+frozen contract currently points it at the tuner path, which simulates
+the pre-ADR-013 continuous gate — a gate that does not exist. Until the
+UI lane wires the real kernel, the demoist does NOT drag the threshold
+slider. The replacement beat, same slot: *"The simulator projects only
+the live kernel. That wiring is the UI lane's build — tonight, the storm
+you just watched is the projection: 42 real decisions, every one priced
+by the gate you saw decide."* If the kernel-true simulator lands before
+showtime, the sentence that lands the drag is: *"Watch the tradeoff move
+— every number on this curve is the gate you just watched, repriced."*
+
+*Narrative lane: calibration cards carry their denominators on the card
+(n=…) — no card ships a number without its n (operator-empathy spec).*
 
 ## Beat 5 — receipts (every number traces to the log)
 

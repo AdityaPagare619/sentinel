@@ -15,11 +15,17 @@ TRAFFIC only — a demo is not production data.
 
 ```bash
 cd ~/workspace/jev-builds/sentinel
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 PYTHONPATH=src python3 demo/storm-scenario/storm_runner.py \
     --n 40 --seed 42 \
     --db demo/storm-scenario/storm.db \
-    --out demo/storm-scenario
+    --out demo/storm-scenario 2>&1 | tee demo/storm-scenario/run-$STAMP.log
 ```
+
+**Ops rule (2026-10-03): the runtime wipes /tmp mid-session — never rely
+on it.** The runner's console log above goes to a durable path
+(`demo/storm-scenario/run-<timestamp>.log`), alongside the artifacts.
+All evidence lives in the repo, never in /tmp.
 
 The runner drives the storm through the real engine, prints the river to
 the terminal (screen-share it), and writes three artifacts to
