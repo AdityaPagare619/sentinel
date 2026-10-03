@@ -130,6 +130,35 @@ Nothing in this table is a surprise on demo night — every row is rehearsed.
 
 ---
 
+## Honest scope — built-only (Petu's ADR-debt ruling, PR #29)
+
+The demo describes ONLY what is built. Two adopted-but-UNIMPLEMENTED items
+must never be presented as system properties:
+
+- **D1** — `suppress_precondition` wired into the live gate kernel. Adopted,
+  not implemented; lands in the first hardening sprint, not Sunday.
+- **D3** — storm-aggregate structural digest path. Adopted, not implemented;
+  same sprint.
+
+What this means for the beats above:
+
+- **Beat 2 (storm):** storm-fold suppressions on the river carry the built
+  reason code (`storm`) — the river must never show, and the narration must
+  never claim, a structural digest for the aggregate page. No "digest",
+  no "precondition check" language anywhere in beat copy.
+- **Beat 4 (calibration/simulator):** the flip-audit and calibration panels
+  show measured, implemented behavior only.
+- **Webhooks (D11):** the signature-verification fix lands tonight; until it
+  does, the demo rig accepts webhooks without signature verification (dev
+  rig, fail-open, no secret configured). The demo makes no claim about
+  webhook authentication — in production the receiver refuses unsigned
+  webhooks (D11).
+
+If any beat's story needs D1 or D3 to land, the beat gets cut or relabeled —
+never implied.
+
+---
+
 ## Rehearsal log
 
 | Date | What | Result |
