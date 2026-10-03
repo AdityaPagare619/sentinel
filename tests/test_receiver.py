@@ -14,12 +14,15 @@ if _SRC not in sys.path:  # makes `python -m unittest discover -s tests` work
 import hashlib
 import hmac
 import json
+import os
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 
 from sentinel.audit import AuditLog
+from sentinel.config import ConfigLoader, record_restart
 from sentinel.correlator import Correlator, fingerprint_for
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate
@@ -60,16 +63,36 @@ def _pd_event(summary="disk full", dedup_key="dk-test", severity="critical",
 class ReceiverTestBase(unittest.TestCase):
     def _start(self, jev_client, allowlist=None, webhook_secret=None,
                shadow=False):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        cfgdir = os.path.join(self._tmp.name, "cfg")
+        os.makedirs(cfgdir, exist_ok=True)
+        with open(os.path.join(cfgdir, "thresholds.json"), "w") as fh:
+            json.dump({}, fh)
+        # ADR-013: AllowlistEntry objects (with attestations) can't go through
+        # JSON config; write plain fingerprints to file, pass entries directly.
+        entries = [a for a in (allowlist or []) if not isinstance(a, str)]
+        fp_strings = [a for a in (allowlist or []) if isinstance(a, str)]
+        with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
+            json.dump(sorted(fp_strings), fh)
+        statedir = os.path.join(self._tmp.name, "state")
+        loader = ConfigLoader(config_dir=cfgdir, state_dir=statedir)
+        policy = loader.load_startup()
+        # Override with attested entries if provided (bypasses file format).
+        allowlist_for_gate = entries if entries else policy.allowlist
+        record_restart(statedir)
         self.pd = CaptureServer()
         audit = AuditLog(":memory:")
         # ADR-013: allowlist may be AllowlistEntry objects (with attestations)
-        # or plain fingerprint strings. Pass through; Gate handles both.
-        gate = Gate(jev_client, Thresholds(), list(allowlist or []), audit,
-                    shadow=shadow)
+        # or plain fingerprint strings. Pass through as list; Gate handles both.
+        gate = Gate(jev_client, policy.thresholds, list(allowlist_for_gate),
+                    audit, shadow=shadow)
         forwarder = Forwarder(pd_events_url=self.pd.url,
                               default_routing_key="rk-default")
         config = ReceiverConfig(webhook_secret=webhook_secret, shadow=shadow)
-        self.pipeline = Pipeline(Correlator(), gate, forwarder, audit, config)
+        self.pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
+                                 policy=policy, config_loader=loader,
+                                 state_dir=statedir)
         self.server = make_server(0, self.pipeline)
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        daemon=True)
@@ -78,6 +101,10 @@ class ReceiverTestBase(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def _stop(self):
+        try:
+            self.pipeline.health.stop()
+        except Exception:
+            pass
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
@@ -107,9 +134,22 @@ class TestRoutes(ReceiverTestBase):
         self._start(FixedClient(canned(p1=0.9, conf=0.95)))
 
     def test_healthz(self):
+        # Deep check (design 05, §1.2): 200 with evidence, not constant-true.
         code, body = self._get("/healthz")
         self.assertEqual(code, 200)
-        self.assertEqual(body, {"ok": True})
+        self.assertTrue(body["ok"])
+        self.assertEqual(sorted(body["checks"].keys()), [
+            "config_current",
+            "evidence_flowing",
+            "forwarder_draining",
+            "gate_constructed",
+            "no_crashloop_signature",
+        ])
+
+    def test_livez(self):
+        code, body = self._get("/livez")
+        self.assertEqual(code, 200)
+        self.assertTrue(body["alive"])
 
     def test_unknown_route_404(self):
         code, _body = self._get("/nope")
