@@ -18,6 +18,7 @@ Invariants:
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import sys
 import time
@@ -25,6 +26,7 @@ import time
 from .client import JevError
 from .models import Alert, DecisionRecord, Disposition, Thresholds
 from .questions import build_questions
+from .quantized import (AllowlistEntry, FitStore, leg1_prob_lock)
 from .state import input_sha256
 
 # Frozen contract: evaluate(self, alert, state, history, context).
@@ -42,12 +44,35 @@ def _error_code(exc: BaseException) -> str:
 
 class Gate:
     def __init__(self, client, thresholds: Thresholds,
-                 allowlist: set[str], audit, shadow: bool = False):
+                 allowlist, audit, shadow: bool = False,
+                 *, fit_store: FitStore | None = None,
+                 pinned_model: str | None = None,
+                 org: str | None = None,
+                 clock=None):
         self.client = client
         self.thresholds = thresholds
-        self.allowlist = set(allowlist or [])
+        # Allowlist entries: ADR-017/019. Accepts a plain set of fingerprints
+        # (legacy shape: leg-3 membership only, no attestation evidence) or
+        # AllowlistEntry objects carrying the dual-attestation tuples the
+        # quantized leg 1 needs pre-fit (design §2.3).
+        self.allowlist_entries: dict[str, AllowlistEntry | None] = {}
+        if isinstance(allowlist, dict):
+            items = allowlist.items()
+        else:
+            items = [(a, a) if isinstance(a, str) else (a.fingerprint, a)
+                     for a in (allowlist or [])]
+        for fp, entry in items:
+            if isinstance(entry, str):
+                self.allowlist_entries[fp] = None
+            else:
+                self.allowlist_entries[entry.fingerprint] = entry
         self.audit = audit
         self.shadow = shadow
+        # ADR-013 quantized prob lock (design/fixes/04-quantized-gate.md).
+        self.fit_store = fit_store
+        self.pinned_model = pinned_model
+        self.org = org
+        self.clock = clock  # () -> aware datetime; tests inject a fixed now
 
     # ------------------------------------------------------------------ API
 
@@ -94,6 +119,24 @@ class Gate:
         return disp, rec
 
     # -------------------------------------------------------------- internals
+
+    def _leg1_prob_lock(self, reported_p1, alert, context) -> bool:
+        """ADR-013 leg 1 — the quantized probability lock (§2.1).
+
+        Never raises: any failure fails the leg closed (no suppression on
+        this path); the gate's outer fail-open still pages on true errors.
+        """
+        now = self.clock() if self.clock else _dt.datetime.now(_dt.timezone.utc)
+        org = (context or {}).get("org") or self.org
+        entry = self.allowlist_entries.get(alert.fingerprint)
+        try:
+            ok, _detail = leg1_prob_lock(
+                reported_p1, org=org, now=now,
+                fit_store=self.fit_store, pinned_model=self.pinned_model,
+                entry=entry)
+        except Exception:
+            return False
+        return ok
 
     def _decide(self, alert, state, history, context, correlation):
         # Deterministic pre-Jev paths — no client call.
@@ -144,10 +187,15 @@ class Gate:
 
         if q3.choice == "cannot_determine":
             action = disp("passthrough", "uncertain")
-        elif (p1 < t.suppress_p1_max
-              and conf3 is not None and conf3 >= t.suppress_conf_min
-              and alert.fingerprint in self.allowlist):
-            action = disp("suppress", "allowlist")          # triple lock
+        elif (conf3 is not None and conf3 >= t.suppress_conf_min
+              and alert.fingerprint in self.allowlist_entries
+              and self._leg1_prob_lock(probs.get("p1_critical"), alert,
+                                       context)):
+            # ADR-013 quantized triple lock: leg 1 is the re-derived
+            # probability lock (integer-hundredths point condition AND
+            # (valid fit bound OR dual attestation)); leg 2 is Q3
+            # confidence; leg 3 is allowlist membership (ADR-017/019).
+            action = disp("suppress", "allowlist")
         elif (p1 + p2 > t.page_p1p2_min
               or conf3 is None or conf3 < t.uncertain_conf_max):
             action = disp("page_now", "threshold")          # uncertainty pages
