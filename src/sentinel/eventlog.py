@@ -34,11 +34,14 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+
+from .spill import write_spill
 
 # ---------------------------------------------------------------- constants
 
@@ -96,6 +99,19 @@ COMMIT_WATCHDOG_MS = 50.0    # §4: hot-path COMMIT budget. Trips only on a
                              # have seen it fire (tests fault-inject it).
 P99_WRITE_BUDGET_MS = 5.0    # §4: CI assertion bound on p99 event-write.
 
+# D14 interim disk guard (ADR-024/O-1 — Type 2: reversible, simple, loud).
+# The Vault-led retention RFC is the real answer; until it lands, a WAL-size
+# watermark pages the operator + writes a spill record before the disk fills.
+DISKGUARD_BYTES_DEFAULT = 100 * 1024 * 1024  # 100 MiB — conservative early
+                             # warning: ~70k events of headroom at ~1.5 KB
+                             # per event; weeks of runway at design-partner
+                             # volumes, never a near-full-disk alarm.
+DISKGUARD_ENV = "SENTINEL_DISKGUARD_BYTES"  # env override (bytes, integer).
+DISKGUARD_CHECK_EVERY_S = 5.0  # hot path stats the files at most this often.
+DISKGUARD_SPILL_SUBDIR = "disk-guard"  # under spillover_dir — kept apart
+                             # from forward-replay spills so replay_spills
+                             # never misreads a guard record as a PD send.
+
 
 def utcnow_iso() -> str:
     """UTC ISO-8601 with millisecond precision (wall-clock, humans only)."""
@@ -130,6 +146,33 @@ def derive_dedup_key(env: str, fingerprint: str, episode_seq: int) -> str:
     digest = hashlib.sha256(
         f"{env}|{fingerprint}|{episode_seq}".encode("utf-8")).hexdigest()[:32]
     return f"sentinel/{digest}"
+
+
+def _resolve_diskguard_bytes(explicit: int | None) -> int:
+    """D14 watermark resolution: explicit ctor arg -> env -> default.
+
+    An explicit non-positive value is a programming error (fail loud at
+    construction). A bad env value can never refuse to start the process —
+    the guard is Type 2; it falls back to the default and says so on stderr.
+    """
+    if explicit is not None:
+        if not isinstance(explicit, int) or isinstance(explicit, bool) \
+                or explicit <= 0:
+            raise EventLogError(
+                f"diskguard_bytes must be a positive int, got {explicit!r}")
+        return explicit
+    raw = os.environ.get(DISKGUARD_ENV)
+    if raw is None or not raw.strip():
+        return DISKGUARD_BYTES_DEFAULT
+    try:
+        val = int(raw.strip())
+        if val <= 0:
+            raise ValueError("non-positive")
+        return val
+    except ValueError:
+        print(f"[sentinel] {DISKGUARD_ENV}={raw!r} unparseable; using "
+              f"default {DISKGUARD_BYTES_DEFAULT}", file=sys.stderr)
+        return DISKGUARD_BYTES_DEFAULT
 
 
 # ------------------------------------------------------------------ schema
@@ -263,17 +306,23 @@ class EventLog:
 
     def __init__(self, db_path: str = "sentinel.db",
                  spillover_dir: str | None = None,
-                 degraded_sender=None):
+                 degraded_sender=None,
+                 diskguard_bytes: int | None = None):
         """
         spillover_dir: emergency spillover records land here on watchdog
             trips (design §4 degraded path). None disables file spillover.
         degraded_sender: callback(payload: dict) for the degraded direct
             inline send. The forwarder lane wires this; until then the
             spillover record + control-plane page carry the evidence.
+        diskguard_bytes: D14 interim disk-guard watermark (ADR-024, Type 2).
+            None -> SENTINEL_DISKGUARD_BYTES env -> 100 MiB default.
         """
         self.db_path = db_path
         self.spillover_dir = spillover_dir
         self.degraded_sender = degraded_sender
+        self.diskguard_bytes = _resolve_diskguard_bytes(diskguard_bytes)
+        self._disk_guard_fired = False  # exactly-once per process (loud, not spammy)
+        self._last_diskguard_check = 0.0
         self._lock = threading.RLock()
         # _test_commit_delay_s: fault-injection seam for the watchdog test.
         # Sleeps INSIDE the timed commit region. Test-only; never set in prod.
@@ -285,6 +334,7 @@ class EventLog:
             "reaper_redrives": 0,
             "shadow_drops": 0,
             "coalesced_duplicates": 0,
+            "disk_guard_fires": 0,
         }
         # Re-entrancy guard: the degraded path's own commits must not
         # re-trip the watchdog (infinite recursion on a sick disk).
@@ -335,6 +385,11 @@ class EventLog:
                 self._on_watchdog_trip(elapsed_ms)
             finally:
                 self._in_watchdog_trip = False
+        # D14 interim disk guard (ADR-024, Type 2): observes post-commit, so
+        # the triage write above is already durable — the guard can never
+        # block, delay, or sink a page. It never raises (see
+        # check_disk_watermark's contract).
+        self.check_disk_watermark()
 
     def _on_watchdog_trip(self, elapsed_ms: float) -> None:
         """Degraded path + evidence-loss page (design §4). Unsuppressible."""
@@ -377,6 +432,101 @@ class EventLog:
             self.metrics["evidence_loss_pages"] += 1
         except Exception:
             pass  # disk-full etc: file 03's ladder + ADR-018 watcher are the backstop
+
+    # ------------------------------------------------- D14 disk guard (Type 2)
+
+    def _db_footprint_bytes(self) -> int:
+        """On-disk footprint of the WAL-mode database: db + -wal + -shm.
+
+        Missing files contribute 0 (":memory:" logs therefore never fire).
+        """
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(self.db_path + suffix)
+            except OSError:
+                pass
+        return total
+
+    def check_disk_watermark(self, *, force: bool = False) -> bool:
+        """D14 interim disk guard (ADR-024/O-1). True once it has fired.
+
+        Runs on the hot path but can never affect it: it stats three files
+        at most every DISKGUARD_CHECK_EVERY_S, does its work post-commit,
+        latches exactly-once per process, and NEVER raises — any failure is
+        swallowed after the latch, with the page/spill/stderr steps each
+        individually best-effort.
+        """
+        try:
+            return self._check_disk_watermark_inner(force=force)
+        except Exception:
+            return False
+
+    def _check_disk_watermark_inner(self, *, force: bool) -> bool:
+        if self._disk_guard_fired:
+            return True
+        now = time.monotonic()
+        if not force and \
+                now - self._last_diskguard_check < DISKGUARD_CHECK_EVERY_S:
+            return False
+        self._last_diskguard_check = now
+        try:
+            size = self._db_footprint_bytes()
+        except Exception:
+            return False
+        if size < self.diskguard_bytes:
+            return False
+        self._fire_disk_guard(size)
+        return True
+
+    def _fire_disk_guard(self, size_bytes: int) -> None:
+        """WAL-size watermark crossed: page the operator + spill over.
+
+        The ruling's exact shape (ADR-024 conditions): control-plane page via
+        the priority-1 outbox lane (one pager, prioritized — same mechanism
+        as the commit watchdog) and a durable record via spill.py's existing
+        write_spill, in a dedicated subdir so forward-replay never misreads
+        it as a PD send. The latch is set FIRST: the enqueue below commits,
+        which re-enters _commit -> check_disk_watermark, which must see the
+        latch (exactly-once per process).
+        """
+        self._disk_guard_fired = True
+        self.metrics["disk_guard_fires"] += 1
+        detail = {
+            "kind": "disk_guard",
+            "reason": "wal_watermark_crossed",
+            "db_path": self.db_path,
+            "size_bytes": size_bytes,
+            "watermark_bytes": self.diskguard_bytes,
+            "ts": utcnow_iso(),
+            "detail": ("Event-log WAL footprint crossed the interim D14 "
+                       "disk-guard watermark. Triage is unaffected; this is "
+                       "the ADR-024/O-1 early warning (the Vault-led "
+                       "retention RFC is still open). Confirm the retention "
+                       "policy or provision disk."),
+        }
+        # 1. Spill record (durable evidence; existing spill.py machinery).
+        if self.spillover_dir:
+            try:
+                write_spill(
+                    os.path.join(self.spillover_dir, DISKGUARD_SPILL_SUBDIR),
+                    detail)
+            except Exception:
+                pass  # write_spill is best-effort already; the page is the alarm
+        # 2. Control-plane page (priority-1 outbox row -> forwarder -> PD).
+        try:
+            self._enqueue_control_plane_page(
+                kind="disk_guard",
+                summary=(f"disk guard: event-log WAL footprint {size_bytes} "
+                         f"bytes crossed watermark {self.diskguard_bytes} "
+                         f"bytes (ADR-024 interim)"),
+                detail=detail)
+        except Exception:
+            pass  # disk-sick: the spill + stderr below are the backstops
+        # 3. Loud on stderr — unsuppressible, like the watchdog trip.
+        print(f"[sentinel] DISK GUARD FIRED db={self.db_path} "
+              f"size={size_bytes} watermark={self.diskguard_bytes}",
+              file=sys.stderr)
 
     def _enqueue_control_plane_page(self, kind: str, summary: str,
                                     detail: dict) -> str:
