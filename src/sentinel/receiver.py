@@ -214,12 +214,18 @@ class Pipeline:
 
         if corr.kind == "storm" and corr.storm_declared:
             # Single aggregate request: page once for the whole storm.
+            # D3: the aggregate takes the deterministic digest path — it
+            # never enters the race or the triple lock, so suppress is
+            # unreachable by construction. The forward is unconditional:
+            # the digest pages, always.
             self.metrics["storms"] += 1
             agg = _aggregate_alert(corr, alert)
             agg_state = build_state(agg, history={}, context={})
-            disp, _rec = self.gate.evaluate(agg, agg_state, {}, {})
-            if disp.action != "suppress":
-                self.note_forward(self.forwarder.forward(agg, disp))
+            disp, _rec = self.gate.digest_storm(
+                agg, agg_state,
+                storm_size=sum(corr.storm_counts.values()),
+                storm_counts=dict(corr.storm_counts))
+            self.note_forward(self.forwarder.forward(agg, disp))
             self.correlator.note_disposition(agg.fingerprint, disp)
             return disp.action
 
@@ -233,7 +239,9 @@ class Pipeline:
                                         correlation=corr)
         self.metrics["triaged"] += 1
         self.correlator.note_disposition(alert.fingerprint, disp)
-        if disp.action != "suppress":
+        # D3: "folded" (storm-continuation absorbed into the aggregate page)
+        # is not forwarded either — it is not suppression, it is absorption.
+        if disp.action not in ("suppress", "folded"):
             self.note_forward(
                 self.forwarder.forward(alert, disp, raw_bytes=raw_bytes))
         return disp.action

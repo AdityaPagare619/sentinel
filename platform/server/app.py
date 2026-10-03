@@ -37,7 +37,10 @@ CONTRACT_VERSION = "1.0.0"
 
 TEAMS = ("platform", "network", "data", "product_backend", "security",
          "cannot_determine")
-ACTIONS = ("page_now", "page_business_hours", "suppress", "passthrough")
+# D3: "folded" (storm-continuation absorbed into the aggregate page) is a
+# stored action; the platform lane owns this file — flagged for awareness.
+ACTIONS = ("page_now", "page_business_hours", "suppress", "passthrough",
+           "folded")
 WINDOW_RE = re.compile(r"^(\d+)([smhd])$")
 FP_RE = re.compile(r"^[0-9a-f]{16}$")
 WINDOW_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
