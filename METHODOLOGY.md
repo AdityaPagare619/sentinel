@@ -5,8 +5,10 @@
 
 ## 1. Branch discipline
 
-- `main` is **protected**: PR-only, no direct pushes. Green CI required. Review required
-  from a **DIFFERENT agent** — no self-merge, ever.
+- `main` is **protected**: PR-only, no direct pushes. **Local test suite green
+  required** (`python3 -m unittest discover tests` run locally on the PR head —
+  GitHub Actions is not the gate; see ops/ci-repair.md for the platform-bug
+  history). Review required from a **DIFFERENT agent** — no self-merge, ever.
 - Work happens on lane branches: `lane/<lane>-<short-desc>` (e.g. `lane/engine-gate-policy`,
   `lane/adapters-opsgenie`, `lane/docs-preview1-demo`). One branch = one reviewable unit.
 - Short-lived: branch → PR → squash-merge → delete. `main` history is a clean, readable
