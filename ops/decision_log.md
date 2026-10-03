@@ -3,6 +3,26 @@
 Format: date — **decision** (rationale, who called it). Written at decision time.
 Latest decisions on top.
 
+## 2026-10-03 — Sunday wave: D14 interim disk guard lands
+
+- 2026-10-03 ~20:30 IST — **D14 interim Type-2 disk guard implemented** (lane/sun-d14-diskguard, PR
+  against main). ADR-024/O-1 ruling: the Vault-led retention RFC is the real answer, but the disk
+  fills on its own schedule — the interim guard lands before the design partner. **Type 2**
+  (reversible, simple, loud — per principal-systems): a WAL-size watermark on the event-log
+  database (db + -wal + -shm footprint) checked post-commit in `EventLog._commit()`; when crossed,
+  exactly-once per process it (1) pages the operator via the priority-1 control-plane outbox lane
+  (the commit-watchdog convention — one pager, prioritized), and (2) writes a durable record via
+  spill.py's existing `write_spill` into a dedicated `disk-guard/` subdir (kept apart from
+  forward-replay spills so `replay_spills` never misreads it as a PD send), plus an unsuppressible
+  stderr line. The guard observes post-commit — triage is already durable — so it can never block,
+  delay, or sink a page; proven by test (page decision completes with intact triage artifacts in
+  <<2s while the guard fires). Conservative 100 MiB default (`SENTINEL_DISKGUARD_BYTES` env
+  override; bad env falls back to default, never refuses start). Alternatives rejected: new event
+  type (Type-1 vocabulary frozen by ADR-011), spill into the main spill dir (replay misread),
+  background thread (synchronous keeps "page sent before process can die" + trivially testable).
+  Reversible: delete the env/constant and it is gone; no schema or vocabulary changes.
+  (Fix agent; principal-systems + principal-mindset skills applied.)
+
 ## 2026-10-03 — ADR adjudication panel (Forge · Vault · Pager · Tripwire)
 
 - 2026-10-03 ~20:50 IST — **ADR adjudication panel verdicts (Aditya's 20:08 order: decided tonight by
