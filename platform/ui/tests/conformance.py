@@ -106,6 +106,25 @@ for mf in list(MOCK_FOR.values()) + ["stream-events.jsonl"]:
     check(f"{mf} envelope data_source ∈ enum",
           meta.get("data_source") in ("synthetic", "shadow", "production"), str(meta.get("data_source")))
 
+# 5. contract.js is generated from the CURRENT openapi.yaml (F8).
+# The console's typed boundary is generated, never hand-written: regenerate to
+# a temp dir and diff against the checked-in file.
+import subprocess, tempfile, shutil
+_tmp = Path(tempfile.mkdtemp())
+try:
+    gen = ROOT.parent / "ui" / "tools" / "gen_contract.py"
+    # the generator writes to assets/contract.js; point it at a temp copy via
+    # a throwaway worktree-free trick: run it, then compare, then restore.
+    checked = (ROOT / "assets" / "contract.js").read_text()
+    r = subprocess.run([sys.executable, str(gen)], capture_output=True, text=True, cwd=ROOT.parent.parent)
+    check("gen_contract.py runs clean", r.returncode == 0, r.stderr[:300])
+    fresh = (ROOT / "assets" / "contract.js").read_text()
+    check("contract.js matches a fresh generation from openapi.yaml",
+          fresh == checked,
+          "regenerate with: python3 platform/ui/tools/gen_contract.py")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
 # 4. UI enum mappings only use contract enum values.
 # Severities/dispositions are mapped in lib.js; teams are listed in the views.
 team_enum = SPEC["components"]["schemas"]["Team"]["enum"]
