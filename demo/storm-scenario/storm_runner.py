@@ -153,13 +153,17 @@ def sink_into(log: EventLog):
     """emit= callback: gate payloads -> append-only event log.
 
     Returns the sink function; the function's ``payloads`` attribute holds
-    every emitted envelope in order (for reading the real budget_outcome).
+    every emitted envelope in order (for reading the real budget_outcome),
+    and ``decision_seqs`` holds (alert_id, seq) for decision_made events in
+    emission order — so answer rows key to the exact decision, even when
+    one alert is decided several times (the flip beat).
     """
     payloads: list[dict] = []
+    decision_seqs: list[tuple[str, int]] = []
 
-    def _emit(payload: dict) -> None:
+    def _emit(payload: dict) -> int:
         payloads.append(payload)
-        log.append_event(
+        seq = log.append_event(
             payload["type"],
             actor=payload.get("actor", "engine"),
             alert_id=payload["alert_id"],
@@ -169,7 +173,11 @@ def sink_into(log: EventLog):
             body=payload["body"],
             ts=payload.get("ts"),
         )
+        if payload["type"] == "decision_made":
+            decision_seqs.append((payload["alert_id"], seq))
+        return seq
     _emit.payloads = payloads
+    _emit.decision_seqs = decision_seqs
     return _emit
 
 
@@ -181,6 +189,42 @@ def river_row(alert, disp, budget_outcome: str, latency_ms) -> str:
     lat = f"{latency_ms:7.0f}ms" if latency_ms else "   timer"
     return (f"▮ {alert.received_at[11:19]} · {alert.service:16s} · "
             f"{chip:9s} · {disp.reason:14s} · {budget_outcome:18s} · {lat} · {kind}")
+
+
+def _answer_json(ans) -> dict | None:
+    """Serialize a Jev Answer (or None) — the engine's own record."""
+    if ans is None:
+        return None
+    return {
+        "choice": getattr(ans, "choice", None),
+        "confidence": getattr(ans, "confidence", None),
+        "probabilities": dict(getattr(ans, "probabilities", None) or {}),
+    }
+
+
+def _record_json(seq: int, alert_id: str, rec) -> dict:
+    d = rec.disposition
+    return {
+        "seq": seq,
+        "alert_id": alert_id,
+        "input_sha256": rec.input_sha256,
+        "jev_model": rec.jev_model,
+        "q_severity": _answer_json(rec.q_severity),
+        "q_team": _answer_json(rec.q_team),
+        "q_disposition": _answer_json(rec.q_disposition),
+        "disposition": {
+            "action": d.action, "reason": d.reason, "team": d.team,
+            "confidence": d.confidence, "latency_ms": d.latency_ms,
+        },
+    }
+
+
+def _last_seq(sink, alert_id: str) -> int:
+    """Seq of the most recent decision_made for this alert."""
+    for aid, seq in reversed(sink.decision_seqs):
+        if aid == alert_id:
+            return seq
+    raise AssertionError(f"no decision_made recorded for {alert_id}")
 
 
 def main() -> None:
@@ -217,8 +261,10 @@ def main() -> None:
                      race_config=race_mod.RaceConfig(budget_ms=FLIP_BUDGET_MS),
                      emit=flip_sink)
     t0 = time.monotonic()
-    disp1, _ = flip_gate.evaluate(flip_alert, flip_state,
-                                  {}, {"org": "demo-org"})
+    disp1, rec1 = flip_gate.evaluate(flip_alert, flip_state,
+                                    {}, {"org": "demo-org"})
+    answer_rows = [_record_json(_last_seq(flip_sink, flip_alert.alert_id),
+                               flip_alert.alert_id, rec1)]
     row1 = next(p for p in reversed(flip_sink.payloads)
                 if p["type"] == "decision_made"
                 and p["alert_id"] == flip_alert.alert_id)
@@ -257,9 +303,11 @@ def main() -> None:
                      emit=main_sink)
     reask = []
     for k in range(2):
-        d, _ = main_gate.evaluate(flip_alert, build_eval_state(flip_alert),
-                                  {}, {"org": "demo-org"})
+        d, rec = main_gate.evaluate(flip_alert, build_eval_state(flip_alert),
+                                    {}, {"org": "demo-org"})
         reask.append(d)
+        answer_rows.append(_record_json(_last_seq(main_sink, flip_alert.alert_id),
+                                       flip_alert.alert_id, rec))
         print(f"  ask {k + 1}: {d.action} ({d.reason}) "
               f"conf={d.confidence} latency={d.latency_ms:.0f}ms")
         time.sleep(CALL_GAP_S)
@@ -274,8 +322,10 @@ def main() -> None:
     print("=" * 78)
     storm = [(a, l) for i, (a, l) in enumerate(pairs) if i != flip_idx]
     for i, (alert, label) in enumerate(storm):
-        disp, _ = main_gate.evaluate(alert, build_eval_state(alert),
-                                     {}, {"org": "demo-org"})
+        disp, rec = main_gate.evaluate(alert, build_eval_state(alert),
+                                       {}, {"org": "demo-org"})
+        answer_rows.append(_record_json(_last_seq(main_sink, alert.alert_id),
+                                       alert.alert_id, rec))
         # The REAL budget outcome, off the emitted decision_made envelope —
         # never assumed.
         row = next(p for p in reversed(main_sink.payloads)
@@ -335,13 +385,17 @@ def main() -> None:
     (out / "storm-report.json").write_text(json.dumps(report, indent=2))
     (out / "event-log.jsonl").write_text(
         "\n".join(json.dumps(e) for e in events) + "\n")
+    # The engine's own per-decision records (full Jev answers) — evidence
+    # preserved for the audit explorer / decision detail, never fabricated.
+    (out / "answers.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in answer_rows) + "\n")
 
     print()
     print("=" * 78)
     print("RECEIPTS — every number traces to the append-only event log")
     print("=" * 78)
     print(json.dumps(report, indent=2))
-    print(f"\nwrote: {out/'storm-report.json'}  {out/'event-log.jsonl'}  db: {args.db}")
+    print(f"\nwrote: {out/'storm-report.json'}  {out/'event-log.jsonl'}  {out/'answers.jsonl'}  db: {args.db}")
 
 
 if __name__ == "__main__":

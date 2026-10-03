@@ -36,6 +36,22 @@ the terminal (screen-share it), and writes three artifacts to
 **If the API/UI lanes have merged** (platform tier serving the frozen
 `GET /api/decisions` read API from SQLite + the Prism UI), the demoist
 presents from the UI and cites the same event log as the data source.
+**Rehearsal rig (until the API lane merges):** `demo/rehearsal-shim.py`
+serves the frozen read API (v1.0.0) from the REAL storm artifacts —
+every response is a projection over the real event log, every envelope
+labeled with the rig as its data source. It is a rehearsal harness, not
+the production platform tier:
+
+```bash
+PYTHONPATH=src python3 demo/rehearsal-shim.py --port 18081
+# /api/decisions, /api/decision/<id>, /api/analytics/flips,
+# /api/analytics/noise, /api/stream — all real data
+# /api/calibration → provisional (n=0 labeled; no outcome labels in a
+#   synthetic storm — stated on the card, per the denominator contract)
+# POST /api/simulate → 422 honest refusal (must run the live kernel;
+#   UI lane's build — copy-audit Finding 3)
+```
+
 **If not**, the terminal river + these beats are the presentation —
 polished, honest, complete. Every beat below names both.
 

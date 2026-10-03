@@ -150,9 +150,67 @@ being corrupt — each with its honest on-screen state.
 
 ---
 
-## Rehearsal 4 — PENDING
+## Rehearsal 4 — integrated-stack rehearsal (shim + merged UI) — 2026-10-03 ~21:05 IST
 
-Reserved for: the integrated stack rehearsal (API + UI lanes merged on
-main). Lane 3 re-checks main periodically; when the platform tier serves
-the frozen read API from a real projection, this logbook gets the
-UI-driven rehearsal entry.
+**Context:** the UI lanes merged on main (PR #31 Prism foundation, PR #33
+calibration + simulator views) but NO API server lane has merged — the
+stack is not integrated. Per the wave brief ("re-check main periodically,
+then rehearse"), lane 3 built the rehearsal rig instead of waiting.
+
+**What ran:**
+1. `demo/storm-scenario/storm_runner.py` re-run (42 real Jev calls) with
+   answer persistence (`answers.jsonl`: the engine's own DecisionRecords —
+   full Jev answers, evidence preserved, never fabricated).
+2. `demo/rehearsal-shim.py` (new): serves the frozen read API v1.0.0 from
+   the REAL storm artifacts. Every envelope carries the rig as its
+   `data_source` — the UI's source badge shows it; nothing pretends to be
+   the production platform tier.
+
+**Verified live (curl, all 200 except noted):**
+- `GET /api/decisions?limit=50` — 42 rows, newest first; every row carries
+  ALL required contract fields (0 missing-field violations). The single
+  timer-win row (seq 1) carries honest nulls (severity/team/confidence/
+  model/latency) — no Jev answer exists on that path; the contract marks
+  model/latency nullable (severity/team/confidence nullability flagged
+  to the Forge lane as a contract note).
+- `GET /api/decision/1` — the flip beat: passthrough, reason `timer_won`,
+  budget `timer_won`, nulls honest. `GET /api/decision/3` — the re-ask:
+  real answers (severity `known_noise`, conf 0.62, `jev-1.13.0`), 1 flip
+  on the input hash.
+- `GET /api/analytics/flips` — 1 record (q3 0.62→0.63 wobble, 0
+  disposition flips). `GET /api/analytics/noise` — real breakdown
+  (passthrough 28, page_now 14; reasons timer_won 1, uncertain 27,
+  threshold 14).
+- `GET /api/calibration` — provisional, `n_labeled: 0`, with the honest
+  note (no outcome labels in a synthetic storm). The denominator rides
+  on the card, per the contract.
+- `POST /api/simulate` — **422 honest refusal** (`simulator_not_wired`):
+  this rig does not implement the tuner path, and the simulator must run
+  the live kernel (UI lane's build — copy-audit Finding 3). A wrong curve
+  is worse than no curve.
+- `GET /api/stream` — SSE replay of all 42 real decisions with
+  `id:`/`event: decision` framing per the contract, then the heartbeat.
+
+**Warts (all caught, all fixed, all logged):**
+- The first answers.jsonl keyed answers by alert_id — the flip alert's
+  three decisions collapsed onto the last re-ask's answers (seq 1 showed
+  reason `uncertain` instead of `timer_won`). Killed: answers are now
+  keyed by decision seq; existing artifacts migrated with per-row
+  alert_id verification against the log.
+- Port 8080 was held by the drills lane's receiver — the shim moved to
+  18081 without touching their process.
+- A `pkill -f` matched my own shell (footgun); narrowed the pattern.
+
+**Smelled fake?** Nothing. The one thing the rig cannot do honestly is
+also the thing it refuses to do (simulate).
+
+**Limitations (stated plainly):** no live-browser verification of the
+rendered screens — subagents cannot operate the live browser. The data
+layer contract conformance is verified; the visual pass needs a
+browser-capable agent (parent to arrange). The production API server
+itself is still the API lane's build — this shim is the rehearsal
+stand-in, labeled as such in every envelope.
+
+**Verdict:** the demo's data path is rehearsed end to end — real engine
+→ real event log → frozen contract → (UI when a browser looks at it).
+The Sun 21:00 checkpoint shows this REAL state, warts included.
