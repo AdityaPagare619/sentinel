@@ -26,6 +26,8 @@ from sentinel.audit import AuditLog
 from sentinel.client import Answer, DecisionResponse, JevError, JevTimeout
 from sentinel.gate import Gate
 from sentinel.models import Thresholds
+from sentinel.quantized import AllowlistEntry, Attestation
+from datetime import datetime, timedelta, timezone
 from sentinel.race import (RaceClaim, RaceConfig, RaceRunner, TimerWinWatchdog,
                            InferencePool)
 from sentinel.state import build_state
@@ -124,7 +126,8 @@ def _wait_for(pred, timeout_s, interval=0.05):
 class RaceTestBase(unittest.TestCase):
     def make_gate(self, client, allowlist=None, race_config=None, **kw):
         audit = AuditLog(":memory:")
-        gate = Gate(client, Thresholds(), set(allowlist or []), audit,
+        # ADR-013: allowlist may contain AllowlistEntry (attested) or strings.
+        gate = Gate(client, Thresholds(), list(allowlist or []), audit,
                     race_config=race_config, **kw)
         self.addCleanup(gate.close)
         return gate, audit
@@ -291,7 +294,8 @@ class TestSlowVendorTimerWins(RaceTestBase):
     def test_timer_wins_passthrough_at_budget_and_shadow_follows(self):
         alert = make_alert()
         client = SlowClient(5.0, canned(p1=0.0, conf=0.95))  # suppress-shaped
-        gate, _audit = self.make_gate(client, allowlist={alert.fingerprint},
+        # ADR-013: attested entry so shadow path would-have-suppressed.
+        gate, _audit = self.make_gate(client, allowlist=[_attested_fp(alert.fingerprint)],
                                       race_config=RaceConfig(budget_ms=500))
         state = build_state(alert, {}, {})
         t0 = monotonic()
@@ -358,11 +362,22 @@ class TestSlowVendorTimerWins(RaceTestBase):
 # Fast vendor → answered_in_time, normal gate flow
 # ---------------------------------------------------------------------------
 
+def _attested_fp(fp):
+    """ADR-013: dual-attested allowlist entry for tests."""
+    now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+    return AllowlistEntry(
+        fingerprint=fp, author="carol",
+        attestations=[
+            Attestation("alice", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+            Attestation("bob", now - timedelta(days=1), "lrq-9f2c-41ab", 30),
+        ])
+
 class TestFastVendorAnsweredInTime(RaceTestBase):
     def test_fast_answer_suppresses_normally(self):
         alert = make_alert()
         client = SlowClient(0.05, canned(p1=0.0, conf=0.95))
-        gate, _ = self.make_gate(client, allowlist={alert.fingerprint},
+        # ADR-013: needs dual attestation to suppress (not bare fingerprint).
+        gate, _ = self.make_gate(client, allowlist=[_attested_fp(alert.fingerprint)],
                                  race_config=RaceConfig(budget_ms=1000))
         t0 = monotonic()
         disp, _rec = gate.evaluate(alert, build_state(alert, {}, {}), {}, {})

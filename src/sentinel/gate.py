@@ -31,6 +31,7 @@ Invariants:
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import sys
 import time
@@ -39,6 +40,7 @@ from . import race
 from .client import JevError
 from .models import Alert, DecisionRecord, Disposition, Thresholds
 from .questions import build_questions
+from .quantized import (AllowlistEntry, FitStore, leg1_prob_lock)
 from .race_payloads import (decision_made_payload, empty_lock_evaluation,
                             lock_evaluation, shadow_decision_payload)
 from .state import input_sha256
@@ -92,7 +94,7 @@ class PolicyVerdict:
 
 def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
                     thresholds: Thresholds, allowlist: set,
-                    latency_ms: float) -> PolicyVerdict:
+                    latency_ms: float, prob_lock_pass: bool = False) -> PolicyVerdict:
     """The pure policy kernel — the frozen §4 table, no I/O, no clocks.
 
     Shared by the live gate AND the race's late-answer path (one kernel,
@@ -118,7 +120,8 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
     # exactly what was checked: attestation freshness is NOT enforced yet
     # (ADR-014 — the freshness lane owns it), so the allowlist leg never
     # silently approximates it.
-    prob_pass = p1 < t.suppress_p1_max
+    # ADR-013: quantized lock replaces the naive p1 threshold.
+    prob_pass = prob_lock_pass
     conf_pass = conf3 is not None and conf3 >= t.suppress_conf_min
     allow_pass = alert.fingerprint in allowlist
     locks = lock_evaluation(
@@ -166,17 +169,35 @@ def _default_watchdog_page(rate: float, n: int) -> None:
 
 class Gate:
     def __init__(self, client, thresholds: Thresholds,
-                 allowlist: set[str], audit, shadow: bool = False,
+                 allowlist, audit, shadow: bool = False,
                  race_config=None, emit=None, race_metrics=None,
-                 on_watchdog_page=None, on_scheduler_stall=None):
+                 on_watchdog_page=None, on_scheduler_stall=None,
+                 *, fit_store: FitStore | None = None,
+                 pinned_model: str | None = None,
+                 org: str | None = None,
+                 clock=None):
         self.client = client
         self.thresholds = thresholds
-        self.allowlist = set(allowlist or [])
+        # Allowlist entries: ADR-017/019. Accepts a plain set of fingerprints
+        # (legacy shape: leg-3 membership only, no attestation evidence) or
+        # AllowlistEntry objects carrying the dual-attestation tuples the
+        # quantized leg 1 needs pre-fit (design §2.3).
+        self.allowlist_entries: dict[str, AllowlistEntry | None] = {}
+        if isinstance(allowlist, dict):
+            items = allowlist.items()
+        else:
+            items = [(a, a) if isinstance(a, str) else (a.fingerprint, a)
+                     for a in (allowlist or [])]
+        for fp, entry in items:
+            if isinstance(entry, str):
+                self.allowlist_entries[fp] = None
+            else:
+                self.allowlist_entries[entry.fingerprint] = entry
+        # Backward compat for the pure policy kernel (needs fingerprint set).
+        self.allowlist = set(self.allowlist_entries.keys())
         self.audit = audit
         self.shadow = shadow
-        # Emission: a callable(payload) drains to the dispatcher; default
-        # is the in-memory outbox the dispatcher drains (see
-        # race_payloads.EMISSION CONTRACT).
+        # Race integration (ADR-010): bounded pool, timer scheduler, watchdog.
         self._emit_fn = emit
         self.emitted: list[dict] = []
         self._race_metrics = race_metrics or race.Metrics()
@@ -190,6 +211,11 @@ class Gate:
         self._runner.watchdog.on_trip = (
             on_watchdog_page if on_watchdog_page is not None
             else _default_watchdog_page)
+        # ADR-013 quantized prob lock (design/fixes/04-quantized-gate.md).
+        self.fit_store = fit_store
+        self.pinned_model = pinned_model
+        self.org = org
+        self.clock = clock  # () -> aware datetime; tests inject a fixed now
 
     def close(self) -> None:
         """Shut down the race scheduler/pool/watchdog threads."""
@@ -276,6 +302,24 @@ class Gate:
                     _empty_answers())
         return None
 
+    def _leg1_prob_lock(self, reported_p1, alert, context) -> bool:
+        """ADR-013 leg 1 — the quantized probability lock (§2.1).
+
+        Never raises: any failure fails the leg closed (no suppression on
+        this path); the gate's outer fail-open still pages on true errors.
+        """
+        now = self.clock() if self.clock else _dt.datetime.now(_dt.timezone.utc)
+        org = (context or {}).get("org") or self.org
+        entry = self.allowlist_entries.get(alert.fingerprint)
+        try:
+            ok, _detail = leg1_prob_lock(
+                reported_p1, org=org, now=now,
+                fit_store=self.fit_store, pinned_model=self.pinned_model,
+                entry=entry)
+        except Exception:
+            return False
+        return ok
+
     def _decide(self, alert, state, history, context, correlation):
         in_sha = input_sha256(state)
         budget_ms = self._runner.config.budget_ms
@@ -327,11 +371,14 @@ class Gate:
         q_team = answers.get("owning_team")
         q_disp = answers.get("disposition")
         try:
+            # ADR-013: compute quantized lock before policy evaluation.
+            _probs = (q_sev.probabilities or {}) if q_sev else {}
+            _lock = self._leg1_prob_lock(_probs.get("p1_critical"), alert, {})
             verdict = evaluate_policy(
                 alert, jev_model=getattr(resp, "model", None),
                 q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
                 thresholds=self.thresholds, allowlist=self.allowlist,
-                latency_ms=res.latency_ms)
+                latency_ms=res.latency_ms, prob_lock_pass=_lock)
         except JevError as exc:
             # S3 — malformed/untrustworthy answer: uncertainty pages.
             disp = Disposition(action="passthrough",
@@ -406,12 +453,14 @@ class Gate:
             q_disp = answers.get("disposition")
             try:
                 # The SAME pure policy kernel the live gate uses — not a
-                # copy (design §4.2).
+                # copy (design §4.2). ADR-013: quantized lock for shadow too.
+                _probs2 = (q_sev.probabilities or {}) if q_sev else {}
+                _lock2 = self._leg1_prob_lock(_probs2.get("p1_critical"), alert, {})
                 verdict = evaluate_policy(
                     alert, jev_model=jev_model,
                     q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
                     thresholds=self.thresholds, allowlist=self.allowlist,
-                    latency_ms=late.latency_ms)
+                    latency_ms=late.latency_ms, prob_lock_pass=_lock2)
             except JevError:
                 # Malformed late answer: still vendor evidence — q-fields
                 # null, error_class set; never acts.
