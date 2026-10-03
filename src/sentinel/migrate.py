@@ -35,6 +35,14 @@ _MIGRATION_MARKER = "v0.1-decisions"
 def migrate_v01(db_path: str) -> dict:
     """Run the v0.1 -> event-log migration. Idempotent (re-runs skip).
 
+    Crash-midway safe (Blocker 3): the backfill processes rows in rowid
+    order and each backfilled event is marked
+    body.migrated_from='v0.1-decisions', so a re-run after a crash between
+    backfill and RENAME counts the already-backfilled prefix and resumes
+    after it instead of duplicating history. A crash between RENAME and
+    VIEW creation is detected as "backfilled but viewless" and only the
+    disposable VIEW is restored.
+
     Returns a summary dict: {"migrated": bool, "events_backfilled": int,
     "reason": str}.
     """
@@ -50,17 +58,27 @@ def migrate_v01(db_path: str) -> dict:
     if "decisions_v0_1" in tables and "decisions" in views:
         return {"migrated": False, "events_backfilled": 0,
                 "reason": "already migrated"}
+    if "decisions_v0_1" in tables and "decisions" not in tables:
+        # Crash between RENAME and VIEW creation: nothing left to backfill
+        # — just restore the disposable VIEW and report already-migrated.
+        _create_decisions_view(db_path)
+        return {"migrated": False, "events_backfilled": 0,
+                "reason": "already migrated (decisions view restored)"}
     if "decisions" not in tables:
         return {"migrated": False, "events_backfilled": 0,
                 "reason": "no v0.1 decisions table present"}
 
     log = EventLog(db_path)
     try:
-        rows = log._conn.execute("SELECT * FROM decisions").fetchall()
+        # ORDER BY rowid: the backfill order is deterministic, so the
+        # already-backfilled rows form a prefix the re-run can skip.
+        rows = log._conn.execute(
+            "SELECT * FROM decisions ORDER BY rowid").fetchall()
         cols = [d[0] for d in log._conn.execute(
             "SELECT * FROM decisions LIMIT 0").description]
+        already = _count_backfilled(log)
         n = 0
-        for row in rows:
+        for row in rows[already:]:
             rec = dict(zip(cols, row))
             _backfill_one(log, rec)
             n += 1
@@ -78,16 +96,31 @@ def migrate_v01(db_path: str) -> dict:
 
     # Re-create the disposable decisions VIEW over events (EventLog.__init__
     # creates it too, but the RENAME above consumed the name).
+    _create_decisions_view(db_path)
+    resumed = f" (resumed after {already} already-backfilled)" if already else ""
+    return {"migrated": True, "events_backfilled": n,
+            "reason": f"backfilled {n} decision_made events{resumed}; old "
+                      f"table renamed to decisions_v0_1"}
+
+
+def _count_backfilled(log: EventLog) -> int:
+    """Events already backfilled from v0.1 decisions (Blocker 3 resume)."""
+    row = log._conn.execute(
+        "SELECT COUNT(*) AS c FROM events WHERE "
+        "json_extract(body, '$.migrated_from') = ?",
+        (_MIGRATION_MARKER,)).fetchone()
+    return row["c"]
+
+
+def _create_decisions_view(db_path: str) -> None:
+    """(Re)create the disposable decisions VIEW over events."""
+    from .eventlog import _DECISIONS_VIEW
     conn = sqlite3.connect(db_path)
     try:
-        from .eventlog import _DECISIONS_VIEW
         conn.executescript(_DECISIONS_VIEW)
         conn.commit()
     finally:
         conn.close()
-    return {"migrated": True, "events_backfilled": n,
-            "reason": f"backfilled {n} decision_made events; old table "
-                      f"renamed to decisions_v0_1"}
 
 
 def _backfill_one(log: EventLog, rec: dict) -> None:

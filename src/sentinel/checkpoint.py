@@ -167,11 +167,17 @@ class CheckpointJob:
                 "consecutive_failures": self.consecutive_failures}
 
     def _last_window_end(self) -> str | None:
-        cps = self.log.events_of_type("checkpoint", limit=1)
-        if not cps:
+        """The LATEST checkpoint's window_end_ts — windows must chain, never
+        overlap (Blocker 2: ORDER BY seq DESC picks the newest checkpoint;
+        the old ASC query returned the oldest and froze every window at the
+        first checkpoint's end)."""
+        with self.log._lock:
+            row = self.log._conn.execute(
+                "SELECT body FROM events WHERE type = 'checkpoint' "
+                "ORDER BY seq DESC LIMIT 1").fetchone()
+        if row is None:
             return None
-        import json as _json
-        return _json.loads(cps[0]["body"]).get("window_end_ts")
+        return json.loads(row["body"]).get("window_end_ts")
 
     def run_periodic(self) -> threading.Thread:
         def _loop():

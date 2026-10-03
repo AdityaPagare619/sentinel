@@ -317,10 +317,10 @@ class EventLog:
         """COMMIT the open transaction under the 50 ms watchdog (design §4).
 
         On trip: the commit already happened (SQLite commits are synchronous
-        — "abandoning the wait" is aspirational on one thread); the watchdog
-        fires the degraded path and the evidence-loss page, and the hot path
-        is told via WatchdogTrip so the caller can engage file-03's degraded
-        ladder. The event itself IS durable — this is recorded, not lost.
+        — "abandoning the wait" is aspirational on one thread); the degraded
+        path and the evidence-loss page are engaged synchronously inside
+        _on_watchdog_trip (nothing raises WatchdogTrip — it is reserved, not
+        raised). The event itself IS durable — this is recorded, not lost.
         """
         t0 = time.perf_counter()
         if self._test_commit_delay_s:
@@ -479,6 +479,10 @@ class EventLog:
         shadow_decision / flip_observed / checkpoint events and tests."""
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE;")
+            # Blocker 1: snapshot the chain-head cache — if COMMIT fails,
+            # the ROLLBACK below restores the row but the cache must be
+            # restored too, or the next write chains from a phantom hash.
+            _head_before = (self._head_seq, self._head_hash)
             try:
                 seq, _ = self._insert_event(
                     event_type, actor=actor, alert_id=alert_id,
@@ -487,6 +491,7 @@ class EventLog:
                 self._commit()
             except BaseException:
                 self._conn.execute("ROLLBACK;")
+                self._head_seq, self._head_hash = _head_before
                 raise
             self.metrics["events_written"] += 1
             return seq
@@ -540,6 +545,8 @@ class EventLog:
         body = dict(body)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE;")
+            # Blocker 1: snapshot the chain-head cache (see append_event).
+            _head_before = (self._head_seq, self._head_hash)
             try:
                 outbox_id = None
                 if outbox is not None:
@@ -554,6 +561,7 @@ class EventLog:
                 self._commit()
             except BaseException:
                 self._conn.execute("ROLLBACK;")
+                self._head_seq, self._head_hash = _head_before
                 raise
             self.metrics["events_written"] += 1
             return seq, outbox_id
@@ -619,6 +627,8 @@ class EventLog:
             raise EventLogError(f"unknown scheduler keys: {sorted(unknown)}")
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE;")
+            # Blocker 1: snapshot the chain-head cache (see append_event).
+            _head_before = (self._head_seq, self._head_hash)
             try:
                 seq, _ = self._insert_event(
                     event_type, actor="forwarder", alert_id=alert_id,
@@ -634,6 +644,7 @@ class EventLog:
                 self._commit()
             except BaseException:
                 self._conn.execute("ROLLBACK;")
+                self._head_seq, self._head_hash = _head_before
                 raise
             self.metrics["events_written"] += 1
             return seq

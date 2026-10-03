@@ -21,6 +21,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from sentinel import eventlog as ev
 from sentinel.checkpoint import (CheckpointJob, LocalDirSink, Sink,
@@ -712,6 +713,106 @@ class TestWatchdog(_LogTest):
         self.assertEqual(self.log.metrics["watchdog_trips"], 1)
 
 
+# --------------------------------------- blocker 1: failed COMMIT vs head
+
+class TestCommitFailureHeadCache(_LogTest):
+    """Blocker 1 regression: a failed COMMIT must not move the cached chain
+    head. The DB row rolls back AND the (_head_seq, _head_hash) cache is
+    restored — the next write chains from the true head and the chain
+    verifies."""
+
+    def _fault_commit(self):
+        """Fail COMMIT (disk-full) inside the block: the SQLite COMMIT never
+        executes, so the caller's ROLLBACK runs with the row uncommitted."""
+        def _failing_commit(_self):
+            raise sqlite3.OperationalError("injected commit failure")
+        return mock.patch.object(EventLog, "_commit", _failing_commit)
+
+    def test_failed_commit_keeps_head_append(self):
+        s1 = _requested(self.log)
+        head_before = self.log.head()
+        self.assertEqual(head_before[0], s1)
+        with self._fault_commit():
+            with self.assertRaises(sqlite3.OperationalError):
+                _requested(self.log)
+        # 1. The cache still points at the true committed head...
+        self.assertEqual(self.log.head(), head_before)
+        # 2. ...the failed row is not in the DB...
+        self.assertEqual(
+            len(self.log.events_of_type("decision_requested")), 1)
+        # 3. ...and the next write chains correctly: seq reuses the rolled
+        #    back slot, prev_hash is the true head, the chain verifies.
+        s2 = _requested(self.log)
+        self.assertEqual(s2, s1 + 1)
+        self.assertEqual(self.log.get_event(s2)["prev_hash"],
+                         head_before[1])
+        self.assertTrue(verify(self.tmp.name)["ok"])
+
+    def test_failed_commit_keeps_head_i1(self):
+        """I1 (decision + outbox): the outbox row rolls back with the event,
+        and the cache is restored."""
+        s1 = _requested(self.log)
+        head_before = self.log.head()
+        with self._fault_commit():
+            with self.assertRaises(sqlite3.OperationalError):
+                self.log.record_decision_and_enqueue(
+                    alert_id="a1", fingerprint="fp1", episode_id="ep1",
+                    body=_decision_body(req_seq=s1),
+                    outbox=_outbox_row(next_attempt_at=_iso(_now())))
+        self.assertEqual(self.log.head(), head_before)
+        self.assertEqual(
+            self.log.undelivered_outbox_rows(), [])  # outbox rolled back
+        self.assertEqual(len(self.log.events_of_type("decision_made")), 0)
+        # Next I1 write is clean and the chain verifies.
+        seq, obid = self.log.record_decision_and_enqueue(
+            alert_id="a1", fingerprint="fp1", episode_id="ep1",
+            body=_decision_body(req_seq=s1),
+            outbox=_outbox_row(next_attempt_at=_iso(_now())))
+        self.assertEqual(seq, s1 + 1)
+        self.assertEqual(self.log.get_event(seq)["prev_hash"],
+                         head_before[1])
+        self.assertTrue(verify(self.tmp.name)["ok"])
+        self.assertEqual(self.log.outbox_row(obid)["status"], "queued")
+
+    def test_failed_commit_keeps_head_i2(self):
+        """I2 (receipt + scheduler update): the scheduler update rolls back
+        with the event, and the cache is restored."""
+        s1 = _requested(self.log)
+        _, obid = self.log.record_decision_and_enqueue(
+            alert_id="a1", fingerprint="fp1", episode_id="ep1",
+            body=_decision_body(req_seq=s1),
+            outbox=_outbox_row(next_attempt_at=_iso(_now())))
+        head_before = self.log.head()
+        with self._fault_commit():
+            with self.assertRaises(sqlite3.OperationalError):
+                self.log.record_receipt_and_update(
+                    "forward_confirmed", outbox_id=obid,
+                    alert_id="a1", fingerprint="fp1", episode_id="ep1",
+                    body={"outbox_id": obid, "channel": "pd",
+                          "attempt_no": 1, "vendor_status": "ack",
+                          "latency_ms": 100},
+                    scheduler={"status": "delivered",
+                               "next_attempt_at": _iso(_now())})
+        self.assertEqual(self.log.head(), head_before)
+        # The scheduler update rolled back too — still queued.
+        self.assertEqual(self.log.outbox_row(obid)["status"], "queued")
+        self.assertEqual(
+            len(self.log.events_of_type("forward_confirmed")), 0)
+        # Next I2 write is clean and the chain verifies.
+        seq = self.log.record_receipt_and_update(
+            "forward_confirmed", outbox_id=obid,
+            alert_id="a1", fingerprint="fp1", episode_id="ep1",
+            body={"outbox_id": obid, "channel": "pd",
+                  "attempt_no": 1, "vendor_status": "ack",
+                  "latency_ms": 100},
+            scheduler={"status": "delivered",
+                       "next_attempt_at": _iso(_now())})
+        self.assertEqual(self.log.get_event(seq)["prev_hash"],
+                         head_before[1])
+        self.assertTrue(verify(self.tmp.name)["ok"])
+        self.assertEqual(self.log.outbox_row(obid)["status"], "delivered")
+
+
 # ------------------------------------------------------------ performance
 
 class TestPerformance(_LogTest):
@@ -839,6 +940,31 @@ class TestCheckpoint(_LogTest):
         with self.assertRaises(ValueError):
             CheckpointJob(self.log, b"", LocalDirSink(tempfile.mkdtemp()))
 
+    def test_checkpoint_windows_chain(self):
+        """Blocker 2 regression: with >=3 checkpoints, each window starts
+        where the previous one ended — windows chain, never overlap."""
+        sinkdir = tempfile.mkdtemp()
+        key = b"customer-key"
+        job = CheckpointJob(self.log, key, LocalDirSink(sinkdir))
+        for i in range(3):
+            _requested(self.log)  # give the chain something to seal
+            job.run_once(now_iso=_iso(_now() + timedelta(hours=i)))
+        cps = self.log.events_of_type("checkpoint")
+        self.assertEqual(len(cps), 3)
+        bodies = [json.loads(c["body"]) for c in cps]  # seq ASC
+        self.assertEqual(bodies[0]["window_start_ts"], "GENESIS")
+        for prev, cur in zip(bodies, bodies[1:]):
+            # Each checkpoint picks up exactly where the latest one ended.
+            self.assertEqual(cur["window_start_ts"], prev["window_end_ts"])
+            self.assertGreater(cur["window_end_ts"], prev["window_end_ts"])
+        # Each checkpoint's own HMAC still verifies over its window.
+        for b in bodies:
+            expect = checkpoint_hmac(key, b["head_seq"], b["head_hash"],
+                                     b["event_count"], b["window_start_ts"],
+                                     b["window_end_ts"])
+            self.assertEqual(b["hmac_hex"], expect)
+        self.assertTrue(verify(self.tmp.name)["ok"])
+
     def test_sink_failure_pages_after_two_hours(self):
         _requested(self.log)
         job = CheckpointJob(self.log, b"k", _FailingSink("http://sink"))
@@ -931,6 +1057,75 @@ class TestMigration(unittest.TestCase):
         migrate_v01(db)
         again = migrate_v01(db)
         self.assertFalse(again["migrated"])
+
+    def test_migration_crash_midway_resumes_without_duplicates(self):
+        """Blocker 3 regression: crash between backfill and RENAME → the
+        re-run resumes from the already-backfilled prefix instead of
+        duplicating history (the old code produced 3 events from 2 rows)."""
+        import sentinel.migrate as migrate_mod
+        db = self._v01_db()  # 2 v0.1 rows
+        real_backfill = migrate_mod._backfill_one
+        calls = []
+
+        def crashy_backfill(log, rec):
+            calls.append(rec)
+            if len(calls) > 1:
+                raise RuntimeError("simulated crash mid-backfill")
+            return real_backfill(log, rec)
+
+        migrate_mod._backfill_one = crashy_backfill
+        try:
+            with self.assertRaises(RuntimeError):
+                migrate_v01(db)
+        finally:
+            migrate_mod._backfill_one = real_backfill
+        # Crash state: decisions table still present, 1 row backfilled.
+        log = EventLog(db)
+        try:
+            tables = {r[0] for r in log._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("decisions", tables)
+            self.assertEqual(
+                len(log.events_of_type("decision_made")), 1)
+        finally:
+            log.close()
+        # Re-run: resumes, backfills only the missing row, then renames.
+        result = migrate_v01(db)
+        self.assertTrue(result["migrated"])
+        self.assertEqual(result["events_backfilled"], 1)
+        log = EventLog(db)
+        self.addCleanup(log.close)
+        decisions = log.events_of_type("decision_made")
+        self.assertEqual(len(decisions), 2)  # not 3
+        for d in decisions:
+            body = json.loads(d["body"])
+            self.assertEqual(body["migrated_from"], "v0.1-decisions")
+        self.assertTrue(verify(db)["ok"])
+        # Third run is a clean no-op.
+        again = migrate_v01(db)
+        self.assertFalse(again["migrated"])
+        self.assertEqual(len(log.events_of_type("decision_made")), 2)
+
+    def test_migration_crash_after_rename_restores_view(self):
+        """Crash between RENAME and VIEW creation: the re-run must not
+        error and must restore the disposable decisions VIEW."""
+        db = self._v01_db()
+        migrate_v01(db)
+        conn = sqlite3.connect(db)
+        conn.execute("DROP VIEW decisions")
+        conn.commit()
+        conn.close()
+        again = migrate_v01(db)
+        self.assertFalse(again["migrated"])
+        conn = sqlite3.connect(db)
+        try:
+            views = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view'")}
+            self.assertIn("decisions", views)
+            n = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+            self.assertEqual(n, 2)
+        finally:
+            conn.close()
 
     def test_migration_no_v01_table(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
