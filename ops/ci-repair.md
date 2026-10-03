@@ -1,8 +1,12 @@
 # Sentinel — CI Repair: `startup_failure` on every run (Tripwire investigation)
 
-**Date:** 2026-10-03 ~00:30 IST, updated ~00:55 IST. **Investigator:** Tripwire.
-**Status:** ROOT CAUSE CONFIRMED BY EXPERIMENT — fix applied (workflow file
-renamed). Awaiting green confirmation run.
+**Date:** 2026-10-03 ~00:30 IST, updated ~00:55 IST, **updated again ~13:45 IST
+(coordinator).**
+**Investigator:** Tripwire.
+**Status:** ESCALATED — repo-level GitHub platform bug. The path-rename fix was
+FALSIFIED by experiment (see "13:15–13:40 IST experiments" below). GitHub
+Support escalation required (workflow id 373379524). Manual local CI is the
+operative quality gate until GitHub resolves.
 
 ## Symptom
 
@@ -71,6 +75,42 @@ to the manual equivalent (`python3 -m unittest discover tests` + the three
 probe steps from the workflow, run locally on `main` HEAD, witnessed by
 Tripwire + one other chief).
 
+## 13:15–13:40 IST experiments (coordinator) — rename FALSIFIED, ESCALATED
+
+Four further interventions were tried; **all failed**. The ghost record
+373379524 (state=deleted, path=BuildFailed) is pinned at **repo-ID level** in
+GitHub's run router — it survives path changes, permission toggles, and even
+a repo rename.
+
+1. **Workflow rename** (`ci.yml` → `sentinel-ci.yml`, pushed to main as
+   d373428): new active record 373764245 registered cleanly. Fresh
+   pull_request runs at 07:42–07:43 UTC (ids 37107244899, 37107246586,
+   37107251546, 37107253552, 37107267154, 37107270292) — on branches whose
+   trees contain ONLY `sentinel-ci.yml` — **still bind to 373379524**.
+   The (repo, path) → record poison theory is FALSIFIED.
+2. **Actions disable/re-enable** (API permissions toggle): no effect; new runs
+   still bind to 373379524.
+3. **Repo rename** (`sentinel` → `sentinel-tmp` → back): no effect; run
+   37108030561 still binds to 373379524. The pin follows the repo ID, not the
+   name.
+4. **Minimal probe workflow** (workflow_dispatch, separate file): GitHub did
+   not even register it (`gh workflow run Probe` → "could not find any
+   workflows"); its push-triggered run (37107593678) also bound to 373379524.
+
+**Verdict: ESCALATED.** This is a GitHub platform bug — a deleted ghost
+workflow record permanently shadows the active record in the event→workflow
+router. It cannot be fixed from the repo side. Escalate to GitHub Support
+with: repo `AdityaPagare619/sentinel`, ghost workflow id 373379524
+(state=deleted, path=BuildFailed, created 2026-10-02T18:41:07Z), active
+workflow id 373764245, sample run ids above.
+
+**Operative gate until resolved:** run the workflow's four steps locally
+(`python3 -m unittest discover tests`; `python3 -m unittest tests.test_gate -v`;
+`PYTHONPATH=src python3 -m sentinel.evalharness --n 200 --seed 7`;
+secrets-grep on the diff). Local green + independent review = mergeable.
+This is documented, not a waiver — the steps are identical, the witness is
+the coordinator.
+
 ## Prevention ritual (standing)
 
 After adding or changing ANY workflow file, before announcing "CI is live":
@@ -105,6 +145,10 @@ gh api repos/AdityaPagare619/sentinel/actions/workflows \
       binding is sticky, not transient.
 - [x] Fix applied: workflow renamed to `.github/workflows/sentinel-ci.yml`
       (this push).
-- [ ] New CI run binds to a fresh active record and starts jobs: <run id>
-- [ ] Conclusion: <success | still failing → final escalation>
-- [ ] Verdict: <CI HEALTHY — incident retired | ESCALATED>
+- [x] Second hypothesis FALSIFIED (13:15–13:40 IST): runs 37107244899,
+      37107246586, 37107251546, 37107253552, 37107267154, 37107270292
+      (07:42–07:43 UTC, post-rename) still bind to 373379524. Actions
+      toggle + repo rename also fail. Poison is repo-ID-level.
+- [x] Conclusion: still failing → final escalation (see above).
+- [x] Verdict: **ESCALATED** — GitHub Support required. Local CI is the
+      operative gate.
