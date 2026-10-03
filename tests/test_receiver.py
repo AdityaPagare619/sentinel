@@ -62,7 +62,7 @@ def _pd_event(summary="disk full", dedup_key="dk-test", severity="critical",
 
 class ReceiverTestBase(unittest.TestCase):
     def _start(self, jev_client, allowlist=None, webhook_secret=None,
-               shadow=False):
+               shadow=False, webhook_onboarding=False):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         cfgdir = os.path.join(self._tmp.name, "cfg")
@@ -89,7 +89,8 @@ class ReceiverTestBase(unittest.TestCase):
                     audit, shadow=shadow)
         forwarder = Forwarder(pd_events_url=self.pd.url,
                               default_routing_key="rk-default")
-        config = ReceiverConfig(webhook_secret=webhook_secret, shadow=shadow)
+        config = ReceiverConfig(webhook_secret=webhook_secret, shadow=shadow,
+                                webhook_onboarding=webhook_onboarding)
         self.pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
                                  policy=policy, config_loader=loader,
                                  state_dir=statedir)
@@ -232,16 +233,23 @@ class TestSuppressEndToEnd(ReceiverTestBase):
 class TestGenericWebhook(ReceiverTestBase):
     def setUp(self):
         self._start(FixedClient(canned(p1=0.9, conf=0.95)),
-                    webhook_secret="s3cret")
+                    webhook_secret="s3cret-long-enough-for-tests")
 
     def _generic(self):
         return {"service": "web", "check": "cpu", "title": "cpu hot",
                 "severity": "warning", "labels": {"region": "us-east"},
                 "metric": {"value": 97.5, "threshold": 90.0}}
 
-    def _sig(self, body: bytes, secret="s3cret"):
-        digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        return {"X-Sentinel-Signature": f"sha256={digest}"}
+    def _sig(self, body: bytes, secret="s3cret-long-enough-for-tests",
+             ts=None):
+        # ADR-005 canonical scheme: sha256=<hex> over "<ts>.<raw body>".
+        import time as _time
+        ts = int(_time.time()) if ts is None else ts
+        digest = hmac.new(secret.encode(),
+                          f"{ts}.".encode() + body,
+                          hashlib.sha256).hexdigest()
+        return {"X-Sentinel-Signature": f"sha256={digest}",
+                "X-Sentinel-Timestamp": str(ts)}
 
     def test_valid_signature_accepted(self):
         body = json.dumps(self._generic()).encode()
@@ -260,16 +268,20 @@ class TestGenericWebhook(ReceiverTestBase):
         self.assertEqual(code, 403)
         self.assertEqual(self.pd.requests, [])
 
-    def test_missing_signature_fails_open(self):
-        # Secret configured but no signature header: process anyway, never drop.
+    def test_missing_signature_refused(self):
+        # ADR-005 (D11): absent signature refuses in production — the old
+        # fail-open (`if not sig: return True`) is the hole being closed.
         body = json.dumps(self._generic()).encode()
         code, resp = self._post("/webhook/generic", body)
-        self.assertEqual(code, 200)
-        self.assertEqual(len(self.pd.requests), 1)
+        self.assertEqual(code, 403)
+        self.assertEqual(resp["status"], "error")
+        self.assertEqual(self.pd.requests, [])
 
     def test_unparseable_generic_fails_open(self):
+        # Parse-level fail-open is unchanged: an AUTHENTICATED but
+        # unparseable delivery still forwards the original bytes.
         raw = b"not json at all"
-        code, resp = self._post("/webhook/generic", raw)
+        code, resp = self._post("/webhook/generic", raw, self._sig(raw))
         self.assertEqual(code, 200)
         self.assertEqual(self.pd.requests[0]["body"], raw)
 
