@@ -103,7 +103,10 @@ class SystemOneClient:
         api_key: str,
         base_url: str = "https://api.typesafe.ai",
         model: str = _DEFAULT_MODEL,
-        timeout_s: float = 8.0,
+        # ADR-010 §6: the inference call runs DETACHED on timer-win, so the
+        # socket timeout — not the race budget — bounds the thread's
+        # lifetime. Default 30 s; None/infinite is refused fail-closed.
+        timeout_s: float = 30.0,
         max_retries: int = 3,
         retry_budget_s: float = 2.0,
     ):
@@ -112,6 +115,14 @@ class SystemOneClient:
                 "No TypeSafe API key provided. Set the TYPESAFE_API_KEY "
                 "environment variable or pass api_key explicitly."
             )
+        if timeout_s is None or float(timeout_s) <= 0:
+            # Fail-CLOSED (design §6, pre-mortem link 2): an unbounded
+            # inference call would leak detached threads forever.
+            raise ValueError(
+                "timeout_s must be a positive number of seconds "
+                f"(got {timeout_s!r}); the race detaches — never cancels — "
+                "in-flight calls, so the socket timeout is the thread's "
+                "only lifetime bound")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
