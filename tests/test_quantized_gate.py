@@ -66,7 +66,7 @@ from sentinel.quantized import (
 from sentinel.tuner import fit_r000_class
 
 from tests.helpers import make_alert
-from test_gate import canned  # reuse the Jev-response fixture builder
+from test_gate import canned, fresh_monitor_for  # reuse the fixture builders
 
 NOW = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
 PINNED = "jev-1.13.0"
@@ -119,7 +119,8 @@ def _fit(n, k, org="org-c", model_pin=PINNED, shift="OK",
 
 
 def _gate_with(client_resp=None, *, allowlist=None, fit_store=None,
-               org="org-c", alert=None, p1=0.0, conf=0.95):
+               org="org-c", alert=None, p1=0.0, conf=0.95,
+               freshness_monitor=None):
     alert = alert or make_alert()
     resp = client_resp or canned(p1=p1, conf=conf)
     state = build_state(alert, {}, {})
@@ -127,7 +128,7 @@ def _gate_with(client_resp=None, *, allowlist=None, fit_store=None,
     audit = AuditLog(":memory:")
     gate = Gate(client, Thresholds(), allowlist or set(), audit,
                 fit_store=fit_store, pinned_model=PINNED, org=org,
-                clock=lambda: NOW)
+                clock=lambda: NOW, freshness_monitor=freshness_monitor)
     return gate, alert, state
 
 
@@ -255,8 +256,11 @@ class TestFitArtifact(unittest.TestCase):
     def test_fit_path_suppresses_when_bound_clears(self):
         alert = make_alert()
         store = self._store(_fit(n=1351, k=0))
+        # D1: suppress requires fresh evidence (fit-artifact leg).
         gate, alert, state = _gate_with(allowlist={alert.fingerprint},
-                                       fit_store=store, p1=0.0, conf=0.95)
+                                       fit_store=store, p1=0.0, conf=0.95,
+                                       freshness_monitor=fresh_monitor_for(
+                                           [alert.fingerprint]))
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
 
@@ -383,8 +387,11 @@ class TestDualAttestation(unittest.TestCase):
     def test_dual_attestation_suppresses(self):
         alert = make_alert()
         entry = _entry(alert.fingerprint)
+        # D1: suppress requires fresh evidence — wire the monitor the same
+        # way production does.
         gate, alert, state = _gate_with(
-            allowlist=[entry], p1=0.0, conf=0.95)
+            allowlist=[entry], p1=0.0, conf=0.95,
+            freshness_monitor=fresh_monitor_for([alert.fingerprint]))
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
         self.assertEqual(disp.reason, "allowlist")

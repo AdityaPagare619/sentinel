@@ -8,9 +8,12 @@ product's safety case.
 
 Each row builds a synthetic config bundle with controlled proof ages
 (never wall-clock dependent — the validator's clock is pinned), runs V1
-validation, and feeds the FreshnessReport through the suppress conjunction
-from design §A4 (mirrored here as decide_like_gate; the gate lane wires
-the real gate to the same contract — see docs/FRESHNESS_CONTRACT.md).
+validation, and feeds the FreshnessReport through the LIVE policy kernel
+(``sentinel.gate.evaluate_policy`` — DR-26: the fixture exercises the
+same code path as the gate, not a test-side model of it). The
+``decide_like_gate`` adapter below exists only to fix the fixture alert's
+value checks (it passes every one) and to surface the decision context
+with proof pedigree; the conjunction itself is the kernel's.
 
 Mutation discipline: the fixture alert is one that WOULD suppress under
 row 1 (passes every value check). setUp asserts the row-1 suppress first —
@@ -36,6 +39,7 @@ _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from sentinel.client import Answer
 from sentinel.freshness import (
     LOCK1_CALIBRATION,
     LOCK2_THRESHOLD,
@@ -43,8 +47,9 @@ from sentinel.freshness import (
     FreshnessMonitor,
     FreshnessValidator,
     lock1_fallback_offered,
-    suppress_precondition,
 )
+from sentinel.gate import evaluate_policy
+from sentinel.models import Alert, Thresholds
 from tests.freshness_fixtures import (
     BASE_EPOCH,
     LABEL_PIPELINE,
@@ -58,38 +63,60 @@ from tests.freshness_fixtures import (
 )
 
 
-def decide_like_gate(report, *, fingerprint, dual_attested=False):
-    """The design §A4 suppress conjunction for the fixture alert.
+def _fixture_answers():
+    """The fixture alert's Jev answers: passes every VALUE check.
 
-    The fixture alert passes every VALUE check (quantized P(p1) = 0.00,
-    conf 0.95 ≥ bar, fingerprint in the allowlist, corroboration present,
-    not firewall-flagged, not a storm aggregate) — only the freshness legs
-    vary by row. Lock 1's stale leg can be satisfied through the
-    dual-attestation interim path (synthesis §3.1); locks 2 and 3 have no
-    interim path.
+    Quantized P(p1) = 0.00 (via prob_lock_pass), conf 0.95 ≥ the 0.90 bar,
+    p3-dominant severity — only the freshness legs vary by row.
+    """
+    sev = Answer(
+        qid="severity", qtype="choice", choice="p3_medium", noul=None,
+        probabilities={"p1_critical": 0.0, "p2_high": 0.0,
+                       "p3_medium": 0.9, "p4_low": 0.1,
+                       "known_noise": 0.0, "cannot_determine": 0.0},
+        confidence=0.95)
+    team = Answer(
+        qid="owning_team", qtype="choice", choice="platform", noul=None,
+        probabilities={"platform": 1.0}, confidence=0.99)
+    disp = Answer(
+        qid="disposition", qtype="choice", choice="page_business_hours",
+        noul=None, probabilities={"page_business_hours": 1.0},
+        confidence=0.95)
+    return sev, team, disp
+
+
+_FIXTURE_THRESHOLDS = Thresholds()  # suppress_conf_min=0.90; fixture conf 0.95
+
+
+def decide_like_gate(report, *, fingerprint, dual_attested=False):
+    """DR-26 adapter: the design §A4 suppress conjunction for the fixture
+    alert, evaluated by the LIVE policy kernel — not a copy.
+
+    The fixture alert passes every value check (see _fixture_answers);
+    only the freshness legs vary by row. Lock 1's stale leg can be
+    satisfied through the dual-attestation interim path (synthesis §3.1);
+    locks 2 and 3 have no interim path.
 
     Returns (action, reason, decision_context). The context mirrors what
-    the gate lane puts on the audit event: disposition + proof pedigree.
+    the gate puts on the audit event: disposition + proof pedigree.
     """
-    p1_reported, conf, bar = 0.00, 0.95, 0.90
-    in_allowlist = fingerprint in report.locks[LOCK3_ALLOWLIST].entries
-
-    lock1_ok = (report.is_fresh(LOCK1_CALIBRATION)
-                or (dual_attested and lock1_fallback_offered(report)))
-    value_ok = (p1_reported == 0.00 and conf >= bar and in_allowlist)
-    # corroboration present, firewall clean, no storm — the fixture premise.
-    if (lock1_ok and value_ok
-            and report.is_fresh(LOCK2_THRESHOLD)
-            and report.entry_fresh(fingerprint)):
-        action, reason = "suppress", "allowlist"
-    else:
-        _, stale = suppress_precondition(report, fingerprint=fingerprint)
-        action = "page_now"
-        reason = ("freshness:" + "|".join(stale)) if stale else "page_now:value"
+    alert = Alert(
+        alert_id="rot-matrix-fixture",
+        received_at="2026-10-03T00:00:00+00:00",
+        fingerprint=fingerprint,
+        service="web", check="cache-evictions", severity_in="critical",
+        title="rot-matrix fixture alert", source="pagerduty")
+    q_sev, q_team, q_disp = _fixture_answers()
+    verdict = evaluate_policy(
+        alert, jev_model="jev-1.13.0",
+        q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
+        thresholds=_FIXTURE_THRESHOLDS, allowlist={fingerprint},
+        latency_ms=1.0, prob_lock_pass=True,
+        freshness_report=report, lock1_dual_attested=dual_attested)
 
     context = {
-        "action": action,
-        "reason": reason,
+        "action": verdict.action,
+        "reason": verdict.reason,
         "config_manifest_sha256": report.config_manifest_sha256,
         "proof_ids": {
             "lock1_calibration": report.locks[LOCK1_CALIBRATION].proof_id,
@@ -97,7 +124,7 @@ def decide_like_gate(report, *, fingerprint, dual_attested=False):
             "lock3_allowlist": fingerprint,
         },
     }
-    return action, reason, context
+    return verdict.action, verdict.reason, context
 
 
 PRIMARY_FP = fp("cache-evictions")

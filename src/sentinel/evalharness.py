@@ -161,8 +161,16 @@ class _ListAudit:
 
 def run_batch(pairs: list[tuple], *, seed: int = 7, flip_rate: float = 0.0,
               label_noise: float = 0.0, thresholds: Thresholds | None = None,
-              allowlist: set[str] | None = None) -> list[dict]:
-    """Evaluate (alert, label) pairs through the Gate; return per-alert rows."""
+              allowlist: set[str] | None = None,
+              freshness_monitor=None) -> list[dict]:
+    """Evaluate (alert, label) pairs through the Gate; return per-alert rows.
+
+    freshness_monitor: optional freshness.FreshnessMonitor. The harness
+    evaluates the gate *as configured* — D1 wires suppress_precondition
+    into the live kernel, so fixtures that expect suppress must supply
+    the same evidence production does (a V1 bundle covering the
+    allowlisted fingerprints).
+    """
     rng = random.Random(seed + 1)
     thresholds = thresholds or Thresholds()
     if allowlist is None:
@@ -190,7 +198,8 @@ def run_batch(pairs: list[tuple], *, seed: int = 7, flip_rate: float = 0.0,
 
     client = FlipMock(script=script, flip_rate=flip_rate, rng=random.Random(seed + 2))
     gate = Gate(client=client, thresholds=thresholds, allowlist=allowlist,
-                audit=_ListAudit(), shadow=False)
+                audit=_ListAudit(), shadow=False,
+                freshness_monitor=freshness_monitor)
 
     rows = []
     for alert, label in pairs:

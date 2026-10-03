@@ -56,9 +56,12 @@ def lock_evaluation(prob_pass: bool, prob_detail: str,
                     allow_pass: bool, allow_detail: str) -> dict:
     """Per-lock verdicts: prob / conf / allowlist, each pass/fail/stale.
 
-    Freshness verdicts (``stale``) belong to the freshness lane (ADR-014);
-    until then the detail strings say exactly what was — and was not —
-    checked, so a ``pass`` is never a silent approximation."""
+    These are the VALUE legs. The freshness legs (ADR-014, D1) are
+    evaluated by the gate kernel from the cached FreshnessReport and
+    surface as the ``freshness:<stale legs>`` veto on the disposition
+    reason — a stale proof vetoes suppression even when all three value
+    legs pass, so a ``pass`` here is never a silent approximation of
+    freshness."""
     def verdict(ok: bool) -> str:
         return "pass" if ok else "fail"
 

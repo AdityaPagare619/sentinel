@@ -920,17 +920,30 @@ def suppress_precondition(report: FreshnessReport,
     lane prefixes these into page_reason. Lock 3 is evaluated per-entry:
     pass the matching allowlist entry's fingerprint; a stale entry fails
     only that entry, not the lock.
+
+    Fail-closed on absence (ADR-014, D1): a lock MISSING from
+    ``report.locks`` is a veto, exactly like a stale lock. An absent leg is
+    not a passing leg — 'currently unreachable' is how fail-opens rot.
     """
     reasons: list[str] = []
     lock1 = report.locks.get(LOCK1_CALIBRATION)
-    if lock1 is not None and not lock1.fresh:
+    if lock1 is None:
+        reasons.append("lock1_missing: no calibration freshness evidence — "
+                       "absent leg cannot pass (ADR-014 fail-closed)")
+    elif not lock1.fresh:
         reasons.append(lock1.reason)
     lock2 = report.locks.get(LOCK2_THRESHOLD)
-    if lock2 is not None and not lock2.fresh:
+    if lock2 is None:
+        reasons.append("lock2_missing: no threshold freshness evidence — "
+                       "absent leg cannot pass (ADR-014 fail-closed)")
+    elif not lock2.fresh:
         reasons.append(lock2.reason)
     if fingerprint is None:
         lock3 = report.locks.get(LOCK3_ALLOWLIST)
-        if lock3 is not None and not lock3.fresh:
+        if lock3 is None:
+            reasons.append("lock3_missing: no allowlist freshness evidence — "
+                           "absent leg cannot pass (ADR-014 fail-closed)")
+        elif not lock3.fresh:
             reasons.append(lock3.reason)
     else:
         if not report.entry_fresh(fingerprint):

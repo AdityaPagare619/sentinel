@@ -201,3 +201,21 @@ Rules:
    backtest requires attestation history and is enforced by the
    two-person governance flow (platform tier), not the V1 machine check.
    Documented as a limitation, not silently dropped.
+
+## 6. D1 wiring note (2026-10-04)
+
+The precondition is now enforced in the live gate kernel
+(`sentinel.gate.evaluate_policy`, wired via `Gate(freshness_monitor=…)`):
+
+- The suppress branch requires the freshness legs (`_freshness_legs`):
+  stale proof ⇒ `page_now` with reason `freshness:<every stale leg>`
+  (the disposition `reason`; the contract's `page_reason` maps to it).
+- No report ⇒ the legs fail closed: suppress is unreachable.
+- Lock 1's stale leg may be satisfied via the dual-attestation interim
+  path only with explicit operator evidence on the decision context
+  (`context["lock1_dual_attested"]`); locks 2 and 3 have no interim.
+- The rot-matrix fixture (`tests/test_freshness_rot_matrix.py`)
+  exercises this same kernel per DR-26 — no test-side model remains.
+- The receiver boots the monitor from `SENTINEL_FRESHNESS_BUNDLE`
+  (unset ⇒ loud warning, suppress unreachable; corrupt manifest ⇒
+  CRITICAL log, boot without the monitor — noisy paging, never silence).
