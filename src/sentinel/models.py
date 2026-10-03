@@ -26,9 +26,12 @@ class Alert:
 
 @dataclass
 class Disposition:
-    action: str  # "page_now" | "page_business_hours" | "suppress" | "passthrough"
+    action: str  # "page_now" | "page_business_hours" | "suppress" | "passthrough" | "folded"
+                 # "folded" (D3): storm-continuation absorbed into the aggregate
+                 # page — intentionally not forwarded, but NOT suppression.
     reason: str  # "threshold" | "allowlist" | "uncertain" | "shadow" |
-                 # "dedup" | "change_window" | "storm" | "error:<code>"
+                 # "dedup" | "change_window" | "storm" | "storm_digest" |
+                 # "error:<code>"
     team: str | None
     confidence: float | None
     latency_ms: float

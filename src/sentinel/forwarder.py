@@ -877,6 +877,12 @@ class Forwarder:
         self.metrics: dict = {
             "forwarded": 0,   # POSTs accepted (2xx)
             "suppressed": 0,  # suppress dispositions: intentionally not forwarded
+            # D3: "folded" (storm-continuation absorbed into the aggregate
+            # page) is intentionally not forwarded either — but it is NOT
+            # suppression, so it gets its own counter. Lumping folded into
+            # "suppressed" would lie to the 3 AM operator about how many
+            # model-driven suppressions happened.
+            "folded": 0,
             "errors": 0,      # forward attempts that failed
         }
 
@@ -887,8 +893,11 @@ class Forwarder:
         """Relay one triaged alert. Never raises."""
         action = disposition.action
         try:
-            if action == "suppress":
-                self.metrics["suppressed"] += 1
+            if action in ("suppress", "folded"):
+                # D3: folded (storm-continuation) is not forwarded — absorbed
+                # into the aggregate page — but counted separately from
+                # model-driven suppressions.
+                self.metrics["folded" if action == "folded" else "suppressed"] += 1
                 return ForwardResult(forwarded=False, status_code=None,
                                      error=None, action=action,
                                      dedup_key=_dedup_key_of(alert))

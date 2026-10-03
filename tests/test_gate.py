@@ -377,7 +377,10 @@ class TestDeterministicPaths(GateTestBase):
         self.assertEqual(disp.reason, "change_window")
         self.assertEqual(len(client.calls), 0)
 
-    def test_storm_continuation_suppresses_without_jev(self):
+    def test_storm_continuation_folds_without_jev(self):
+        # D3: storm-continuation is FOLDED into the aggregate page — not
+        # suppressed. action="suppress" here used to read as model-driven
+        # suppression to a 3 AM operator.
         alert = make_alert()
         client = MockSystemOneClient({})
         gate = self.make_gate(client)
@@ -385,7 +388,7 @@ class TestDeterministicPaths(GateTestBase):
                                  storm_declared=False)
         disp, _rec = gate.evaluate(alert, build_state(alert, {}, {}), {}, {},
                                    correlation=corr)
-        self.assertEqual(disp.action, "suppress")
+        self.assertEqual(disp.action, "folded")
         self.assertEqual(disp.reason, "storm")
         self.assertEqual(len(client.calls), 0)
 

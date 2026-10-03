@@ -18,12 +18,18 @@ Race-to-page (ADR-010, design/fixes/01-race-to-page.md): the Jev call never
 blocks the page. It races budget B on the inference pool; the timer's
 default action is passthrough (deterministic, not model output); a late
 answer becomes a ``shadow_decision`` payload via the late-answer hook —
-it never pages, never suppresses. The ONLY Jev-call site is the pool
-submission inside ``RaceRunner.run``.
+it never pages, never suppresses. The ONLY Jev-call sites are the pool
+submissions inside ``RaceRunner.run`` (the race — gates the disposition)
+and ``RaceRunner.submit_advisory`` (detached advisory for the storm
+digest — never gates anything).
 
 Deterministic pre-Jev paths arrive via the optional `correlation` kwarg
 (dup/change_window/storm-continuation from the Correlator) and never call
 Jev — they emit ``structural_passthrough`` decision payloads.
+
+Storm aggregates take ``digest_storm`` (D3, ADR-016) — a separate code
+path, not a flag: it never calls the policy kernel, never arms a race,
+and cannot suppress by construction (see sentinel.storm_digest).
 
 The gate EMITS decision payloads (decision_made per decision,
 shadow_decision for late answers); it does NOT write events — the
@@ -54,6 +60,8 @@ from .quantized import (AllowlistEntry, FitStore, leg1_prob_lock)
 from .race_payloads import (decision_made_payload, empty_lock_evaluation,
                             lock_evaluation, shadow_decision_payload)
 from .state import input_sha256
+from .storm_digest import (storm_digest_disposition, storm_root_cause_payload,
+                           storm_root_cause_questions)
 
 # Frozen contract: evaluate(self, alert, state, history, context).
 # `correlation` is an optional extension (defaults None) carrying the
@@ -331,6 +339,73 @@ class Gate:
                   file=sys.stderr)
         return disp, rec
 
+    def digest_storm(self, agg: Alert, agg_state: dict, *, storm_size: int,
+                     storm_counts: dict) -> tuple:
+        """Deterministic digest for a storm-declared aggregate (D3).
+
+        A SEPARATE CODE PATH from evaluate(), not a flag: this method
+        never calls evaluate_policy, never arms a race, never consults
+        freshness or the allowlist. ``suppress`` is unreachable BY
+        CONSTRUCTION — storm_digest_disposition takes no action parameter.
+
+        The aggregate's Jev call runs detached as an advisory (root-cause
+        candidates for the digest page); its answer feeds the
+        ``storm_root_cause_payload`` advisory event and never gates the
+        disposition. Never raises: the company-ending bug is dropping the
+        storm page.
+        """
+        t0 = time.perf_counter()
+        try:
+            disp = storm_digest_disposition(storm_size=storm_size,
+                                            storm_counts=storm_counts)
+            self._emit(decision_made_payload(
+                alert=agg, input_sha256=input_sha256(agg_state),
+                disposition=disp.action,  # always "page_now"
+                budget_outcome=race.STRUCTURAL_PASSTHROUGH,
+                budget_ms=self._runner.config.budget_ms,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                lock_evaluation=empty_lock_evaluation()))
+            # Advisory root-cause call: detached, best-effort, never gates.
+            submitted = self._runner.submit_advisory(
+                state=agg_state,
+                questions=storm_root_cause_questions(),
+                on_answer=lambda resp: self._on_storm_root_cause(
+                    agg, storm_size, storm_counts, resp))
+            if not submitted:
+                print("[sentinel] storm advisory shed (pool full); "
+                      "digest page unaffected", file=sys.stderr)
+        except Exception as exc:  # fail open — never drop the storm page
+            code = _error_code(exc)
+            latency = (time.perf_counter() - t0) * 1000.0
+            disp = Disposition(action="passthrough", reason=f"error:{code}",
+                               team=None, confidence=None, latency_ms=latency)
+
+        rec = DecisionRecord(
+            alert=agg,
+            input_sha256=input_sha256(agg_state),
+            jev_model=None,
+            q_severity=None,
+            q_team=None,
+            q_disposition=None,
+            disposition=disp,
+        )
+        try:
+            self.audit.record(rec)
+        except Exception as exc:  # audit must never sink the alert
+            print(f"[sentinel] audit write failed for {agg.alert_id}: {exc}",
+                  file=sys.stderr)
+        return disp, rec
+
+    def _on_storm_root_cause(self, agg, storm_size, storm_counts, resp):
+        """Advisory answer handler: emit enrichment, touch no disposition."""
+        answers = (resp.answers or {}) if resp is not None else {}
+        self._emit(storm_root_cause_payload(
+            alert=agg, storm_size=storm_size, storm_counts=storm_counts,
+            jev_model=getattr(resp, "model", None),
+            severity_answer=answers.get("severity"),
+            team_answer=answers.get("owning_team"),
+            latency_ms=getattr(resp, "latency_ms", None)))
+
     # -------------------------------------------------------------- internals
 
     def _emit(self, payload: dict) -> None:
@@ -362,8 +437,10 @@ class Gate:
                                 confidence=None, latency_ms=0.0),
                     _empty_answers())
         if kind == "storm" and not getattr(correlation, "storm_declared", False):
-            # Folded into the aggregate page: no individual forward.
-            return (Disposition(action="suppress", reason="storm", team=None,
+            # Folded into the aggregate page: no individual forward. This is
+            # NOT suppression — action "folded" (D3), so a 3 AM operator never
+            # reads it as model-driven suppression.
+            return (Disposition(action="folded", reason="storm", team=None,
                                 confidence=None, latency_ms=0.0),
                     _empty_answers())
         return None
