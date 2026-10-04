@@ -162,6 +162,13 @@ def prerender(base: str, api_dir: str) -> dict:
 
     # Per-decision detail files (top-N by recency, like the live shadow join).
     decisions = _get(base, "/api/decisions?limit=500")["data"]
+    if not decisions:
+        # T2: an empty showcase is never a valid publish — fail loudly
+        # instead of shipping a hollow staging bundle that prints "honest".
+        # (Seen when dist-data was rebuilt mid-build by a concurrent run.)
+        raise RuntimeError(
+            "pre-render found zero decisions — refusing to publish an empty "
+            "showcase; is the dataset dir intact?")
     for d in decisions[:DETAIL_LIMIT]:
         did = d["id"]
         try:
@@ -347,10 +354,18 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=0, help="platform port (0 = auto)")
     ap.add_argument("--skip-data", action="store_true",
                     help="reuse deploy/dist-data instead of rebuilding")
+    ap.add_argument("--data-dir", default=None,
+                    help="use this dataset dir directly (implies --skip-data; "
+                         "lets tests run hermetically off a private copy so "
+                         "a concurrent data rebuild cannot corrupt them)")
     args = ap.parse_args()
 
-    data_dir = (os.path.join(REPO, "deploy", "dist-data") if args.skip_data
-                else build_data())
+    if args.data_dir:
+        data_dir = args.data_dir
+    elif args.skip_data:
+        data_dir = os.path.join(REPO, "deploy", "dist-data")
+    else:
+        data_dir = build_data()
     port = args.port or _free_port()
     with tempfile.TemporaryDirectory(prefix="sentinel-gh-pages-") as state_dir:
         server = start_server(data_dir, state_dir, port)

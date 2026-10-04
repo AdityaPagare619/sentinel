@@ -68,7 +68,8 @@ def build_app(args) -> PlatformApp:
         ui_dir = os.path.join(_REPO, ui_dir)
     return PlatformApp(store=store, registry=registry, gate=gate,
                        degrade=degrade, data_source=args.data_source,
-                       labels_version=args.labels_version, ui_dir=ui_dir)
+                       labels_version=args.labels_version, ui_dir=ui_dir,
+                       cors_origins=args.cors_origins)
 
 
 def main(argv=None) -> None:
@@ -93,6 +94,13 @@ def main(argv=None) -> None:
     ap.add_argument("--max-inflight", type=int,
                     default=DEFAULT_MAX_INFLIGHT)
     ap.add_argument("--shed-load", type=float, default=DEFAULT_SHED_LOAD)
+    ap.add_argument("--cors-origins",
+                    default=os.environ.get("SENTINEL_CORS_ORIGINS", "*"),
+                    help="comma-separated origins allowed to fetch /api/* "
+                         "cross-origin (the hosted prod console needs this); "
+                         '"*" (default) allows any origin — restrict it in '
+                         "production, e.g. "
+                         "--cors-origins=https://AdityaPagare619.github.io")
     args = ap.parse_args(argv)
 
     from socketserver import ThreadingMixIn
@@ -113,6 +121,7 @@ def main(argv=None) -> None:
     print(f"[platform] read API on http://{args.host}:{args.port} "
           f"(db={args.db} mode=ro, data_source={args.data_source}, "
           f"ui={'on' if app.ui_dir else 'off'}, "
+          f"cors_origins={args.cors_origins}, "
           f"max_inflight={args.max_inflight}, "
           f"shed_load={args.shed_load})", flush=True)
     try:

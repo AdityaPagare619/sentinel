@@ -2,8 +2,8 @@
 
 Covers: builder idempotence (two runs -> byte-identical), prod bundle
 cleanliness (no fixtures), staging honesty strings, JSON validity.
-Slow (~60s): builds twice with --skip-data against the deterministic
-demo dataset.
+Fast (~5s): builds twice against a private copy of the deterministic
+demo dataset (--data-dir hermetic; never touches the shared dist-data).
 """
 import json
 import os
@@ -17,9 +17,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILDER = os.path.join(REPO, "deploy", "gh-pages", "build-static.py")
 
 
-def _build(out: str) -> None:
+def _build(out: str, data_dir: str) -> None:
     subprocess.run(
-        [sys.executable, BUILDER, "--out", out, "--skip-data"],
+        [sys.executable, BUILDER, "--out", out, "--data-dir", data_dir],
         check=True, cwd=REPO, capture_output=True, text=True, timeout=300,
     )
 
@@ -36,10 +36,16 @@ class TestGhPagesBuilder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="sentinel-ghpages-test-")
+        # T1 hermeticity: --skip-data reads the shared deploy/dist-data,
+        # which a concurrent full build rebuilds (build-data.sh deletes
+        # demo.db) — that corrupted these tests intermittently. Copy the
+        # dataset once into the tmp dir and point the builder at the copy.
+        cls.data = os.path.join(cls.tmp, "data")
+        shutil.copytree(os.path.join(REPO, "deploy", "dist-data"), cls.data)
         cls.a = os.path.join(cls.tmp, "a")
         cls.b = os.path.join(cls.tmp, "b")
-        _build(cls.a)
-        _build(cls.b)
+        _build(cls.a, cls.data)
+        _build(cls.b, cls.data)
 
     @classmethod
     def tearDownClass(cls):

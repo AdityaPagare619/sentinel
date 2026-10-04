@@ -153,6 +153,12 @@ sudo systemctl enable --now sentinel-receiver sentinel-platform
 sentinel.example.com {
     # read API + console backend
     handle /api/* {
+        # CORS for the hosted prod console (GitHub Pages). The platform
+        # server also emits these itself (--cors-origins); set them here
+        # instead if you prefer the proxy to own the policy, and then run
+        # the platform with SENTINEL_CORS_ORIGINS="" (empty = same-origin).
+        header Access-Control-Allow-Origin "https://AdityaPagare619.github.io"
+        header Vary "Origin"
         reverse_proxy 127.0.0.1:8081
     }
     # the receiver's webhook ingress stays OFF the public internet:
@@ -168,6 +174,16 @@ sudo systemctl reload caddy
 
 The static prod console (GitHub Pages, or any static host) points at
 `https://sentinel.example.com` — enter it on the console's setup screen.
+The console fetches the API **cross-origin**, so the browser requires CORS:
+the platform server answers preflights and sets
+`Access-Control-Allow-Origin` itself. Out of the box it allows `*`
+(`SENTINEL_CORS_ORIGINS`, or `--cors-origins`); lock it down to just your
+console origin in production:
+
+```bash
+# /etc/sentinel/platform.env — replace the default
+SENTINEL_CORS_ORIGINS=https://AdityaPagare619.github.io
+```
 
 ## 5. BYOK: add your PagerDuty key
 
