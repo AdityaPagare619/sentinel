@@ -37,6 +37,13 @@ export async function renderSim(root, params, ctx) {
         <select id="sim-team" class="mono">${TEAMS.map(x => `<option${x === team ? ' selected' : ''}>${x}</option>`).join('')}</select>
       </div>
       <p class="shadow-note mono">◈ shadow — projected on shadow evaluations · <span id="sim-ds">ds:—</span> · no live alerts affected.</p>
+      ${Data.dataMode === 'static' ? `
+      <div class="sim-presets mono" id="sim-presets">
+        <span class="sim-presets-label">pre-computed scenarios</span>
+        ${['default', 'conservative', 'aggressive'].map(s =>
+          `<button class="btn preset" data-preset="${s}">${s}</button>`).join('')}
+        <span class="sim-presets-note">baked at build time from the synthetic dataset — not a live tuner run</span>
+      </div>` : ''}
       <div id="sim-sliders"></div>
       <div class="sim-actions">
         <button id="sim-export" class="btn primary" disabled>Review &amp; export</button>
@@ -266,6 +273,36 @@ export async function renderSim(root, params, ctx) {
     return;
   }
   paintSliders();
+  /* static showcase: pre-computed scenario presets. Loading a preset pulls the
+   * baked projection AND sets the sliders to the scenario's thresholds, so the
+   * local-recompute path below stays consistent with what's displayed. */
+  const presetsEl = root.querySelector('#sim-presets');
+  if (presetsEl) {
+    presetsEl.querySelectorAll('[data-preset]').forEach(btn => btn.addEventListener('click', async () => {
+      const name = btn.dataset.preset;
+      try {
+        const env = await Data.simulate(
+          { thresholds: t, cost_model: cost, dataset_version: datasetVersion },
+          { scenario: name });
+        if (env.data?.scenario_thresholds) {
+          t = { ...env.data.scenario_thresholds };
+          paintSliders();
+        }
+        /* render the pre-computed projection through the normal paint path —
+         * proj/prov are the closure state paintCards/paintProv/paintStrip read */
+        proj = env.data.projection; prov = env.data.provenance;
+        ctx.setSrcBadge(env.meta?.data_source);
+        ctx.setDsVersion('ds:' + prov.dataset_version);
+        root.querySelector('#sim-ds').textContent = 'ds:' + prov.dataset_version;
+        paintCards(); paintProv(); paintStrip();
+      } catch (e) {
+        cardsEl.innerHTML = errorBlock({
+          what: `Couldn't load the pre-computed scenario "${esc(name)}".`,
+          detail: e.message || '', retryFn: () => renderSim(root, params, ctx),
+        });
+      }
+    }));
+  }
   try {
     const benv = await Data.simulate({ thresholds: DEFAULT_THRESHOLDS, cost_model: cost, dataset_version: datasetVersion });
     baseline = benv.data.projection;

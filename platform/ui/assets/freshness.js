@@ -76,11 +76,15 @@ export function streamFreshness({ streamState = 'paused', lastEventAt = null, no
     live: () => freshnessState({ sourceUp: true, asOfMs: lastEventAt, nowMs }),
     polling: () => 'cached',
     reconnecting: () => 'cached',
+    /* static showcase: the "stream" is a pre-rendered snapshot baked at build
+     * time. It is cached by definition and must never read as live. */
+    snapshot: () => 'cached',
     paused: () => lastEventAt ? freshnessState({ sourceUp: true, asOfMs: lastEventAt, nowMs }) : 'degraded',
   };
   const state = (map[streamState] || map.paused)();
   const waitingOn = streamState === 'reconnecting' ? 'SSE reconnect'
     : streamState === 'polling' ? 'poll fallback'
+    : streamState === 'snapshot' ? 'static snapshot — not live'
     : state === 'stale' ? 'stream'
     : null;
   const asOfIso = lastEventAt ? new Date(lastEventAt).toISOString() : null;

@@ -356,3 +356,24 @@ a.hcard:hover { border-color: var(--line-1); text-decoration: none; }
 .tail-banner { border: 1px dashed var(--sev-2); color: var(--sev-2); border-radius: var(--radius-chip);
   padding: 8px 12px; margin: 8px 0; font-size: 11px; }
 .tail-banner[hidden] { display: none; }
+
+/* ---------- backend setup (production entry point, DATA_MODE='live') ---------- */
+.setup-wrap { display: flex; justify-content: center; padding: 48px 16px; }
+.setup-card { max-width: 560px; border: 1px solid var(--line-1); border-radius: var(--radius-md);
+  padding: 24px; background: var(--surface-raised); }
+.setup-title { margin: 0 0 12px; font-size: 18px; }
+.setup-lede { color: var(--tx-2); font-size: 13px; line-height: 1.6; }
+.setup-label { display: block; margin: 16px 0 6px; font-size: 11px; color: var(--tx-2); }
+.setup-row { display: flex; gap: 8px; }
+.setup-input { flex: 1; padding: 8px 10px; border: 1px solid var(--line-1);
+  border-radius: var(--radius-sm); background: var(--surface-base); color: var(--tx-1); }
+.setup-err { color: var(--sev-1); font-size: 12px; margin-top: 8px; }
+.setup-note { color: var(--tx-2); font-size: 12px; line-height: 1.6; }
+.setup-hr { border: 0; border-top: 1px solid var(--line-1); margin: 20px 0; }
+
+/* ---------- simulator pre-computed presets (static showcase) ---------- */
+.sim-presets { border: 1px dashed var(--line-1); border-radius: var(--radius-sm);
+  padding: 10px; margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sim-presets-label { font-size: 11px; color: var(--tx-2); }
+.sim-presets .preset { text-transform: none; }
+.sim-presets-note { flex-basis: 100%; font-size: 10px; color: var(--tx-2); }

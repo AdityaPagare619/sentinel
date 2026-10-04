@@ -1,15 +1,42 @@
 /* api.js — the data layer. Fetch() against the FROZEN contract (platform/contracts/openapi.yaml v1.0.0).
- * DATA_SOURCE switch: live API base URL ↔ mock files. Default: live.
- * Mocks render ONLY behind the visible MOCK DATA banner, never silently.
+ * DATA_MODE switch (build-time, window.SENTINEL_DATA_MODE via assets/config.js):
+ *   'static' — pre-rendered JSON showcase (GitHub Pages staging): every read
+ *              comes from ./api/*.json baked at build time; KEYS run against
+ *              an in-memory demo store (labeled, never persisted); the SSE
+ *              stream is replaced by snapshot polling (labeled "not live").
+ *   'live'   — real backend (production): every read hits the configured
+ *              backend URL; KEYS are fully functional (BYOK). No fixtures,
+ *              no simulated mode, no mock data anywhere in this mode.
+ * Unset (dev): the legacy live/mock switch via ?mock=1 / localStorage.
  * In mock mode, POST /api/simulate runs a LOCAL recompute over the mock
  * window (lib.applyThresholds) — labeled "mock-mode local recompute" wherever shown.
  */
 import { applyThresholds, DEFAULT_THRESHOLDS, CONTRACT_VERSION } from './lib.js';
 
 const base = new URL('.', import.meta.url); /* platform/ui/ — relative, safe under any mount path */
-const mockUrl = (f) => new URL('data/' + f, base).toString();
+
+/* Build-time data mode. Staging sets 'static', production sets 'live'.
+ * Absent (dev server): the legacy ?mock=1 / localStorage switch applies. */
+const DATA_MODE = (typeof window !== 'undefined' && window.SENTINEL_DATA_MODE) || null;
+const STATIC_API = 'api'; /* pre-rendered JSON dir, relative to the UI base */
+const mockUrl = (f) => new URL((DATA_MODE === 'static' ? STATIC_API : 'data') + '/' + f, base).toString();
+
+export function backendUrlConfigured() {
+  try { return (localStorage.getItem('sentinel.backend.url') || '').replace(/\/+$/, ''); }
+  catch { return ''; }
+}
+export function setBackendUrl(url) {
+  const clean = String(url || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/.+\..+/.test(clean)) throw new Error('That doesn\u2019t look like a URL — include https:// and a host.');
+  try { localStorage.setItem('sentinel.backend.url', clean); } catch {}
+  return clean;
+}
 
 function readModePreference() {
+  /* Build-fixed modes win over every override: staging is always static,
+   * production is always live. No silent flips. */
+  if (DATA_MODE === 'static') return 'mock';
+  if (DATA_MODE === 'live') return 'live';
   try {
     const hq = new URLSearchParams((location.hash.split('?')[1] || ''));
     if (hq.get('mock') === '1') return 'mock';
@@ -20,12 +47,15 @@ function readModePreference() {
 
 export const Data = {
   mode: readModePreference(),
-  apiBase: '', /* same origin; the API lane serves platform/ui statically at / */
+  modeFixed: DATA_MODE === 'static' || DATA_MODE === 'live',
+  dataMode: DATA_MODE, /* 'static' | 'live' | null (dev) */
+  apiBase: DATA_MODE === 'live' ? backendUrlConfigured() : '',
   datasetVersion: 'ds:shadow-2026-10-02',
   lastMeta: null,
   listeners: new Set(),
 
   setMode(m) {
+    if (this.modeFixed) return; /* build-fixed: staging is static, prod is live — no flips */
     this.mode = m;
     try { localStorage.setItem('sentinel.ui.mode', m); } catch {}
     for (const f of this.listeners) f(m);
@@ -90,6 +120,14 @@ export const Data = {
 
   async getDecision(id) {
     if (this.mode === 'mock') {
+      /* static build: per-decision pre-rendered files (api/decision/<id>.json),
+       * written by deploy/gh-pages/build-static.py for the top-N decisions. */
+      if (DATA_MODE === 'static') {
+        try {
+          const env = await this._mock(`decision/${encodeURIComponent(id)}.json`);
+          return this._touchMeta(env);
+        } catch { /* fall through to the derived path below */ }
+      }
       if (Number(id) === 1042) return this._touchMeta(await this._mock('decision-detail.json'));
       /* detail for other mock rows: derived from the summary row (alert parsed from title), outcome unlabeled */
       const env = await this._mock('decisions.json');
@@ -123,8 +161,17 @@ export const Data = {
     return this._touchMeta(env);
   },
 
-  async simulate(body) {
+  async simulate(body, opts = {}) {
     if (this.mode === 'mock') {
+      /* static build: named pre-computed scenarios (api/simulate/<name>.json),
+       * written by deploy/gh-pages/build-static.py. Labeled pre-computed
+       * in provenance — not a live tuner run (reconstruction law §4.4). */
+      if (DATA_MODE === 'static' && opts.scenario) {
+        const env = await this._mock(`simulate/${opts.scenario}.json`);
+        if (env.data?.scenario_thresholds)
+          this._lastScenarioThresholds = env.data.scenario_thresholds;
+        return this._touchMeta(env);
+      }
       const env = await this._mock('decisions.json');
       const proj = applyThresholds(env.data, body.thresholds, body.cost_model);
       const sim = await this._mock('simulate.json');
@@ -180,15 +227,51 @@ export const Data = {
       meta: { contract_version: '1.0.0', data_source: 'live', window, derived: 'client-side join of decision records + labeled outcomes', agreement: 'unavailable — shadow join not in the read contract' },
     });
   },
-   /* ---------- BYOK integrations (always live — keys are never mocked).
-   * In mock mode these throw an honest, operator-language error: mock mode
-   * has no key store, so there is nothing to configure. */
+   /* ---------- BYOK integrations ----------
+   * Live mode: always live — keys are never mocked (existing behavior).
+   * Static mode (staging showcase): an in-memory DEMO store. Keys live only
+   * in this tab's memory, are never persisted, never sent anywhere, and the
+   * screen says so. Simulated paging is forced on. This is the honest way to
+   * demo the KEYS surface on a static host: fully interactive, zero leakage
+   * surface, zero persistence theater. */
+  _demoKeys: { pagerduty_routing_key: null, jev_api_key: null },
+  _demoStatus() {
+    const pub = (v) => v ? { configured: true, last4: String(v).slice(-4) } : { configured: false };
+    return {
+      data: {
+        integrations: {
+          pagerduty_routing_key: pub(this._demoKeys.pagerduty_routing_key),
+          jev_api_key: pub(this._demoKeys.jev_api_key),
+          simulated_paging: true, /* forced in the static showcase */
+          ephemeral: true,
+          demo: true, /* in-memory only — this tab, nothing else */
+        },
+      },
+      meta: { contract_version: CONTRACT_VERSION, data_source: 'demo' },
+    };
+  },
+  _demoKeyValid(name, value) {
+    const v = String(value || '').trim();
+    if (!v) throw { status: 422, code: 'bad_key', message: 'Enter a key — the field is empty.' };
+    if (name === 'pagerduty_routing_key' && !/^[0-9a-fA-F]{32}$/.test(v))
+      throw { status: 422, code: 'bad_key',
+        message: 'That doesn\u2019t look like a PagerDuty Events API v2 routing key (32 hexadecimal characters).' };
+    if (name === 'jev_api_key' && v.length < 8)
+      throw { status: 422, code: 'bad_key', message: 'Jev API key looks too short — check for a copy/paste slip.' };
+    return v;
+  },
   async getIntegrations() {
+    if (DATA_MODE === 'static') return this._touchMeta(this._demoStatus());
     if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
       message: `Integrations settings need the live API — mock mode has no key store. Switch to live to manage keys.` };
     return this._touchMeta(await this._live('/api/v1/integrations/status'));
   },
   async saveIntegrationKey(name, value) {
+    if (DATA_MODE === 'static') {
+      const v = this._demoKeyValid(name, value);
+      this._demoKeys[name] = v;
+      return this._touchMeta(this._demoStatus());
+    }
     if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
       message: `Integrations settings need the live API.` };
     return this._touchMeta(await this._live('/api/v1/integrations/keys', {
@@ -197,11 +280,17 @@ export const Data = {
     }));
   },
   async deleteIntegrationKey(name) {
+    if (DATA_MODE === 'static') {
+      this._demoKeys[name] = null;
+      return this._touchMeta(this._demoStatus());
+    }
     if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
       message: `Integrations settings need the live API.` };
     return this._touchMeta(await this._live(`/api/v1/integrations/keys/${name}`, { method: 'DELETE' }));
   },
   async setSimulatedPaging(enabled) {
+    if (DATA_MODE === 'static') throw { status: 0, code: 'demo_forced',
+      message: `Simulated paging is forced on in this showcase — there is no real pager here to switch to.` };
     if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
       message: `Integrations settings need the live API.` };
     return this._touchMeta(await this._live('/api/v1/integrations/simulated', {
@@ -210,6 +299,18 @@ export const Data = {
     }));
   },
   async testPage(routingKey = null) {
+    if (DATA_MODE === 'static') {
+      /* Demo test page: fully simulated, labeled. Uses the in-memory key if
+       * set (proving the wiring), else the per-request field. Nothing leaves
+       * the tab. */
+      const key = (routingKey && routingKey.trim()) || this._demoKeys.pagerduty_routing_key;
+      return this._touchMeta({ data: {
+        ok: false, simulated: true,
+        message: key
+          ? `SIMULATED — no page was sent. Your demo key (····${String(key).slice(-4)}) was read from memory and a [SENTINEL TEST] payload was built, then discarded. Nothing left this tab.`
+          : `SIMULATED — no page was sent. Paste a demo key above to see the wiring read it (it stays in this tab's memory).`,
+      }, meta: { contract_version: CONTRACT_VERSION, data_source: 'demo' } });
+    }
     if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
       message: `The test page needs the live API.` };
     const body = routingKey ? { routing_key: routingKey } : {};
@@ -223,7 +324,7 @@ export const Data = {
 /* ---------- SSE stream with gap detection (narrative §3.4, §6.1) ---------- */
 export class Stream {
   constructor() {
-    this.state = 'paused'; /* live | paused | reconnecting | polling */
+    this.state = 'paused'; /* live | paused | reconnecting | polling | snapshot */
     this.attempt = 0;
     this.lastId = 0;
     this.lastEventAt = 0;
@@ -236,6 +337,10 @@ export class Stream {
 
   start(sinceId = 0) {
     this.lastId = sinceId || this.lastId;
+    /* static build (GitHub Pages staging): no SSE possible — poll the
+     * pre-rendered snapshot instead. State 'snapshot' renders as
+     * "snapshot — not live" (freshness law: never imply liveness). */
+    if (DATA_MODE === 'static') return this._startStaticSnapshot();
     if (Data.mode === 'mock') return this._startMock();
     this._setState('reconnecting'); this.attempt++;
     this._es = new EventSource(Data.apiBase + '/api/stream' + (this.lastId ? '?since_id=' + this.lastId : ''));
@@ -282,6 +387,25 @@ export class Stream {
     this._es?.close(); clearTimeout(this._hb); clearInterval(this._poll);
     this._mockTimers.forEach(clearTimeout); this._mockTimers = [];
     this._setState('paused');
+  }
+
+  /* static build: poll the pre-rendered snapshot (api/stream-snapshot.json).
+   * The snapshot is baked at build time from the synthetic dataset — it never
+   * changes, and the UI must never imply otherwise. State 'snapshot'. */
+  async _startStaticSnapshot() {
+    this._setState('snapshot');
+    const poll = async () => {
+      try {
+        const res = await fetch(new URL(STATIC_API + '/stream-snapshot.json', base).toString(), { cache: 'no-store' });
+        if (!res.ok) return;
+        const snap = await res.json();
+        this.lastEventAt = Date.now();
+        for (const d of (snap.data || [])) this._emit('decision', d);
+      } catch { /* snapshot missing → the river keeps its last paint; never blank */ }
+    };
+    await poll();
+    clearInterval(this._poll);
+    this._poll = setInterval(poll, 30000);
   }
 
   /* mock mode: replay the recorded stream-events.jsonl on a timer — labeled, not live */
