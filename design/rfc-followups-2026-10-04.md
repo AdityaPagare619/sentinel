@@ -103,7 +103,13 @@ Definitions (what each state MEANS, not just what it's called):
   semantics — expired never silently drops: a tenant with zero live policies gets
   the fail-open guarantee, loudly (violet system-channel banner naming the gap).
 
-### B3.2 The blast-radius preview (server-side, before every forward transition)
+### B3.2 The blast-radius preview (server-side, before suppression-granting transitions)
+
+**Scope (reconciled):** the preview is REQUIRED before **shadow→canary** and
+**canary→live** — the two transitions that grant suppression power.
+**draft→shadow requires no preview** (nothing is suppressed in shadow; the
+preview may still be computed as author advisory). The section title's
+"every forward transition" is corrected by this scope note.
 
 Computed by the platform tier (never the console — per INTERFACE_PRINCIPLES §4.5,
 the interface reads and never evaluates; the preview is an engine-side
@@ -153,12 +159,13 @@ this section too — flagged, not solved here).
 |---|---|---|
 | draft → shadow | author only | 2 — reversible, no traffic effect |
 | shadow → canary | **2 attestors** + signed shadow-diff referencing the preview hash | 1 — the fatigue ratchet's first gate |
-| canary → live | **2 attestors** + suppression-rate watchdog baseline signed (the baseline the watchdog will alarm against) | 1 — this is the moment a suppression policy starts hiding alerts |
+| canary → live | **2 attestors** + preview hash re-verified (the shadow-diff's preview; recomputed if the version changed since) + suppression-rate watchdog baseline signed (the baseline the watchdog will alarm against) | 1 — this is the moment a suppression policy starts hiding alerts |
 | live → review-due | none — automatic at `review_at` | 1 (the automaticity is the design; no human may postpone it) |
 | review-due → live (re-review) | **2 attestors** + fresh preview over the trailing window | 1 |
 | review-due → expired | automatic at grace end; attestor may expire early | 2 for early-expire (it's a safe direction) |
 | expired → draft | author only (creates a NEW version; the expired version is immutable) | 2 |
-| any → draft (abort) | author or attestor | 2 — aborting is always the safe direction |
+| draft/shadow/canary → draft (abort) | author or attestor | 2 — abandoning a non-live version is always the safe direction |
+| live → expired (abort = early-expire) | attestor | 2 — aborting a live policy RETIRES it via early-expire; it never forks back to draft (the live version is immutable, so "abort to draft" would be a lie — there is no live→expired early-kill missing: this row IS it) |
 
 Rules: the two attestors must be distinct from the author and from each other
 (ADR-022's "what would change it" anticipates rubber-stamping: if >90% of
@@ -677,10 +684,12 @@ future, not an admission of weakness.
 
 ### B4.0 Decision
 
-**Terminology alignment ONLY. The engine disposition enum stays four-valued
-per ADR-007 — `page_now | page_business_hours | suppress | passthrough`
-(`src/sentinel/models.py:29`). That is Type 1 and already decided; this
-section does not touch it.**
+**Terminology alignment ONLY. The engine disposition enum is five-valued
+post-D3 — `page_now | page_business_hours | suppress | passthrough | folded`
+(`src/sentinel/models.py:29`; `folded` added by D3/ADR-016 for storm-folded
+members that page via the aggregate digest — folded pages, it is never a
+suppression). ADR-007's decision (no *sixth* value for mute-as-label) stands;
+this section does not touch the enum.**
 
 ### B4.1 The alignment
 
@@ -705,10 +714,11 @@ don't have; the *word* adds clarity we do want.
 | **Hold** | `page_business_hours` | Half-filled circle (proposal §5.2) |
 | **Suppress** | `suppress` | Hollow circle (proposal §5.2) |
 | **Pass-through** (no decision taken) | `passthrough` | Neutral glyph, distinct from all three — never collapsed into Page |
+| **Folded** (storm member — paged via the aggregate digest, never suppressed) | `folded` | Distinct glyph, never the suppress hollow circle — folded pages; rendering it as suppressed would be the exact lie D3 was built to kill |
 
 Rules for the alignment (binding on Prism lanes):
 1. "Hold" is a *rendering label* for `page_business_hours`, never a stored
-   value. The event log, the API contract, and the gate store the four-valued
+   value. The event log, the API contract, and the gate store the five-valued
    enum verbatim. A UI string search for "hold" must find zero hits in
    `src/sentinel/` (same enforcement shape as ADR-007's "zero mute in src/").
 2. Every "Hold" rendering carries its evidence companions (decision reason,
@@ -731,9 +741,10 @@ widening the gate's enum leaks the data model across the process boundary
 (Forge's position, adopted). "Hold" as an engine value would be the same
 mistake with a different name — and worse, it would fork the middle tier
 into two overlapping concepts (`page_business_hours` vs `hold`) with no
-behavioral difference. The engine's four values describe *what the system
-does*; the UI's four labels describe *what the operator understands*. The
-mapping is the alignment; there is nothing else to build.
+behavioral difference. The engine's five values describe *what the system
+does*; the UI's labels describe *what the operator understands*
+(Page/Hold/Suppress/Pass-through/Folded). The mapping is the alignment;
+there is nothing else to build.
 
 ### B4.3 Kill conditions
 
