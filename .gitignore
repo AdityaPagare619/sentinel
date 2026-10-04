@@ -31,3 +31,7 @@ sentinel.db
 /tmp/
 *.log
 .DS_Store
+
+# deploy lane: generated bundles, never committed
+deploy/dist/
+deploy/dist-data/
