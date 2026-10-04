@@ -43,6 +43,39 @@ export function fmtDateTime(iso) {
   const d = new Date(iso);
   return d.toISOString().slice(0, 16).replace('T', ' ');
 }
+/* A5 (binding): UTC + local on EVERY event display, in-band, no exceptions.
+ * Compact time-only form for row titles; the drawer timeline uses the dated
+ * form via dualZone in payload.js. Local zone is the operator's own. */
+export function tzAbbr() {
+  try {
+    const p = new Intl.DateTimeFormat('en', { timeZoneName: 'short' }).formatToParts(new Date());
+    const t = p.find(x => x.type === 'timeZoneName');
+    return t ? t.value : 'local';
+  } catch { return 'local'; }
+}
+export function fmtTimeBoth(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const utc = d.toISOString().slice(11, 19) + ' UTC';
+  let local;
+  try {
+    local = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) + ' ' + tzAbbr();
+  } catch { local = 'local time unavailable'; }
+  return `${utc} · ${local}`;
+}
+/* A4 live-tail rule state machine (pure; the view owns the DOM).
+ * Returns {rate, recent, tooFast}: tooFast latches when the 5s rolling rate
+ * exceeds maxPerSec and releases below half of it (hysteresis — no flapping
+ * at the boundary). The threshold is a Type 2 starting point (binding). */
+export const LIVE_TAIL_MAX_PER_SEC = 20;
+export function tailState(evtTimes, nowMs, tooFast, maxPerSec = LIVE_TAIL_MAX_PER_SEC) {
+  const recent = (evtTimes || []).filter(t => nowMs - t < 5000);
+  const rate = recent.length / 5;
+  if (!tooFast && rate > maxPerSec) tooFast = true;
+  else if (tooFast && rate < maxPerSec * 0.5) tooFast = false;
+  return { rate, recent, tooFast };
+}
 export function ageStr(iso, nowMs = Date.now()) {
   if (!iso) return '—';
   const s = Math.max(0, Math.floor((nowMs - new Date(iso).getTime()) / 1000));

@@ -1,19 +1,26 @@
 /* components.js — atomic components per design/DESIGN_SYSTEM.md §3.
  * One source of truth for chips, badges, the confidence bar, river rows,
  * the detail drawer, skeletons, and error blocks. No screen logic here. */
-import { SEV_LABEL, SEV_COLOR, DISP_LABEL, DISP_COLOR, SRC_LABEL,
-         fmtInt, fmtPct, fmtConf, fmtTime, ageStr, shortFpr, shortHash,
+import { SEV_LABEL, DISP_LABEL, DISP_COLOR, SRC_LABEL,
+         fmtInt, fmtPct, fmtConf, fmtTime, fmtTimeBoth, ageStr, shortFpr, shortHash,
          binForConf, quartilesFromBins, receiptLine, verdictSentence } from './lib.js';
+import { renderPayload, payloadEmptyHtml, payloadSkeletonHtml } from './payload.js';
+import { pinnedSectionHtml, pinCellsHtml } from './pins.js';
 
 export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/* ---------- §3.1 severity chip ---------- */
+/* ---------- §3.1 severity: signal bars in neutral ink (B1 three-channel separation) ----------
+ * Severity is an INPUT claim, not a decision — so it must not reuse the
+ * decision color channel. Bars (shape) + text label (never color-only, §7);
+ * the disposition chip keeps the color. Four bars, filled count = level. */
+const SEV_BARS = { p1_critical: 4, p2_high: 3, p3_medium: 2, p4_low: 1, known_noise: 0, cannot_determine: 0 };
 export function sevChip(sev) {
-  const label = SEV_LABEL[sev] || esc(sev);
-  const color = SEV_COLOR[sev] || 'var(--tx-2)';
-  return `<span class="chip sev-chip" style="color:${color};border-color:${color}">${esc(label)}</span>`;
+  const label = SEV_LABEL[sev] || sev;
+  const n = SEV_BARS[sev] ?? 0;
+  const bars = [1, 2, 3, 4].map(i => `<span class="sev-bar${i <= n ? ' on' : ''}"></span>`).join('');
+  return `<span class="sev-sig" role="img" aria-label="severity ${esc(String(label))}"><span class="sev-bars" aria-hidden="true">${bars}</span><span class="sev-label">${esc(String(label))}</span></span>`;
 }
 
 /* ---------- §3.2 disposition chip — reason code is MANDATORY ---------- */
@@ -202,8 +209,11 @@ export function relDiagram(el, { bins, threshold, thresholdLabel = 'gate' }) {
   el.addEventListener('mouseleave', () => { tip.hidden = true; });
 }
 
-/* ---------- river row (shared by river + audit — one row component) ---------- */
-export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null } = {}) {
+/* ---------- river row (shared by river + audit — one row component) ----------
+ * The row renders the CLOSED contract vocabulary only (contract.js). Vendor
+ * payload never enters row chrome. Field pins append as display-only cells —
+ * they are never filter operands (synthesis §3). */
+export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null, pins = [], pinsOff = false } = {}) {
   const flip = flips[d.input_sha256];
   const flipBadge = flip && flip.flipped
     ? `<span class="flip-badge mono" title="the machine changed its mind — see flip timeline">${esc(DISP_LABEL[d.disposition] || d.disposition)} →(flip ${fmtTime(flip.last_seen)})→ ${esc(DISP_LABEL[flip.decisions[flip.decisions.length - 1].disposition] || '')}</span>`
@@ -211,7 +221,7 @@ export function decisionRow(d, { flips = {}, density = 'compact', selected = fal
   const receipt = thresholds ? receiptLine(d, thresholds) : null;
   return `<div class="row density-${density}${selected ? ' selected' : ''}${d.disposition === 'page_now' ? ' is-page' : ''}"
       data-id="${d.id}" tabindex="0" role="button" aria-label="decision ${d.id} ${esc(d.disposition)}">
-    <span class="row-time mono" title="${esc(d.time)} · ${esc(ageStr(d.time))}">${esc(fmtTime(d.time))}</span>
+    <span class="row-time mono" title="${esc(fmtTimeBoth(d.time))} · ${esc(ageStr(d.time))}">${esc(fmtTime(d.time))}</span>
     ${sevChip(d.severity)}
     ${dispChip(d.disposition, d.reason)}
     <span class="row-conf"><span class="mono">${fmtConf(d.confidence)}</span> <span class="mono row-denom">(shadow)</span></span>
@@ -220,18 +230,33 @@ export function decisionRow(d, { flips = {}, density = 'compact', selected = fal
     ${flipBadge}
     ${srcBadge('shadow')}
     ${receipt ? `<span class="row-receipt mono">${esc(receipt)} <span class="receipt-derived">(derived from gate defaults — live thresholds are not exposed by the read API)</span></span>` : ''}
+    ${pinsOff ? '' : pinCellsHtml(d, pins)}
+  </div>`;
+}
+
+/* ---------- contract-drift row (contract.js validation failed) ----------
+ * A decision the frozen contract cannot describe is NEVER rendered as a
+ * decision. It renders as drift: what we got, what the contract demands,
+ * and what to do. Silent rendering would be a lie (P3). */
+export function driftRow(d, errors) {
+  const id = d && d.id != null ? `#${esc(d.id)}` : '#?';
+  return `<div class="row drift" role="alert" aria-label="contract drift on decision ${esc(id)}">
+    <span class="mono drift-msg">[contract drift] ${esc(id)} — not rendered as a decision</span>
+    <span class="mono drift-detail">${(errors || []).map(e => esc(e)).join('<br>')}</span>
+    <span class="mono drift-detail">The platform sent a row the frozen contract (v${esc('1.0.0')}) cannot describe. ` +
+      `Paging is unaffected — this is a display-surface problem, filed against the platform contract.</span>
   </div>`;
 }
 
 /* ---------- detail drawer (river §5 / audit §1 — locked reading order) ---------- */
-export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion = '', flips = {} } = {}) {
+export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion = '', flips = {}, pins = [] } = {}) {
   const pm = d.prob_map || {};
   const triple = (t, name) => t ? `<div class="ev-triple"><span class="mono ev-name">${esc(name)}</span><span class="mono">Choice: <b>${esc(t.choice)}</b> · conf ${fmtConf(t.confidence)}</span><span class="mono ev-probs">${Object.entries(t.probs || {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${esc(k)} ${fmtConf(v)}`).join(' · ')}</span></div>` : '';
   const flip = flips[d.input_sha256];
   const flipHtml = flip && flip.flipped ? `
     <section class="drawer-sec"><h3>Flip timeline</h3>
       <div class="flip-tl">${flip.decisions.map((fd, i) => `
-        <div class="flip-ev"><span class="mono">${esc(fmtTime(fd.time))}</span> ${dispChip(fd.disposition, null).replace(/·[^<]*<\/span>$/, '</span>')} <span class="mono">${fmtConf(fd.confidence)}</span>${i > 0 ? ' <span class="flip-flag mono">← FLIP</span>' : ''}</div>
+        <div class="flip-ev"><span class="mono">${esc(fmtTimeBoth(fd.time))}</span> ${dispChip(fd.disposition, null).replace(/·[^<]*<\/span>$/, '</span>')} <span class="mono">${fmtConf(fd.confidence)}</span>${i > 0 ? ' <span class="flip-flag mono">← FLIP</span>' : ''}</div>
         ${i < flip.decisions.length - 1 ? '<div class="flip-link">│ input identical (' + esc(shortHash(flip.input_sha256)) + ')</div>' : ''}`).join('')}
       </div>
       <p class="drawer-note">Same input, thresholds, and tuner — the Jev answer changed. Measured band: 1.3–2.2% of inputs.</p>
@@ -252,11 +277,16 @@ export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion =
   </section>
   <section class="drawer-sec"><h3>Timeline</h3>
     <div class="tl">
-      <div class="tl-ev"><span class="mono">${esc(fmtTime(d.audit?.received_at || d.time))}</span> alert received</div>
-      <div class="tl-ev"><span class="mono">${esc(fmtTime(d.audit?.created_at || d.time))}</span> gate evaluated → ${esc(DISP_LABEL[d.disposition] || d.disposition)}</div>
+      <div class="tl-ev"><span class="mono">${esc(fmtTimeBoth(d.audit?.received_at || d.time))}</span> alert received</div>
+      <div class="tl-ev"><span class="mono">${esc(fmtTimeBoth(d.audit?.created_at || d.time))}</span> gate evaluated → ${esc(DISP_LABEL[d.disposition] || d.disposition)}</div>
     </div>
   </section>
   ${flipHtml}
+  ${pinnedSectionHtml(d, pins)}
+  <section class="drawer-sec"><h3>Vendor payload</h3>
+    ${d.alert ? renderPayload(d.alert) : payloadEmptyHtml()}
+    <p class="drawer-note">Rendered structurally by the generic payload viewer — it shows the payload's shape, never its meaning. Secret-shaped values are redacted.</p>
+  </section>
   <section class="drawer-sec"><h3>Provenance</h3>
     <div class="prov mono">input&nbsp;&nbsp; ${esc(shortHash(d.input_sha256, 12))}<br>
     dataset ${esc(datasetVersion)}<br>

@@ -2,10 +2,13 @@
  * Reads: GET /api/decisions (+filters), GET /api/decision/<id>, SSE /api/stream.
  * Freedom 2: "See why this paged you — and why the others didn't." */
 import { Data, Stream } from './api.js';
-import { decisionRow, srcBadge, skeletonRows, errorBlock, emptyBlock, gapMarker,
+import { decisionRow, driftRow, srcBadge, skeletonRows, errorBlock, emptyBlock, gapMarker,
          drawerHtml, esc } from './components.js';
+import { validateDecisionSummary, isQueryableField } from './contract.js';
+import { loadPins, savePins, makePin, validatePinDoc, validatePinAgainstSample,
+         resolvePath, exportPins, importPinsJson } from './pins.js';
 import { parseHash, routeHref, stripRiver, fmtInt, SEV_LABEL, DISP_LABEL,
-         DEFAULT_THRESHOLDS, ageStr } from './lib.js';
+         DEFAULT_THRESHOLDS, ageStr, tailState } from './lib.js';
 
 const TEAMS = ['platform', 'network', 'data', 'product_backend', 'security', 'cannot_determine'];
 const SEVS = [['1', 'p1_critical'], ['2', 'p2_high'], ['3', 'p3_medium'], ['4', 'p4_low']];
@@ -30,6 +33,15 @@ export async function renderRiver(root, params, ctx) {
   };
   let rows = [], flips = {}, calBins = null, newestIso = null, apiDown = false, apiMsg = '';
   let pinned = false, pendingNew = 0, selIdx = -1;
+  let pins = loadPins(), pinsOff = false;
+
+  /* The fixed typed decision contract is the renderer’s authority (contract.js).
+   * A row the contract cannot describe renders as drift — never as a decision. */
+  function rowHtml(d, i) {
+    const v = validateDecisionSummary(d);
+    if (!v.ok) return driftRow(d, v.errors);
+    return decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS, pins, pinsOff });
+  }
 
   root.innerHTML = `
   <div class="river-layout">
@@ -50,10 +62,33 @@ export async function renderRiver(root, params, ctx) {
       <div class="rail-sec"><h4>density <span class="rail-keys mono">1·2·3</span></h4><div class="rail-opts" id="f-density">
         ${DENSITIES.map((d, i) => `<button class="opt${f.density === d ? ' on' : ''}" data-v="${d}">${i + 1}</button>`).join('')}
       </div></div>
+      <div class="rail-sec pins-rail"><h4>field pins <span class="rail-keys mono">display only</span></h4>
+        <div id="pins-list"></div>
+        <div class="rail-opts" style="margin-top:6px"><button class="opt" id="pins-toggle" title="one-keypress escape hatch: hide all field pins">pins off</button></div>
+        <details class="pin-form" style="margin-top:8px"><summary class="mono" style="cursor:pointer;color:var(--tx-1)">+ pin a field</summary>
+          <input id="pin-name" placeholder="name — e.g. cluster" aria-label="pin name">
+          <input id="pin-path" placeholder="path — e.g. labels.cluster" aria-label="pin path (dot-separated, from alert)">
+          <input id="pin-integ" placeholder="integration — e.g. prometheus" aria-label="pin integration">
+          <div class="rail-opts" style="margin-top:6px">
+            <button class="opt" id="pin-preview-btn">preview</button>
+            <button class="opt" id="pin-save">save pin</button>
+          </div>
+          <div id="pin-preview" class="pin-preview" hidden></div>
+          <div id="pin-msg"></div>
+        </details>
+        <details style="margin-top:8px"><summary class="mono" style="cursor:pointer;color:var(--tx-1)">export / import</summary>
+          <div class="rail-opts" style="margin:6px 0"><button class="opt" id="pins-export">show JSON</button></div>
+          <textarea id="pins-io" class="mono" rows="4" style="width:100%;background:var(--bg-0);border:1px solid var(--line-0);color:var(--tx-0);border-radius:var(--radius-chip)" placeholder='paste {"pins":[...]} to import'></textarea>
+          <div class="rail-opts" style="margin-top:6px"><button class="opt" id="pins-import">import</button></div>
+          <div id="pins-io-msg"></div>
+        </details>
+        <p class="drawer-note" style="margin-top:8px">Pins are display bindings: they never filter, sort, or recolor the river. Paths are relative to the alert payload.</p>
+      </div>
     </aside>
     <section class="tape-col">
       <div id="filter-tokens" class="filter-tokens"></div>
       <div id="jump-pill" class="jump-pill mono" hidden>▲ <span id="jump-n">0</span> new — jump to live <span class="mono-dim">(Shift+G)</span></div>
+      <div id="tail-banner" class="tail-banner mono" hidden></div>
       <div id="tape" class="tape" tabindex="0" aria-label="decision tape">${skeletonRows(10)}</div>
     </section>
   </div>`;
@@ -101,7 +136,7 @@ export async function renderRiver(root, params, ctx) {
         'hint: last=7d');
       return;
     }
-    tape.innerHTML = rows.map((d, i) => decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS })).join('');
+    tape.innerHTML = rows.map((d, i) => rowHtml(d, i)).join('');
     tape.querySelectorAll('.row[data-id]').forEach(r => {
       r.addEventListener('click', (e) => {
         if (e.target.closest('a,button')) return;
@@ -192,6 +227,74 @@ export async function renderRiver(root, params, ctx) {
   optGroup('f-wins', b => { f.last = b.dataset.v; });
   optGroup('f-density', b => { f.density = b.dataset.v; paintRows(); });
 
+  /* ---------- field pins: the composability mechanism (synthesis §3) ----------
+   * Display-only bindings. The filter grammar (apiParams above) never consults
+   * pins — isQueryableField() in contract.js rejects every pin path by
+   * construction. The "pins off" toggle is the one-keypress 3 AM escape hatch. */
+  function renderPins() {
+    const list = root.querySelector('#pins-list');
+    list.innerHTML = pins.length
+      ? pins.map(p => `<div class="pin-row"><span class="mono">${esc(p.name)}</span>` +
+          `<span class="pin-path mono">${esc(p.path)}</span>` +
+          `<button class="opt" data-del="${esc(p.id)}" title="remove pin" style="margin-left:auto">✕</button></div>`).join('')
+      : '<span class="mono" style="color:var(--tx-dim)">no pins — the river works without them</span>';
+    list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => {
+      pins = savePins(pins.filter(p => p.id !== b.dataset.del));
+      renderPins(); paintRows();
+    }));
+    const tgl = root.querySelector('#pins-toggle');
+    tgl.textContent = pinsOff ? 'pins on' : 'pins off';
+    tgl.classList.toggle('on', pinsOff);
+  }
+  root.querySelector('#pins-toggle').addEventListener('click', () => { pinsOff = !pinsOff; renderPins(); paintRows(); });
+
+  function pinDraft() {
+    return makePin({
+      name: root.querySelector('#pin-name').value,
+      path: root.querySelector('#pin-path').value,
+      integration: root.querySelector('#pin-integ').value,
+      slot: 'river',
+    });
+  }
+  function pinMsg(html, cls) {
+    root.querySelector('#pin-msg').innerHTML = html ? `<div class="${cls}">${html}</div>` : '';
+  }
+  root.querySelector('#pin-preview-btn').addEventListener('click', () => {
+    const p = pinDraft();
+    const v = validatePinDoc(p);
+    if (!v.ok) { pinMsg(esc(v.errors.join('; ')), 'pin-err'); return; }
+    const sample = rows[0];
+    const r = sample ? resolvePath(sample, p.path) : { found: false, why: 'no decisions loaded yet' };
+    const prev = root.querySelector('#pin-preview');
+    prev.hidden = false;
+    prev.innerHTML = r.found
+      ? `<span class="mono">preview on decision #${sample.id}:</span> <span class="mono">${esc(JSON.stringify(r.value).slice(0, 120))}</span>`
+      : `<span class="mono">— <span class="pv-why">${esc(r.why)}</span></span>`;
+    pinMsg('', '');
+  });
+  root.querySelector('#pin-save').addEventListener('click', () => {
+    const p = pinDraft();
+    const v = validatePinAgainstSample(p, rows);
+    if (!v.ok) { pinMsg(esc(v.errors.join('; ')), 'pin-err'); return; }
+    pins = savePins([...pins, p]);
+    renderPins(); paintRows();
+    pinMsg((v.warnings.length ? `<div class="pin-warn">${esc(v.warnings.join('; '))}</div>` : '') +
+      `<div class="mono" style="color:var(--tx-1)">pin saved — display only, never a filter.</div>`, '');
+    root.querySelector('#pin-name').value = ''; root.querySelector('#pin-path').value = ''; root.querySelector('#pin-integ').value = '';
+  });
+  root.querySelector('#pins-export').addEventListener('click', () => {
+    root.querySelector('#pins-io').value = exportPins();
+    root.querySelector('#pins-io-msg').innerHTML = '<div class="mono" style="color:var(--tx-1)">pin JSON above — diffable, PR-able.</div>';
+  });
+  root.querySelector('#pins-import').addEventListener('click', () => {
+    const r = importPinsJson(root.querySelector('#pins-io').value);
+    root.querySelector('#pins-io-msg').innerHTML = r.ok
+      ? `<div class="mono" style="color:var(--tx-1)">imported ${r.imported.length} pin(s).</div>`
+      : `<div class="pin-err">${esc(r.errors.join('; '))}${r.imported.length ? ` — imported ${r.imported.length} valid pin(s).` : ''}</div>`;
+    pins = loadPins(); renderPins(); paintRows();
+  });
+  renderPins();
+
   /* pin-on-scroll: the tape never re-sorts under you */
   tape.addEventListener('scroll', () => {
     const atHead = tape.scrollTop < 40;
@@ -203,12 +306,30 @@ export async function renderRiver(root, params, ctx) {
     tape.scrollTop = 0; paintRows();
   });
 
+  /* A4 live-tail rule (binding): a live tail is allowed only when the filtered
+   * stream is slow enough to read. Above LIVE_TAIL_MAX_PER_SEC the tail pauses
+   * itself WITH a visible reason — the operator narrows the filter to regain it.
+   * The threshold is a Type 2 starting point, tunable with measurement. */
+  let evtTimes = [], tooFast = false;
+  function paintTailBanner(rate) {
+    const b = root.querySelector('#tail-banner');
+    if (tooFast) {
+      b.hidden = false;
+      b.innerHTML = `Too fast to read: ~${Math.round(rate)}/sec match this filter — live tail paused. ` +
+        `<span class="mono-dim">Narrow the filter to regain the tail, or open the audit explorer.</span>`;
+    } else b.hidden = true;
+  }
   /* SSE: prepend to the head; gap markers on drop */
   const stream = new Stream();
   stream.on('decision', (d) => {
     if (rows.some(r => r.id === d.id)) return;
+    evtTimes.push(Date.now());
+    const ts = tailState(evtTimes, Date.now(), tooFast);
+    evtTimes = ts.recent; tooFast = ts.tooFast;
+    paintTailBanner(ts.rate);
     rows.unshift(d); newestIso = d.time;
-    if (pinned) {
+    if (tooFast && rows.length > 500) rows.length = 500; /* bound memory while paused */
+    if (pinned || tooFast) {
       pendingNew++;
       root.querySelector('#jump-n').textContent = pendingNew;
       pill.hidden = false;

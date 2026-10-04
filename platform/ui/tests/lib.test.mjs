@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   SEV_LABEL, DISP_LABEL, fmtInt, fmtPct, ageStr, shortFpr, parseHash, routeHref,
   stripRiver, stripCal, stripSim, stripAudit, stripStart,
+  fmtTimeBoth, tailState, LIVE_TAIL_MAX_PER_SEC,
   gloss80, overconfidentBins, calVerdict, quartilesFromBins, receiptLine,
   verdictSentence, applyThresholds, DEFAULT_THRESHOLDS, policyDiffYaml, branchName,
   startPlan, jevStateFromParams,
@@ -132,4 +133,30 @@ test('drill7: live plan has no degraded copy', () => {
   assert.equal(plan.degraded, false);
   assert.equal(plan.banner, null);
   assert.equal(plan.flipBeat.mode, 'live');
+});
+
+/* A5: UTC + local on every event display, in-band, no exceptions */
+test('fmtTimeBoth', () => {
+  const s = fmtTimeBoth('2026-10-04T12:04:11Z');
+  assert.match(s, /^12:04:11 UTC · \d{2}:\d{2}:\d{2} /);
+  assert.equal(fmtTimeBoth(''), '—');
+  assert.equal(fmtTimeBoth('not-a-date'), '—');
+});
+/* A4 live-tail rule: latches above the threshold, releases below half (hysteresis) */
+test('tailState', () => {
+  assert.equal(LIVE_TAIL_MAX_PER_SEC, 20);
+  const now = 1_000_000;
+  const burst = Array.from({ length: 150 }, (_, i) => now - i * 20); /* 150 events in 3s = 50/s */
+  let st = tailState(burst, now, false);
+  assert.equal(st.tooFast, true, 'latches above 20/s');
+  assert.ok(st.rate > 20);
+  const calm = Array.from({ length: 10 }, (_, i) => now - i * 400); /* 10 events in 4s = 2.5/s */
+  st = tailState(calm, now, true);
+  assert.equal(st.tooFast, false, 'releases below 10/s');
+  const edge = Array.from({ length: 75 }, (_, i) => now - i * 60); /* 75 in 4.5s ≈ 16.7/s */
+  st = tailState(edge, now, true);
+  assert.equal(st.tooFast, true, 'hysteresis: stays paused between 10 and 20/s');
+  st = tailState([], now, false);
+  assert.equal(st.tooFast, false);
+  assert.equal(st.rate, 0);
 });

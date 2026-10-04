@@ -8,6 +8,7 @@ import { renderCal } from './views-cal.js';
 import { renderSim } from './views-sim.js';
 import { renderAudit } from './views-audit.js';
 import { renderStart } from './views-start.js';
+import { loadPins } from './pins.js';
 
 const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, start: renderStart };
 const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', start: 'START' };
@@ -58,7 +59,7 @@ const ctx = {
       if (!b) {
         try { const cal = await Data.getCalibration(d.team); b = cal.data.bins; } catch {}
       }
-      el.drawer.innerHTML = drawerHtml(d, { bins: b, flips, datasetVersion: Data.datasetVersion });
+      el.drawer.innerHTML = drawerHtml(d, { bins: b, flips, datasetVersion: Data.datasetVersion, pins: loadPins() });
       el.drawer.hidden = false;
       el.drawer.querySelector('[data-close]').addEventListener('click', closeDrawer);
       el.drawer.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', () => {
