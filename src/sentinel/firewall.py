@@ -50,7 +50,7 @@ FIREWALL_VERSION = "1.0.0"
 # The adversarial corpus schema + case set this screen is validated against.
 # tests/corpus/manifest.json must carry the same version; the corpus loader
 # fails loudly on mismatch (stale config caught automatically).
-CORPUS_VERSION = "1.0.0"
+CORPUS_VERSION = "1.1.0"
 
 # Detector names (stable vocabulary; appear in reasons and event bodies).
 D_INSTRUCTION = "instruction_phrase"
@@ -69,7 +69,9 @@ SCREENED_FIELDS = ("title", "service", "check", "severity_in", "source")
 LABEL_FIELDS = ("labels",)
 RAW_STRING_KEYS = ("summary", "description", "text", "message", "details")
 
-_MAX_FIELD_CHARS = 4000  # bound work per field; alerts are short by nature
+_MAX_FIELD_CHARS = 4000  # chunk size: bound work per field; alerts are short by nature
+_CHUNK_OVERLAP = 600  # > longest matchable phrase/marker: an injection split
+                      # across a chunk boundary is whole in some chunk
 _MAX_EVIDENCE = 5
 _EVIDENCE_CHARS = 80
 
@@ -147,6 +149,31 @@ def _folded_canon(text: str) -> str:
     return _canon(_fold_confusables(text))
 
 
+def _canon_nospace(text: str) -> str:
+    """De-spaced canonical form. Catches letter-spaced obfuscation:
+    "d.o.n.o.t. p.a.g.e" -> canon "d o n o t p a g e" -> "donotpage",
+    matched against the spaceless phrase forms below (Tripwire-2)."""
+    return _canon(text).replace(" ", "")
+
+
+def _chunks(text: str) -> Iterable[str]:
+    """Overlapping windows over a field. Tripwire-2: truncating at
+    _MAX_FIELD_CHARS let an injection after 4000 chars of padding sail
+    through unflagged while the full text reached the model. Overlapping
+    chunks bound the work per field without a blind spot: any injection
+    shorter than the overlap is fully contained in at least one chunk."""
+    if len(text) <= _MAX_FIELD_CHARS:
+        yield text
+        return
+    start = 0
+    n = len(text)
+    while start < n:
+        yield text[start:start + _MAX_FIELD_CHARS]
+        if start + _MAX_FIELD_CHARS >= n:
+            break
+        start += _MAX_FIELD_CHARS - _CHUNK_OVERLAP
+
+
 def _has_invisible(text: str) -> bool:
     return any(ch in _INVISIBLE for ch in text)
 
@@ -195,6 +222,12 @@ _INSTRUCTION_PHRASES = tuple(_canon(p) for p in (
     "this is a drill",
     "test alert do not",
 ))
+
+# Spaceless phrase forms for the de-spaced canonical match (Tripwire-2:
+# letter-spacing evasion "d.o.n.o.t. p.a.g.e"). Substring-matched like the
+# spaced forms — consistent with the existing aggressive posture; the benign
+# corpus guards the false-positive rate.
+_INSTRUCTION_PHRASES_NOSPACE = tuple(p.replace(" ", "") for p in _INSTRUCTION_PHRASES)
 
 # Fake resolve/ack markers: structural, not bare keywords. "dns resolution
 # failed", "acknowledgement sent", "closed-loop controller" must NOT match —
@@ -283,22 +316,28 @@ class FirewallVerdict:
 
 
 def _iter_field_texts(alert) -> Iterable[tuple[str, str]]:
-    """Yield (field_name, text) for every screened string on the alert."""
+    """Yield (field_name, text) for every screened string on the alert.
+
+    Long fields are yielded as overlapping chunks (see _chunks), never
+    truncated: the model sees the full field, so the screen must too."""
     for name in SCREENED_FIELDS:
         val = getattr(alert, name, None)
         if isinstance(val, str) and val:
-            yield name, val[:_MAX_FIELD_CHARS]
+            for chunk in _chunks(val):
+                yield name, chunk
     labels = getattr(alert, "labels", None)
     if isinstance(labels, dict):
         for key, val in labels.items():
             if isinstance(val, str) and val:
-                yield f"labels.{key}", val[:_MAX_FIELD_CHARS]
+                for chunk in _chunks(val):
+                    yield f"labels.{key}", chunk
     raw = getattr(alert, "raw", None)
     if isinstance(raw, dict):
         for key in RAW_STRING_KEYS:
             val = raw.get(key)
             if isinstance(val, str) and val:
-                yield f"raw.{key}", val[:_MAX_FIELD_CHARS]
+                for chunk in _chunks(val):
+                    yield f"raw.{key}", chunk
 
 
 def screen(alert) -> FirewallVerdict:
@@ -321,8 +360,12 @@ def screen(alert) -> FirewallVerdict:
         fields.append(fname)
         canon = _canon(text)
         folded = _folded_canon(text)
+        # De-spaced forms: letter-spacing evasion ("d.o.n.o.t. p.a.g.e").
+        nospace = _canon_nospace(text)
+        nospace_folded = _folded_canon(text).replace(" ", "")
 
         instr = _instruction_hits(canon)
+        instr_ns = [p for p in _INSTRUCTION_PHRASES_NOSPACE if p and p in nospace]
         resolve = _resolve_hits(text)
         hard_delim = _delimiter_hard_hits(text)
         soft_delim = _delimiter_soft_present(text)
@@ -331,13 +374,15 @@ def screen(alert) -> FirewallVerdict:
         # monitoring fields; folded-only matches prove homoglyph hiding.
         invisible = _has_invisible(text)
         folded_instr = _instruction_hits(folded) if folded != canon else []
+        folded_instr_ns = ([p for p in _INSTRUCTION_PHRASES_NOSPACE if p and p in nospace_folded]
+                           if nospace_folded != nospace else [])
         folded_resolve = _resolve_hits(_fold_confusables(text)) if folded != canon else []
         lookalike = invisible or bool(folded_instr) or bool(folded_resolve)
 
         fired_here: list[str] = []
-        if instr or folded_instr:
+        if instr or folded_instr or instr_ns or folded_instr_ns:
             fired_here.append(D_INSTRUCTION)
-            for p in (instr + folded_instr)[:2]:
+            for p in (instr + folded_instr + instr_ns + folded_instr_ns)[:2]:
                 evidence.append(f"{fname}: {p}")
         if resolve or folded_resolve:
             fired_here.append(D_FAKE_RESOLVE)
