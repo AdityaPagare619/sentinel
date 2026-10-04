@@ -66,7 +66,7 @@ from sentinel.quantized import (
 from sentinel.tuner import fit_r000_class
 
 from tests.helpers import make_alert
-from test_gate import canned, fresh_monitor_for  # reuse the fixture builders
+from tests.test_gate import canned, fresh_monitor_for  # reuse the fixture builders
 
 NOW = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
 PINNED = "jev-1.13.0"
