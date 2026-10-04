@@ -21,13 +21,19 @@ FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
 
 PASS=0; FAIL=0
+LOGDIR="/tmp/sentinel-gate-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOGDIR"
 stage() { # name, command...
   local name="$1"; shift
   echo "── stage: $name ──"
-  if "$@" 2>&1 | tail -5; then
+  # Full output goes to a per-run log (failure evidence must survive);
+  # only the tail is echoed to the report.
+  if "$@" >"$LOGDIR/$name.log" 2>&1; then
+    tail -5 "$LOGDIR/$name.log"
     echo "PASS: $name"; PASS=$((PASS+1))
   else
-    echo "FAIL: $name"; FAIL=$((FAIL+1))
+    tail -20 "$LOGDIR/$name.log"
+    echo "FAIL: $name (full log: $LOGDIR/$name.log)"; FAIL=$((FAIL+1))
   fi
 }
 
@@ -42,7 +48,14 @@ else
   echo "── stage: full-suite ──"
   OUT="$(python3 -m unittest discover tests 2>&1 | grep -E '^(Ran |OK|FAILED)' || true)"
   echo "$OUT"
-  if echo "$OUT" | grep -q '^OK'; then
+  # The verdict is the unittest summary line, anchored exactly: test stdout
+  # itself prints lines starting with "OK" (e.g. "OK: 1 events verified"),
+  # so an unanchored ^OK match green-lights a red suite. FAILED is checked
+  # first and is always red.
+  if echo "$OUT" | grep -q '^FAILED'; then
+    echo "FAIL: full-suite"
+    FAIL=$((FAIL+1))
+  elif echo "$OUT" | grep -q '^OK$'; then
     N=$(echo "$OUT" | grep -oP '^Ran \K[0-9]+' || echo '?')
     echo "PASS: full-suite ($N tests)"
     PASS=$((PASS+1))
