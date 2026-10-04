@@ -83,8 +83,12 @@ class SurrogateSystemOneClient(SystemOneClient):
     never uses; _post_once is overridden wholesale.
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(api_key="surrogate-auth-via-authd", **kwargs)
+    def __init__(self, model="jev-1.13.0", **kwargs):
+        # ADR-015: the demo calls the REAL API, so it pins like production —
+        # the demo floats nothing. Override `model` only to follow a real
+        # re-pin (pinning.json is authoritative).
+        super().__init__(api_key="surrogate-auth-via-authd", model=model,
+                         **kwargs)
 
     def _post_once(self, url, data):
         req = urllib.request.Request(

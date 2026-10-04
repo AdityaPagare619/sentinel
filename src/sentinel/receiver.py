@@ -681,6 +681,29 @@ def _as_int(value):
 # ------------------------------------------------------------------ entrypoint
 
 
+def _model_pin_from_env():
+    """Read the ADR-015 model pin from SENTINEL_FRESHNESS_BUNDLE/pinning.json.
+
+    Returns the pinned versioned id, or None when the bundle is unset or
+    the pin is unreadable — the caller degrades explicitly (loud warning,
+    floating opt-out, drift detection inactive), never silently.
+    """
+    bundle_dir = os.environ.get("SENTINEL_FRESHNESS_BUNDLE")
+    if not bundle_dir:
+        return None
+    try:
+        with open(os.path.join(bundle_dir, "pinning.json"),
+                  "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        pin = str(data.get("pinned_model_version", "") or "").strip()
+        return pin or None
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(
+            f"[sentinel] WARNING: pinning.json unreadable ({exc}) — "
+            "treating the model pin as missing (ADR-015).\n")
+        return None
+
+
 def _freshness_monitor_from_env():
     """Boot the V1 freshness validator from SENTINEL_FRESHNESS_BUNDLE.
 
@@ -731,6 +754,13 @@ def build_pipeline_from_env(policy=None,
     Sentinel never supervises paging with an unvalidated policy.
     """
     api_key = os.environ.get("TYPESAFE_API_KEY")
+    # ADR-015 (D2): the model pin comes from the config bundle's
+    # pinning.json — the SAME authoritative pin the gate asserts on
+    # responses. With a pin, the client sends the pinned id on the wire
+    # (no floating "jev-latest"). Without a pin the client refuses the
+    # floating default — the opt-out below is explicit and loudly warned,
+    # never a quiet default.
+    pinned_model = _model_pin_from_env()
     if os.environ.get("SENTINEL_MOCK", "0") == "1":
         # Local dev/demo: mock client with no scripted answers. Every decide()
         # raises JevError inside the mock, which the gate converts to
@@ -741,8 +771,19 @@ def build_pipeline_from_env(policy=None,
         raise SystemExit(
             "TYPESAFE_API_KEY is not set. Export it before starting the receiver "
             "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
+    elif pinned_model:
+        client = SystemOneClient(api_key=api_key, model=pinned_model)
+        sys.stderr.write(
+            f"[sentinel] Jev model pinned: {pinned_model} (ADR-015); the "
+            "client never floats 'jev-latest'.\n")
     else:
-        client = SystemOneClient(api_key=api_key)
+        sys.stderr.write(
+            "[sentinel] WARNING: no model pin available (SENTINEL_FRESHNESS_BUNDLE "
+            "unset or pinning.json unreadable) — the Jev client floats "
+            "'jev-latest' as an EXPLICIT, loudly-warned opt-out (ADR-015); "
+            "model_drift detection is INACTIVE and a silent vendor remap "
+            "will NOT be caught. Set the bundle before cutover.\n")
+        client = SystemOneClient(api_key=api_key, allow_floating_model=True)
     if policy is None:
         raise SystemExit(
             "no validated policy config: refusing to start without one "
@@ -787,7 +828,8 @@ def build_pipeline_from_env(policy=None,
     freshness_monitor = _freshness_monitor_from_env()
     gate = Gate(client, policy.thresholds, set(policy.allowlist), audit,
                 shadow=shadow, policy_gate=policy_gate,
-                freshness_monitor=freshness_monitor)
+                freshness_monitor=freshness_monitor,
+                pinned_model=pinned_model)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
@@ -807,12 +849,14 @@ def build_pipeline_from_env(policy=None,
     pipeline.shadow_pipeline = build_shadow_pipeline_from_env(
         client=client, thresholds=policy.thresholds,
         allowlist=policy.allowlist, audit=audit,
-        freshness_monitor=freshness_monitor)
+        freshness_monitor=freshness_monitor,
+        pinned_model=pinned_model)
     return pipeline
 
 
 def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
-                                   audit, freshness_monitor=None
+                                   audit, freshness_monitor=None,
+                                   pinned_model=None
                                    ) -> ShadowPipeline | None:
     """Stage-0 read-only tap (design 06 §a). None unless SENTINEL_SHADOW_TAP=1.
 
@@ -832,6 +876,7 @@ def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
     # would-be verdicts evaluate identical policy state to production.
     shadow_gate = Gate(client, thresholds, set(allowlist or []), audit,
                        shadow=True, freshness_monitor=freshness_monitor,
+                       pinned_model=pinned_model,
                        policy_gate=PolicyGate(os.environ.get(
                            "SENTINEL_POLICY_STATE", "./policy-state.json")))
     return ShadowPipeline(gate=shadow_gate, correlator=Correlator(),

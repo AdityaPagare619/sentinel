@@ -52,6 +52,7 @@ EVENT_TYPES = frozenset({
     "decision_requested",
     "decision_made",
     "shadow_decision",
+    "model_drift",          # ADR-015 (D2): response.model != pinned model
     "forward_confirmed",
     "forward_failed",
     "flip_observed",
@@ -83,6 +84,12 @@ _BODY_REQUIRED = {
     "decision_made": ("disposition", "budget_outcome", "lock_evaluation",
                       "freshness", "threshold_counterfactual", "links"),
     "shadow_decision": ("links",),
+    # ADR-015 (D2): the named drift event. The links block lets the
+    # dispatcher join the drift to its sibling decision_made row; the
+    # phase names whether the hot path (gate) or the detached late answer
+    # observed the drift.
+    "model_drift": ("input_sha256", "expected_model", "observed_model",
+                    "decision_phase", "links"),
     "forward_confirmed": ("outbox_id", "channel", "attempt_no",
                           "vendor_status", "latency_ms"),
     "forward_failed": ("outbox_id", "channel", "attempt_no", "error_class"),

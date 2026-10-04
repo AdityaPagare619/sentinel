@@ -37,7 +37,10 @@ class WedgedThenDeadClient(SystemOneClient):
     """Hangs forever until kill() is called, then raises JevTimeout."""
 
     def __init__(self):
-        super().__init__(api_key="drill-key", base_url="http://drill.invalid")
+        # ADR-015: drills never float silently — explicit, loudly-warned
+        # opt-out (drill only; the client wedges before any answer).
+        super().__init__(api_key="drill-key", base_url="http://drill.invalid",
+                         allow_floating_model=True)
         self.dead = False
 
     def kill(self):

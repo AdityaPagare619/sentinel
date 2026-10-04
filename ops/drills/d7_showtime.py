@@ -61,7 +61,11 @@ def pd_payload(i):
 def phase1_pipeline(db, fwd_log):
     """Jev unreachable -> every alert still pages. Returns (ok, detail)."""
     client = SystemOneClient(api_key="dummy",
-                             base_url="http://127.0.0.1:9")  # dead
+                             base_url="http://127.0.0.1:9",  # dead
+                             # ADR-015: Jev-unreachable drill — the client
+                             # never gets an answer, so the pin is moot;
+                             # explicit, loudly-warned opt-out (drill only).
+                             allow_floating_model=True)
     audit = AuditLog(db)
     gate = Gate(client, Thresholds(), set(), audit)
     fwd = Forwarder(
@@ -109,7 +113,10 @@ def phase2_flipbeat():
 
     class DeadClient(SystemOneClient):
         def __init__(self):
-            super().__init__(api_key="x", base_url="http://127.0.0.1:9")
+            # ADR-015: dead-client drill — explicit, loudly-warned
+            # opt-out (drill only; the client never answers).
+            super().__init__(api_key="x", base_url="http://127.0.0.1:9",
+                             allow_floating_model=True)
 
     import glob
     recs = sorted(glob.glob(

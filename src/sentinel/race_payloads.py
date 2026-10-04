@@ -189,3 +189,60 @@ def shadow_decision_payload(*, alert, input_sha256: str,
         },
     }
     return env
+
+# ---------------------------------------------------------------------------
+# ADR-015 (D2) — model_drift event payloads.
+#
+# The hot-path invariant: the Jev response's ``model`` MUST equal the pinned
+# model id (pinning.json's pinned_model_version). A mismatch is a
+# supply-chain event on the safety case — the vendor remapped the model
+# under fixed thresholds — and Vault's ratification condition demands the
+# log distinguish "vendor moved" from "we forgot to re-fit" (lock-1
+# staleness). ``model_drift`` is that distinction: a NAMED event type,
+# event-logged (not a stderr line nobody pages on), emitted alongside the
+# fail-toward-human passthrough that pages the alert.
+# ---------------------------------------------------------------------------
+
+def drift_lock_evaluation(expected_model: str, observed_model) -> dict:
+    """Lock verdicts for a drifted answer: all fail, named.
+
+    A drifted answer is untrusted evidence — the probability mapping may
+    have changed under fixed thresholds — so the value locks are never
+    evaluated against it. The detail string names both ids so a 3 AM
+    postmortem reads the drift off the row, not the prose.
+    """
+    detail = (
+        f"response.model={observed_model!r} != pinned {expected_model!r} "
+        "(ADR-015) — answer is untrusted evidence; locks not evaluated"
+    )
+    return {
+        "prob": {"verdict": "fail", "detail": detail},
+        "conf": {"verdict": "fail", "detail": detail},
+        "allowlist": {"verdict": "fail", "detail": detail},
+    }
+
+
+def model_drift_payload(*, alert, input_sha256: str,
+                        expected_model: str, observed_model,
+                        decision_phase: str, latency_ms=None) -> dict:
+    """Build the named ``model_drift`` event (ADR-015, D2).
+
+    ``decision_phase`` is "gate" (drift caught on the hot path — the alert
+    pages as passthrough with reason "model_drift") or "late_answer"
+    (drift in a detached late answer — the decision already went to
+    passthrough; the event is the record, it never re-opens anything).
+    """
+    env = _envelope("model_drift", alert, None)
+    env["body"] = {
+        "input_sha256": input_sha256,
+        "fingerprint": alert.fingerprint,
+        "expected_model": expected_model,
+        "observed_model": observed_model,
+        "decision_phase": decision_phase,
+        "latency_ms": latency_ms,
+        "links": {
+            # dispatcher fills once the sibling decision_made is sequenced
+            "decision_made_seq": None,
+        },
+    }
+    return env

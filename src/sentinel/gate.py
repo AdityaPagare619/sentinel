@@ -57,8 +57,9 @@ from .freshness import (LOCK1_CALIBRATION, lock1_fallback_offered,
 from .models import Alert, DecisionRecord, Disposition, Thresholds
 from .questions import build_questions
 from .quantized import (AllowlistEntry, FitStore, leg1_prob_lock)
-from .race_payloads import (decision_made_payload, empty_lock_evaluation,
-                            lock_evaluation, shadow_decision_payload)
+from .race_payloads import (decision_made_payload, drift_lock_evaluation,
+                            empty_lock_evaluation, lock_evaluation,
+                            model_drift_payload, shadow_decision_payload)
 from .state import input_sha256
 from .storm_digest import (storm_digest_disposition, storm_root_cause_payload,
                            storm_root_cause_questions)
@@ -227,6 +228,12 @@ def _freshness_legs(report, fingerprint: str | None,
     return (len(reasons) == 0), reasons
 
 
+# ADR-015 (D2): the no-pin boot warning fires once per process — the gate
+# is constructed once in production, but tests build many; loudness is
+# preserved where it matters (the single production boot).
+_PIN_WARNED = False
+
+
 def _default_watchdog_page(rate: float, n: int) -> None:
     """Placeholder operator page: loud stderr until the engine owns an
     operator-paging channel (platform tier). Never silent."""
@@ -289,7 +296,22 @@ class Gate:
             else _default_watchdog_page)
         # ADR-013 quantized prob lock (design/fixes/04-quantized-gate.md).
         self.fit_store = fit_store
+        # ADR-015 (D2): the hot-path pin — asserted against every Jev
+        # response on the answered path. None ⇒ drift detection INACTIVE:
+        # the gate cannot tell "vendor moved" from "no pin wired", so it
+        # says so loudly at boot instead of pretending. Wire
+        # pinning.json's pinned_model_version via build_pipeline_from_env.
         self.pinned_model = pinned_model
+        if pinned_model is None:
+            global _PIN_WARNED
+            if not _PIN_WARNED:
+                _PIN_WARNED = True
+                sys.stderr.write(
+                    "[sentinel] WARNING: no pinned_model wired to the gate — "
+                    "model_drift detection is INACTIVE; the client-level "
+                    "floating refusal still applies, but a response from an "
+                    "unexpected model will not fire a model_drift event. Wire "
+                    "pinning.json's pinned_model_version (ADR-015).\n")
         self.org = org
         self.clock = clock  # () -> aware datetime; tests inject a fixed now
         self.policy_gate = policy_gate
@@ -415,6 +437,54 @@ class Gate:
             team_answer=answers.get("owning_team"),
             latency_ms=getattr(resp, "latency_ms", None)))
 
+    # ------------------------------------------------- ADR-015 model drift
+
+    def _model_drift(self, resp) -> "tuple[str, object] | None":
+        """Check the hot-path pin against a Jev response (ADR-015, D2).
+
+        Returns (expected, observed) on mismatch, None when the response
+        matches the pin — or when no pin is wired (drift detection is
+        inactive; the boot warning said so). A response that declares NO
+        model (observed None) is a mismatch: undeclared evidence is
+        untrusted evidence — uncertainty pages (Law 7).
+        """
+        if self.pinned_model is None:
+            return None
+        observed = getattr(resp, "model", None)
+        if observed == self.pinned_model:
+            return None
+        return (self.pinned_model, observed)
+
+    def _on_model_drift(self, alert, in_sha, outcome, budget_ms, res, resp,
+                        drift: "tuple[str, object]"):
+        """ADR-015: the vendor answered from a model that is not the pin.
+
+        Fail toward the human: the answer is untrusted evidence (the
+        probability mapping may have changed under fixed thresholds), so
+        the verdict is passthrough — the alert PAGES, drift never
+        suppresses — and the named model_drift event fires so the
+        postmortem reads "vendor moved", not "lock-1 staleness". The
+        decision record still carries the observed model for forensics.
+        Never raises: the company-ending bug is dropping the page.
+        """
+        expected, observed = drift
+        latency = res.latency_ms if res is not None else 0.0
+        self._emit(model_drift_payload(
+            alert=alert, input_sha256=in_sha,
+            expected_model=expected, observed_model=observed,
+            decision_phase="gate", latency_ms=latency))
+        disp = Disposition(action="passthrough", reason="model_drift",
+                           team=None, confidence=None, latency_ms=latency)
+        self._emit(decision_made_payload(
+            alert=alert, input_sha256=in_sha,
+            disposition=disp.action,
+            budget_outcome=race.ANSWERED_IN_TIME, budget_ms=budget_ms,
+            jev_model=observed,
+            latency_ms=latency,
+            lock_evaluation=drift_lock_evaluation(expected, observed)))
+        return disp, {"jev_model": observed, "q_severity": None,
+                      "q_team": None, "q_disposition": None}
+
     # -------------------------------------------------------------- internals
 
     def _emit(self, payload: dict) -> None:
@@ -539,6 +609,13 @@ class Gate:
             return disp, _empty_answers()
 
         resp = res.response
+        # ADR-015 (D2): hot-path pin assertion — the FIRST thing checked
+        # on every answered response. A drifted answer is untrusted
+        # evidence and never reaches the policy kernel.
+        drift = self._model_drift(resp)
+        if drift is not None:
+            return self._on_model_drift(alert, in_sha, outcome, budget_ms,
+                                        res, resp, drift)
         answers = resp.answers or {}
         q_sev = answers.get("severity")
         q_team = answers.get("owning_team")
@@ -639,6 +716,31 @@ class Gate:
         locks = None
         if late.response is not None:
             resp = late.response
+            # ADR-015 (D2): drift is checked on the late path too — the
+            # decision already went to passthrough (the timer won), so a
+            # drifted late answer cannot re-open it, but it IS vendor
+            # evidence and the named event must still fire: the postmortem
+            # needs "vendor moved" distinguished from "we forgot to
+            # re-fit" on every path, not just the answered one.
+            drift = self._model_drift(resp)
+            if drift is not None:
+                expected, observed = drift
+                self._emit(model_drift_payload(
+                    alert=alert, input_sha256=late.input_sha256,
+                    expected_model=expected, observed_model=observed,
+                    decision_phase="late_answer",
+                    latency_ms=late.latency_ms))
+                self._emit(shadow_decision_payload(
+                    alert=alert, input_sha256=late.input_sha256,
+                    episode_id=late.episode_id, jev_model=observed,
+                    latency_ms=late.latency_ms,
+                    budget_ms=late.budget_ms,
+                    timer_fired_at_ms=late.timer_fired_at_ms,
+                    shadow_disposition="passthrough",
+                    would_have_suppressed=False,
+                    lock_evaluation=drift_lock_evaluation(expected, observed),
+                    error_class="model_drift"))
+                return
             jev_model = getattr(resp, "model", None)
             answers = resp.answers or {}
             q_sev = answers.get("severity")
