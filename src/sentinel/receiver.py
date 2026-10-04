@@ -67,6 +67,7 @@ from .correlator import Correlator, fingerprint_for, fingerprint_of
 from .forwarder import Forwarder
 from .gate import Gate
 from .health import HealthMonitor
+from .integrations import resolve_jev_key
 from .models import Alert, Thresholds
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
@@ -1050,7 +1051,13 @@ def build_pipeline_from_env(policy=None,
     (or a reload). Fail-closed: without one we refuse to build a pipeline —
     Sentinel never supervises paging with an unvalidated policy.
     """
-    api_key = os.environ.get("TYPESAFE_API_KEY")
+    # BYOK: the operator's own Jev key (Integrations settings) takes
+    # precedence over the platform key. The source is safe to log; the
+    # value never is.
+    api_key, jev_source = resolve_jev_key()
+    if jev_source == "user":
+        sys.stderr.write("[sentinel] Jev key: operator-provided override "
+                         "from Integrations settings.\n")
     # ADR-015 (D2): the model pin comes from the config bundle's
     # pinning.json — the SAME authoritative pin the gate asserts on
     # responses. With a pin, the client sends the pinned id on the wire

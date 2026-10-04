@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .eventlog import EventLog, EventLogError, utcnow_iso
+from .integrations import resolve_paging_key, simulated_paging
 from .pd_sender import (
     DedupKeyInvalid,
     PagerDutyClient,
@@ -754,9 +755,36 @@ class DurableForwarder:
         outcome: dict = {"pd_outcome": None, "spill": None}
         dedup_key = (f"sentinel/{self.config.env}/degraded/"
                      f"{payload.get('kind', 'unknown')}/{_hour_bucket()}")
+        # BYOK simulated mode: absorb even the standby path — a degraded
+        # page must still be honestly labeled.
+        if simulated_paging():
+            _k, _src = resolve_paging_key()
+            print(f"[sentinel] SIMULATED PAGE action=degraded-page "
+                  f"dedup={dedup_key} key_source={_src} reason={reason} "
+                  f"(simulated paging is ON — nothing was sent to PagerDuty)",
+                  file=sys.stderr)
+            outcome["pd_outcome"] = "simulated"
+            outcome["simulated"] = True
+            if self.config.spill_dir:
+                outcome["spill"] = write_spill(self.config.spill_dir, {
+                    "kind": payload.get("kind", "unknown"),
+                    "alert_id": payload.get("alert_id", "degraded"),
+                    "dedup_key": dedup_key,
+                    "simulated": True,
+                    "reason": reason,
+                    "pd_outcome": "simulated",
+                })
+            return outcome
         try:
-            key = resolve_routing_key(self.config.control_routing_key_ref,
-                                      self.config.secret_mapping)
+            # BYOK: the operator's own key first (their pager), then the
+            # control-plane ref. The key value never enters this record.
+            ukey, usource = resolve_paging_key()
+            if ukey is not None:
+                key, key_source = ukey, f"user:{usource}"
+            else:
+                key = resolve_routing_key(self.config.control_routing_key_ref,
+                                          self.config.secret_mapping)
+                key_source = "control-ref"
             summary = str(payload.get("summary") or payload.get("detail")
                           or payload.get("kind") or "sentinel degraded page")
             event = {
@@ -866,14 +894,20 @@ class ForwardResult:
     error: str | None
     action: str               # the disposition action this forward served
     dedup_key: str | None = None
+    simulated: bool = False    # True when simulated paging absorbed the send
 
 
 class Forwarder:
     def __init__(self, pd_events_url: str = "https://events.pagerduty.com/v2/enqueue",
-                 timeout_s: float = 5.0, default_routing_key: str | None = None):
+                 timeout_s: float = 5.0, default_routing_key: str | None = None,
+                 key_resolver=None):
         self.pd_events_url = pd_events_url
         self.timeout_s = timeout_s
         self.default_routing_key = default_routing_key
+        # key_resolver: () -> (key|None, source). Per-decision resolution:
+        # user store → ctor default → env → unconfigured. The source is safe
+        # to log; the key is NEVER logged (see integrations.redact).
+        self._key_resolver = key_resolver
         self.metrics: dict = {
             "forwarded": 0,   # POSTs accepted (2xx)
             "suppressed": 0,  # suppress dispositions: intentionally not forwarded
@@ -884,7 +918,25 @@ class Forwarder:
             # model-driven suppressions happened.
             "folded": 0,
             "errors": 0,      # forward attempts that failed
+            "simulated": 0,   # pages absorbed by simulated mode (never sent)
         }
+
+    # ------------------------------------------------------- key resolution
+    def _resolve_key(self) -> tuple[str | None, str]:
+        """Per-decision routing-key resolution (BYOK lane).
+
+        Order: explicit key_resolver → user integrations store →
+        constructor default → PD_ROUTING_KEY env → unconfigured.
+        Returns (key_or_None, source); the source is safe to log.
+        """
+        if self._key_resolver is not None:
+            return self._key_resolver()
+        key, source = resolve_paging_key()
+        if key:
+            return key, source
+        if self.default_routing_key:
+            return self.default_routing_key, "ctor"
+        return None, "unconfigured"
 
     # ------------------------------------------------------------------ API
 
@@ -901,6 +953,12 @@ class Forwarder:
                 return ForwardResult(forwarded=False, status_code=None,
                                      error=None, action=action,
                                      dedup_key=_dedup_key_of(alert))
+            # BYOK simulated mode: absorb BEFORE key resolution — a simulated
+            # page needs no key (that's the point of the showcase), and it is
+            # always labeled, never silent.
+            if simulated_paging():
+                return self._simulated_send(action, _dedup_key_of(alert),
+                                            alert.alert_id)
             if action == "page_business_hours":
                 body = self._business_hours_body(alert)
             elif _is_pd_shaped(alert) and raw_bytes is not None:
@@ -908,11 +966,15 @@ class Forwarder:
                 body = raw_bytes
             else:
                 # Non-PD-shaped alert (or no bytes retained): build the PD
-                # trigger event, injecting the routing key.
-                event = _pd_event_for(alert, self.default_routing_key)
+                # trigger event, injecting the routing key resolved
+                # PER DECISION (BYOK: user store → ctor/env → unconfigured).
+                key, _source = self._resolve_key()
+                event = _pd_event_for(alert, key)
                 if event is None:
                     raise ValueError(
-                        "no routing key available for page_now/passthrough")
+                        "no routing key configured — set one in Integrations "
+                        "(your PagerDuty key), PD_ROUTING_KEY env, or enable "
+                        "simulated paging")
                 body = json.dumps(event, separators=(",", ":")).encode("utf-8")
             return self._post(body, action, _dedup_key_of(alert),
                               alert_id=alert.alert_id)
@@ -930,9 +992,10 @@ class Forwarder:
     # -------------------------------------------------------------- internals
 
     def _business_hours_body(self, alert: Alert) -> bytes:
-        payload = _pd_event_for(alert, self.default_routing_key)
+        key, _source = self._resolve_key()
+        payload = _pd_event_for(alert, key)
         if payload is None:
-            raise ValueError("no routing key available for business-hours queue")
+            raise ValueError("no routing key configured for business-hours queue")
         inner = payload.setdefault("payload", {})
         inner["severity"] = "warning"
         details = inner.setdefault("custom_details", {})
@@ -942,6 +1005,11 @@ class Forwarder:
 
     def _post(self, body: bytes, action: str, dedup_key: str | None,
               alert_id: str) -> ForwardResult:
+        # BYOK simulated mode: absorb the send — LOUDLY labeled, never
+        # silent. The honesty law (P3): a simulated page must be visually
+        # distinct from a real one everywhere it renders.
+        if simulated_paging():
+            return self._simulated_send(action, dedup_key, alert_id)
         req = _urllib_request.Request(
             self.pd_events_url, data=body, method="POST",
             headers={"Content-Type": "application/json",
@@ -962,6 +1030,22 @@ class Forwarder:
         return self._fail(action, dedup_key, alert_id,
                           RuntimeError(f"unexpected status {status}"),
                           status_code=status)
+
+    def _simulated_send(self, action: str, dedup_key: str | None,
+                        alert_id: str) -> ForwardResult:
+        """Absorb a page in simulated mode: logged, never sent.
+
+        The record carries key_source (safe) — never the key. Callers and
+        the UI must render simulated pages as distinct from real ones.
+        """
+        _key, key_source = self._resolve_key()
+        self.metrics["simulated"] = self.metrics.get("simulated", 0) + 1
+        print(f"[sentinel] SIMULATED PAGE action={action} alert={alert_id} "
+              f"dedup={dedup_key} key_source={key_source} "
+              f"(simulated paging is ON — nothing was sent to PagerDuty)",
+              file=sys.stderr)
+        return ForwardResult(forwarded=True, status_code=None, error=None,
+                             action=action, dedup_key=dedup_key, simulated=True)
 
     def _fail(self, action: str, dedup_key: str | None, alert_id: str,
               exc: BaseException, status_code: int | None = None) -> ForwardResult:
