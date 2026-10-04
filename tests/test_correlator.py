@@ -159,6 +159,9 @@ class TestStorm(unittest.TestCase):
 
 
 class TestChangeWindow(unittest.TestCase):
+    # NOTE (ADR-001 / DR-13): change-window queuing applies to non-urgent
+    # alerts only. P1/P2 (critical/high) bypass it — these tests use
+    # severity="warning" so they exercise the queuing path itself.
     def _windows(self):
         return [{"service": "web",
                  "start": "2026-10-02T11:00:00+00:00",
@@ -166,12 +169,12 @@ class TestChangeWindow(unittest.TestCase):
 
     def test_change_window_match(self):
         c = Correlator(change_windows=self._windows(), clock=FakeClock())
-        r = c.ingest(make_alert())  # received_at 12:00 UTC, service web
+        r = c.ingest(make_alert(severity="warning"))  # received_at 12:00 UTC, service web
         self.assertEqual(r.kind, "change_window")
 
     def test_change_window_service_mismatch(self):
         c = Correlator(change_windows=self._windows(), clock=FakeClock())
-        r = c.ingest(make_alert(service="db", alert_id="b1"))
+        r = c.ingest(make_alert(service="db", alert_id="b1", severity="warning"))
         self.assertEqual(r.kind, "new")
 
     def test_change_window_time_mismatch(self):
@@ -179,7 +182,7 @@ class TestChangeWindow(unittest.TestCase):
                     "start": "2026-10-02T14:00:00+00:00",
                     "end": "2026-10-02T15:00:00+00:00"}]
         c = Correlator(change_windows=windows, clock=FakeClock())
-        r = c.ingest(make_alert())
+        r = c.ingest(make_alert(severity="warning"))
         self.assertEqual(r.kind, "new")
 
     def test_change_window_wildcard_service(self):
@@ -187,13 +190,13 @@ class TestChangeWindow(unittest.TestCase):
                     "start": "2026-10-02T11:00:00+00:00",
                     "end": "2026-10-02T13:00:00+00:00"}]
         c = Correlator(change_windows=windows, clock=FakeClock())
-        r = c.ingest(make_alert(service="anything", alert_id="w1"))
+        r = c.ingest(make_alert(service="anything", alert_id="w1", severity="warning"))
         self.assertEqual(r.kind, "change_window")
 
     def test_bad_change_window_config_fails_open(self):
         windows = [{"service": "web", "start": "not-a-time", "end": "also-bad"}]
         c = Correlator(change_windows=windows, clock=FakeClock())
-        r = c.ingest(make_alert())
+        r = c.ingest(make_alert(severity="warning"))
         self.assertEqual(r.kind, "new")
 
 
