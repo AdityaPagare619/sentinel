@@ -28,8 +28,13 @@ instrument, not a production paging path.
 * **Live SSE is polling-only here.** Serverless functions have no
   long-lived connections, so `/api/stream` answers `501 stream_unsupported`;
   the UI degrades to its 30-second polling loop (its designed fallback).
-* **Nothing here can page anyone.** There is no paging receiver, no
-  PagerDuty routing key, and no Jev key on this deployment. It is
-  physically incapable of sending a page.
+* **Simulated paging is ON by default here** (`SENTINEL_SIMULATED_PAGING=1`).
+  Nothing here can page anyone: there is no paging receiver and no stored
+  key. The Integrations screen (KEYS) is reachable — you can paste a key
+  and hit "Send test page", which uses it for that one request only and
+  never stores it. Serverless functions have no writable disk, so keys
+  cannot persist across invocations: the settings API answers
+  `501 persistence_unavailable` on writes here, and the UI says so in-band
+  instead of pretending to save.
 
 Source: https://github.com/AdityaPagare619/sentinel
