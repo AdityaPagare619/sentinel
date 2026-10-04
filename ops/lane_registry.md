@@ -28,6 +28,7 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/remove-ci` | Petu (coordinator) | done (merged PR #20) | removed .github/workflows/ per Aditya 13:42 order; METHODOLOGY.md gate → local tests | `squash-merge` |
 | `lane/d7-history-provenance` | Builder D7 | pending review (PR #72) | design D7: 72h single-clock history provenance, label-pipeline staleness SLO with paging, novelty shadow-first | `b0a3d62` |
 | `lane/d5-corroboration` | Builder D5 | in flight | D5/ADR-019: corroboration leg in the live suppress conjunction; versioned/audited/two-person silence floor; strict-signature resolve path; freshness on evidence. Holds the gate registry (src/sentinel/gate.py) until PR merges; D9 follows | — |
+| `lane/d10-resolve-wiring` | Build coordinator (D10 wiring) | pending review | D10 R9 fix: wire resolve_episode into production — signed PD resolve/ack claims on /v2/enqueue close episodes (verified_resolve, silence-direction fail-closed in every mode); POST /episodes/resolve operator path (operator_resolve, bearer-token required); every close event-logged (episode_resolved); 18 new tests, 741 green | — |
 
 ## Rules
 

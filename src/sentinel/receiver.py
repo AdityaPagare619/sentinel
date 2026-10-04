@@ -7,7 +7,13 @@ Stdlib ThreadingHTTPServer. Pipeline per request:
   * The receiver never returns 5xx for a triage failure: every step is wrapped
     and the last resort is forwarding the original bytes.
   * Non-"trigger" PD event_actions (ack/resolve) are relayed unchanged,
-    not triaged.
+    not triaged. A SIGNED resolve/acknowledge claim additionally closes the
+    matching episode (resolve_episode, reason="verified_resolve") — unsigned
+    claims never close (D10 wiring; the silence direction is fail-closed in
+    every mode).
+  * POST /episodes/resolve: the operator close path (reason=
+    "operator_resolve"), bearer-token authenticated (SENTINEL_HEALTH_TOKEN,
+    required even when unset). Every close is event-logged.
 
 Run:  PYTHONPATH=src python -m sentinel.receiver --port 8080
 Env:  TYPESAFE_API_KEY (required, unless SENTINEL_MOCK=1),
@@ -69,6 +75,12 @@ from .state import build_state
 MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_INFLIGHT = 64  # alert-ingress admission bound (503, never 429)
 
+# Bound on the Pipeline's dedup_key -> fingerprint hint map (D10 wiring).
+# On overflow the oldest entries are evicted: a lost hint only turns a
+# legitimate resolve into a logged no-op (the episode stays open), never
+# into a wrong close.
+_DEDUP_FP_CAP = 8192
+
 # ADR-005 (D11): the replay bound. A captured timestamp-less HMAC is
 # replayable FOREVER; binding the MAC to a timestamp and requiring
 # |now - ts| <= this window bounds the replay window to 5 minutes.
@@ -79,6 +91,49 @@ SIGNATURE_MAX_SKEW_S = 300
 SIGNATURE_HEADER = "X-Sentinel-Signature"
 TIMESTAMP_HEADER = "X-Sentinel-Timestamp"
 ONBOARDING_ENV = "SENTINEL_WEBHOOK_ONBOARDING"
+
+
+# D10 wiring (lane/d10-resolve-wiring): the canonical webhook-signature check
+# as a pure function, so both the generic-webhook route (via the handler)
+# and the PD resolve-claim path (via the Pipeline, which has no handler)
+# verify against the SAME scheme. Returns None when the delivery verifies,
+# otherwise a terse reason code. Pure: no logging, no metrics — callers own
+# their side effects.
+def _webhook_sig_failure_reason(secret, onboarding, headers, body: bytes):
+    """None when the delivery verifies; otherwise a terse reason code."""
+    if not secret:
+        # Empty secret: production refuses (startup already refuses too;
+        # this is defense-in-depth for ad-hoc constructions). Onboarding
+        # may fail open — the caller logs it loudly.
+        return "no_secret" if onboarding else "no_secret_prod"
+    sig = headers.get(SIGNATURE_HEADER)
+    if not sig:
+        return "no_signature" if onboarding else "missing_signature"
+    if not sig.startswith("sha256="):
+        return "bad_signature_format"
+    presented = sig[len("sha256="):]
+    ts_raw = headers.get(TIMESTAMP_HEADER)
+    if ts_raw is not None:
+        # Timestamped scheme: MAC binds timestamp to the raw body.
+        try:
+            ts = int(ts_raw.strip())
+        except (ValueError, AttributeError):
+            return "bad_timestamp"
+        if abs(time.time() - ts) > SIGNATURE_MAX_SKEW_S:
+            return "stale_timestamp"
+        signed = str(ts).encode("ascii") + b"." + body
+        expected = hmac.new(secret.encode("utf-8"), signed,
+                            hashlib.sha256).hexdigest()
+        return None if hmac.compare_digest(presented, expected) \
+            else "bad_mac"
+    # Legacy timestamp-less scheme (HMAC over raw body only): indefinite
+    # replay window — rejected in production; onboarding accepts it loudly
+    # so migrating senders don't go dark mid-cutover.
+    expected = hmac.new(secret.encode("utf-8"), body,
+                        hashlib.sha256).hexdigest()
+    if hmac.compare_digest(presented, expected):
+        return "legacy_signature" if onboarding else "legacy_unsigned_ts"
+    return "bad_mac"
 
 
 class Unparseable(Exception):
@@ -135,7 +190,20 @@ class Pipeline:
             # Onboarding-mode counter: deliveries accepted WITHOUT valid
             # auth (unsigned, or legacy signature). Must be 0 in production.
             "webhook_auth_bypassed": 0,
+            # D10 wiring: episode-close outcomes.
+            "episodes_resolved": 0,    # resolve_episode() closed a live episode
+            "resolve_noop": 0,         # resolve claim for unknown/already-closed fp
+            "resolve_auth_refused": 0,  # resolve claim refused: not authentically signed
         }
+        # D10 wiring: external-id -> fingerprint hint map, so a signed
+        # resolve claim (which carries only the PD dedup_key, not the alert
+        # fields the fingerprint is derived from) can find the episode to
+        # close. A HINT, not truth: a miss degrades to a logged no-op and
+        # the episode stays open (72h pruning remains the backstop).
+        # Bounded + locked: a dedup_key flood must not grow memory, and
+        # ThreadingHTTPServer serves requests concurrently.
+        self._dedup_fp: dict[str, str] = {}
+        self._dedup_lock = threading.Lock()
         # (timestamp, failed) per forward attempt; feeds the
         # forwarder_draining health predicate (design §1.2.3).
         self.forward_outcomes: collections.deque = collections.deque(maxlen=1000)
@@ -165,8 +233,14 @@ class Pipeline:
 
     # ------------------------------------------------------------ entry points
 
-    def handle_pd(self, body: bytes) -> dict:
-        """POST /v2/enqueue. Returns the PD-mirror response dict."""
+    def handle_pd(self, body: bytes, headers: dict | None = None) -> dict:
+        """POST /v2/enqueue. Returns the PD-mirror response dict.
+
+        headers: the delivery's HTTP headers (X-Sentinel-Signature /
+        X-Sentinel-Timestamp). Required for resolve/acknowledge claims:
+        without headers a claim cannot be authenticated, and an
+        unauthenticated claim never closes an episode.
+        """
         self.metrics["received"] += 1
         try:
             data = json.loads(body.decode("utf-8"))
@@ -174,6 +248,14 @@ class Pipeline:
                 raise Unparseable("top-level JSON is not an object")
             action = data.get("event_action")
             if action is not None and action != "trigger":
+                if action in ("resolve", "acknowledge"):
+                    # D10 wiring: a SIGNED resolve/ack claim closes the
+                    # matching episode (verified_resolve) — the R9 fix for
+                    # "episodes open but can never close". An unsigned claim
+                    # is refused the close (the silence direction is
+                    # fail-closed in every mode); the relay below still
+                    # happens unchanged, so the PD contract is untouched.
+                    self._handle_resolve_claim(data, body, headers)
                 # acks/resolves are not pages: relay unchanged, no triage.
                 self.forwarder.forward_raw(
                     body, alert_id=str(data.get("dedup_key") or "non-trigger"),
@@ -187,6 +269,145 @@ class Pipeline:
             return _pd_ok(_body_key(body))
         disp_action = self._triage(alert, body)
         return _pd_ok(alert.alert_id)
+
+    # ------------------------------------------------------- D10 resolve paths
+
+    def _handle_resolve_claim(self, data: dict, body: bytes,
+                              headers: dict | None) -> None:
+        """Signed PD resolve/acknowledge -> resolve_episode (verified_resolve).
+
+        resolve_episode(fp, reason="verified_resolve") is the ONLY close path
+        besides the operator route (D10/ADR-001); silence never closes.
+        Safety, in order:
+          1. Authenticate FIRST: only the canonical timestamped HMAC counts.
+             Onboarding fail-open does NOT apply here — an unsigned "resolve"
+             is the false-silence attack (SECURITY.md T1), so the silence
+             direction is fail-closed in every mode, including onboarding and
+             secretless startup (where no resolve can ever verify).
+          2. Unknown dedup_key / no open episode -> logged no-op, never an
+             error. resolve_episode itself returns False for these; we never
+             invent an episode to close.
+        The PD relay in handle_pd still happens afterwards, unchanged.
+        """
+        action = data.get("event_action")
+        dedup_key = data.get("dedup_key")
+        auth_failure = _webhook_sig_failure_reason(
+            self.config.webhook_secret, False, headers or {}, body)
+        if auth_failure is not None:
+            self.metrics["resolve_auth_refused"] += 1
+            sys.stderr.write(
+                "[sentinel] resolve_claim_refused action=%s reason=%s "
+                "dedup_key=%s (unsigned resolve claims never close episodes)\n"
+                % (action, auth_failure, dedup_key))
+            return
+        fp = self._fp_for_dedup_key(dedup_key) if dedup_key else None
+        if fp is None:
+            self.metrics["resolve_noop"] += 1
+            sys.stderr.write(
+                f"[sentinel] resolve_claim_noop action={action} "
+                f"dedup_key={dedup_key} (no known episode; safe no-op)\n")
+            return
+        closed = self.correlator.resolve_episode(fp,
+                                                 reason="verified_resolve")
+        if not closed:
+            self.metrics["resolve_noop"] += 1
+            sys.stderr.write(
+                f"[sentinel] resolve_claim_noop action={action} fp={fp} "
+                "(episode already closed or pruned; safe no-op)\n")
+            return
+        self.metrics["episodes_resolved"] += 1
+        self._audit_episode_resolved(fp, reason="verified_resolve",
+                                     resolved_by="pagerduty-webhook",
+                                     dedup_key=str(dedup_key))
+        self._forget_dedup_key(dedup_key, fp)
+
+    def resolve_episode_operator(self, *, fingerprint: str | None = None,
+                                 dedup_key: str | None = None,
+                                 resolved_by: str = "operator"
+                                 ) -> tuple[bool, str | None]:
+        """Operator close path -> resolve_episode(reason="operator_resolve").
+
+        The reason is derived from the authenticated channel (the caller is
+        the operator route / a future CLI), never from client input.
+        Returns (closed, fingerprint): unknown fingerprints are a logged
+        no-op (closed=False), never an error. Every real close is
+        event-logged.
+        """
+        fp = fingerprint or (self._fp_for_dedup_key(dedup_key)
+                             if dedup_key else None)
+        if not fp or not isinstance(fp, str):
+            return False, None
+        # reason is a literal from CLOSE_REASONS: ValueError is unreachable;
+        # resolve_episode itself enforces the reason vocabulary.
+        closed = self.correlator.resolve_episode(fp,
+                                                 reason="operator_resolve")
+        if not closed:
+            self.metrics["resolve_noop"] += 1
+            sys.stderr.write(
+                f"[sentinel] episode_resolve_noop reason=operator_resolve "
+                f"fp={fp} resolved_by={resolved_by} "
+                "(no open episode; safe no-op)\n")
+            return False, fp
+        self.metrics["episodes_resolved"] += 1
+        self._audit_episode_resolved(fp, reason="operator_resolve",
+                                     resolved_by=resolved_by,
+                                     dedup_key=dedup_key)
+        self._forget_dedup_key(dedup_key, fp)
+        return True, fp
+
+    def _audit_episode_resolved(self, fp: str, *, reason: str,
+                                resolved_by: str,
+                                dedup_key: str | None = None) -> None:
+        """Every close leaves a trace (D10 wiring): who/what resolved, when,
+        which reason. A log-write failure is loud but never fails the close
+        or the request — the receiver's never-5xx contract stands; the
+        CRITICAL line is the tripwire.
+        """
+        try:
+            self.audit.log.append_event(
+                "episode_resolved",
+                actor=("operator" if reason == "operator_resolve"
+                       else "engine"),
+                alert_id=dedup_key or "",
+                fingerprint=fp,
+                episode_id=fp,
+                body={"reason": reason,
+                      "resolved_by": resolved_by,
+                      "dedup_key": dedup_key,
+                      "closed_ts": _utcnow_iso(),
+                      "note": "D10 episode lifecycle: silence never closes; "
+                              "this event is the close authority."})
+        except Exception as exc:
+            sys.stderr.write(
+                "[sentinel] CRITICAL: episode_resolved audit write failed "
+                f"fp={fp} reason={reason} resolved_by={resolved_by} "
+                f"err={exc}\n")
+
+    # --------------------------------------------- dedup_key hint-map helpers
+
+    def _remember_dedup_fp(self, dedup_key: str | None, fp: str) -> None:
+        """Record external-id -> fingerprint for later resolve claims."""
+        if not dedup_key or not fp:
+            return
+        with self._dedup_lock:
+            self._dedup_fp[dedup_key] = fp
+            while len(self._dedup_fp) > _DEDUP_FP_CAP:
+                self._dedup_fp.pop(next(iter(self._dedup_fp)))
+
+    def _fp_for_dedup_key(self, dedup_key: str | None) -> str | None:
+        if not dedup_key:
+            return None
+        with self._dedup_lock:
+            return self._dedup_fp.get(dedup_key)
+
+    def _forget_dedup_key(self, dedup_key: str | None, fp: str) -> None:
+        """Drop hint entries for a closed episode — a re-fire opens a fresh
+        mapping via _triage; stale hints must not linger."""
+        with self._dedup_lock:
+            if dedup_key:
+                self._dedup_fp.pop(dedup_key, None)
+            for key in [k for k, v in self._dedup_fp.items() if v == fp]:
+                self._dedup_fp.pop(key, None)
 
     def handle_generic(self, body: bytes) -> dict:
         """POST /webhook/generic. Returns a small JSON response dict."""
@@ -212,6 +433,11 @@ class Pipeline:
         """Full pipeline for one normalized alert. Returns disposition action."""
         state = build_state(alert, history={}, context={})
         corr = self.correlator.ingest(alert)
+        # D10 wiring: remember external-id -> fingerprint so a later signed
+        # resolve claim (which carries only the PD dedup_key) can find the
+        # episode to close. Recorded for the triaged alert itself (never the
+        # storm aggregate, which is synthesized downstream).
+        self._remember_dedup_fp(alert.alert_id, alert.fingerprint)
 
         if corr.kind == "storm" and corr.storm_declared:
             # Single aggregate request: page once for the whole storm.
@@ -393,6 +619,8 @@ class SentinelHandler(BaseHTTPRequestHandler):
             return
         if path in ("/v2/enqueue", "/webhook/generic"):
             self._handle_alert_post(path)
+        elif path == "/episodes/resolve":
+            self._handle_episode_resolve()
         elif path == "/-/reload":
             self._handle_reload()
         else:
@@ -418,7 +646,9 @@ class SentinelHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             if path == "/v2/enqueue":
-                resp = self.pipeline.handle_pd(body)
+                # Headers ride along so signed resolve/acknowledge claims can
+                # be authenticated (D10 wiring); triggers ignore them.
+                resp = self.pipeline.handle_pd(body, headers=dict(self.headers))
                 self._send_json(200, resp)
             elif path == "/webhook/generic":
                 if not self._signature_ok(body):
@@ -442,6 +672,61 @@ class SentinelHandler(BaseHTTPRequestHandler):
             self._send_json(200, _pd_ok(_body_key(body)))
         finally:
             sem.release()
+
+    def _handle_episode_resolve(self) -> None:
+        """POST /episodes/resolve — the operator close path (D10 wiring).
+
+        The ONLY producer of reason="operator_resolve": the reason is
+        derived from this authenticated channel, never from client input.
+        Body: {"fingerprint": "<fp>"} or {"dedup_key": "<pd key>"}.
+        Optional X-Operator header names the human (recorded in the audit
+        event; defaults to "operator").
+
+        Auth is the operator bearer token (SENTINEL_HEALTH_TOKEN) — REQUIRED,
+        even when unset. Deliberate asymmetry with /healthz and /-/reload,
+        which are open when the token is unset: those are reads/control;
+        this is the silence direction, and the silence direction is never
+        open (SECURITY.md T1).
+        """
+        token = os.environ.get("SENTINEL_HEALTH_TOKEN")
+        if not token:
+            self._send_json(401, {"status": "error",
+                                  "message": "operator auth not configured "
+                                             "(SENTINEL_HEALTH_TOKEN unset); "
+                                             "refusing to close episodes"})
+            return
+        presented = self.headers.get("Authorization") or ""
+        if not hmac.compare_digest(presented, f"Bearer {token}"):
+            self._send_json(401, {"status": "error",
+                                  "message": "unauthorized"})
+            return
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("top-level JSON is not an object")
+            fingerprint = data.get("fingerprint")
+            dedup_key = data.get("dedup_key")
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"status": "error",
+                                  "message": "invalid JSON object"})
+            return
+        resolved_by = str(self.headers.get("X-Operator") or "operator")[:64]
+        closed, fp = self.pipeline.resolve_episode_operator(
+            fingerprint=(str(fingerprint) if fingerprint else None),
+            dedup_key=(str(dedup_key) if dedup_key else None),
+            resolved_by=resolved_by)
+        if fp is None:
+            self._send_json(400, {"status": "error",
+                                  "message": "fingerprint or dedup_key "
+                                             "required"})
+            return
+        # closed=false is a logged no-op (unknown/already-closed fp), never
+        # an error: resolving is idempotent by design.
+        self._send_json(200, {"status": "ok", "fingerprint": fp,
+                              "closed": closed})
 
     def _handle_reload(self) -> None:
         # SIGHUP-equivalent over HTTP: re-validate config; invalid loads are
@@ -552,42 +837,15 @@ class SentinelHandler(BaseHTTPRequestHandler):
         return False
 
     def _signature_failure_reason(self, body: bytes) -> str | None:
-        """None when the delivery verifies; otherwise a terse reason code."""
-        secret = self.pipeline.config.webhook_secret
-        onboarding = self.pipeline.config.webhook_onboarding
-        if not secret:
-            # Empty secret: production refuses (startup already refuses too;
-            # this is defense-in-depth for ad-hoc constructions). Onboarding
-            # may fail open — the caller logs it loudly.
-            return "no_secret" if onboarding else "no_secret_prod"
-        sig = self.headers.get(SIGNATURE_HEADER)
-        if not sig:
-            return "no_signature" if onboarding else "missing_signature"
-        if not sig.startswith("sha256="):
-            return "bad_signature_format"
-        presented = sig[len("sha256="):]
-        ts_raw = self.headers.get(TIMESTAMP_HEADER)
-        if ts_raw is not None:
-            # Timestamped scheme: MAC binds timestamp to the raw body.
-            try:
-                ts = int(ts_raw.strip())
-            except (ValueError, AttributeError):
-                return "bad_timestamp"
-            if abs(time.time() - ts) > SIGNATURE_MAX_SKEW_S:
-                return "stale_timestamp"
-            signed = str(ts).encode("ascii") + b"." + body
-            expected = hmac.new(secret.encode("utf-8"), signed,
-                                hashlib.sha256).hexdigest()
-            return None if hmac.compare_digest(presented, expected) \
-                else "bad_mac"
-        # Legacy timestamp-less scheme (HMAC over raw body only): indefinite
-        # replay window — rejected in production; onboarding accepts it loudly
-        # so migrating senders don't go dark mid-cutover.
-        expected = hmac.new(secret.encode("utf-8"), body,
-                            hashlib.sha256).hexdigest()
-        if hmac.compare_digest(presented, expected):
-            return "legacy_signature" if onboarding else "legacy_unsigned_ts"
-        return "bad_mac"
+        """None when the delivery verifies; otherwise a terse reason code.
+
+        Delegates to the module-level canonical check (D10 wiring extracted
+        it so the PD resolve-claim path verifies the identical scheme).
+        """
+        return _webhook_sig_failure_reason(
+            self.pipeline.config.webhook_secret,
+            self.pipeline.config.webhook_onboarding,
+            self.headers, body)
 
     def _health_auth_ok(self) -> bool:
         """Bearer <redacted> for /healthz and /-/reload (design §2.3).
