@@ -110,7 +110,9 @@ class Episode:
     """One incident's lifecycle, keyed by fingerprint (ADR-001).
 
     state: "open" | "closed". Episodes never auto-close on silence — they
-    leave "open" only via resolve_episode().
+    leave "open" only via resolve_episode(). (Identity expires: records are
+    pruned after 72h without re-fire, but pruning deletes the record — it
+    never flips state to "closed".)
     flap_count: visible relapse count — incremented each time a CLOSED
     episode re-fires. Never derived from, and never promotes, severity.
     """
@@ -241,6 +243,8 @@ class Correlator:
                 ep.state = "open"
                 ep.flap_count += 1
                 ep.last_alert_ts = now
+                ep.closed_ts = None
+                ep.close_reason = None
                 seen = self._seen.get(fp)
                 if seen is not None:
                     seen["prior"] = None
