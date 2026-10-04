@@ -47,12 +47,54 @@ MISCALIBRATION_HOLD_PP = 5.0  # beyond this in any band with N>=30: stage hold
 HUMAN_PAGED = "paged"
 
 
+# ---------------------------------------------------------------- mute ritual
+# ADR-007 condition (d): the weekly "what we muted" review section. The
+# canonical builder + checklist + owner placeholder live in
+# platform/server/mute.py (mute is a platform-tier label); this module only
+# carries the RENDER contract. _EMPTY_MUTE_SECTION mirrors
+# platform.server.mute.empty_mute_section() — tests/test_mute_governance.py
+# pins the two shapes equal so they cannot drift silently.
+_MUTE_REVIEW_OWNER_FALLBACK = \
+    "TBD — name the on-call mute-review owner before cutover"
+_MUTE_REVIEW_CHECKLIST_FALLBACK = (
+    "Every active mute still has a live reason — re-attest or lift; "
+    "no mute survives the week on stale justification.",
+    "No mute exceeded its TTL without a fresh human attestation "
+    "(expired mutes auto-lifted; check the expired list).",
+    "Muted fingerprints show no SEV1/SEV2-class signal in the divergence "
+    "list — a mute is triage, never a blindfold.",
+    "Appeals reviewed: every mute_appealed event has a named resolver "
+    "and a recorded outcome.",
+    "Mute rate vs suppression rate sane: mutes are the exception, not "
+    "the fatigue ratchet's retirement home.",
+)
+
+
+def _empty_mute_section(week_label: str = "") -> dict:
+    return {
+        "owner": _MUTE_REVIEW_OWNER_FALLBACK,
+        "owner_is_placeholder": True,
+        "week_label": week_label,
+        "active_mutes": [],
+        "counts": {"active": 0, "applied": 0, "appealed": 0,
+                   "lifted": 0, "expired": 0},
+        "review_checklist": list(_MUTE_REVIEW_CHECKLIST_FALLBACK),
+    }
+
+
 # ---------------------------------------------------------------- report
 
 def generate_shadow_report(store: ShadowStore, *, org: str, week_label: str,
                            window_start: str, window_end: str,
-                           credential_inventory: dict | None = None) -> dict:
-    """Build the weekly Shadow Report dict. Pure function of the store."""
+                           credential_inventory: dict | None = None,
+                           mute_section: dict | None = None) -> dict:
+    """Build the weekly Shadow Report dict. Pure function of the store.
+
+    mute_section: the ADR-007 "what we muted" payload, built by the
+    platform tier (platform/server/mute.py::build_mute_section) from the
+    event log. When None, the section renders empty — still present, still
+    reviewed, never silently dropped.
+    """
     episodes = list(store.episodes.values())
     # Latest gate-evaluated observation per episode (trigger / priority-updated).
     latest_eval: dict[str, ShadowObservation] = {}
@@ -122,6 +164,10 @@ def generate_shadow_report(store: ShadowStore, *, org: str, week_label: str,
         "credential_inventory": inventory,
         "credential_inventory_hash": _inventory_hash(inventory),
         "zero_sev12_bar": zero_bar,
+        # ADR-007 (d): the weekly mute-review ritual. Always present —
+        # muted rows visible by default, never filter-excluded.
+        "mute_section": (mute_section if mute_section is not None
+                         else _empty_mute_section(week_label)),
     }
 
 
@@ -342,11 +388,48 @@ def render_report_markdown(report: dict, race_budget_ms: int = 2700) -> str:
               f"{r['observed_p_human_paged']} | {r['delta_pp']}pp | "
               f"[{r['wilson_lo']}, {r['wilson_hi']}]")
     A("")
+    A("## What we muted")
+    # .get: a hand-built report dict (notebooks, old callers) still renders.
+    A(_render_mute_section(
+        report.get("mute_section")
+        or _empty_mute_section(report.get("week_label", ""))))
+    A("")
     A("_Not in this report, by design: no model metrics (accuracy/F1/ROC), "
       "no projected savings beyond the labeled opportunity number, no "
       "remediation advice for your alerting. The divergence list implies "
       "them; you draw the conclusions._")
     return "\n".join(L) + "\n"
+
+
+def _render_mute_section(sec: dict) -> str:
+    """ADR-007 (d): the weekly mute-review ritual, rendered every week.
+
+    Muted rows are visible by default — the section prints even when empty,
+    so a missing review is conspicuous, not silent.
+    """
+    c = sec["counts"]
+    owner = sec["owner"]
+    owner_note = ("**OWNER UNASSIGNED — name the on-call reviewer before "
+                  "cutover.**" if sec.get("owner_is_placeholder")
+                  else f"**Owner: {owner}**")
+    L = [f"Review owner: {owner_note}"]
+    L.append(f"Mutes this week — applied: **{c['applied']}**, appealed: "
+             f"**{c['appealed']}**, lifted: **{c['lifted']}**, expired: "
+             f"**{c['expired']}**; active now: **{c['active']}**.")
+    if sec["active_mutes"]:
+        L.append("")
+        L.append("fingerprint | reason | attestor | TTL | expires")
+        L.append("---|---|---|---|---")
+        for m in sec["active_mutes"]:
+            L.append(f"`{m['fingerprint']}` | {m['reason']} | "
+                     f"{m['attestor']} | {m['ttl_s']}s | {m['expires_at']}")
+    else:
+        L.append("No active mutes this week.")
+    L.append("")
+    L.append("Review checklist (every item answered before sign-off):")
+    for i, item in enumerate(sec["review_checklist"], 1):
+        L.append(f"{i}. [ ] {item}")
+    return "\n".join(L)
 
 
 def _render_divergence(div: dict) -> str:

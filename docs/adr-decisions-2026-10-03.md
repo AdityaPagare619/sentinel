@@ -78,7 +78,11 @@ discussion. Petu ratifies by PR review. Nothing here is merged until that review
 
 ## ADR-007 — Muted-not-dropped
 
-- **Decision:** ADOPT-WITH-CONDITIONS. **Status:** ADOPTED-DESIGN (zero "mute" in `src/`).
+- **Decision:** ADOPT-WITH-CONDITIONS. **Status:** IMPLEMENTED (lane D12) —
+  platform-tier rendering label over suppress-with-reason; engine routing
+  untouched; +4 mute event types in the log vocabulary (mute_applied /
+  mute_appealed / mute_lifted / mute_expired) with human-attestor
+  enforcement at the log layer.
 - **Type:** 1 — extends the DR-21 disposition set; implemented as a platform-tier rendering label
   (Type 2 mechanics) over suppress-with-reason, never a fifth engine disposition.
 - **Chief positions:** Forge ADOPT-WITH-CONDITIONS (platform label only — widening the gate's enum

@@ -57,10 +57,31 @@ EVENT_TYPES = frozenset({
     "forward_failed",
     "flip_observed",
     "checkpoint",
+    # D12 (ADR-007, muted-not-dropped): mute-lifecycle transitions. These are
+    # governance events, never routing decisions — "muted" is a platform-tier
+    # rendering label over suppress-with-reason, never a disposition value.
+    "mute_applied",
+    "mute_appealed",
+    "mute_lifted",
+    "mute_expired",
 })
 
 ACTORS = frozenset({
     "engine", "forwarder", "watchdog", "checkpoint", "calibration", "migration",
+    # D12 (ADR-007): the human-operated control plane that owns the mute
+    # lifecycle. Mutes are applied/appealed/lifted by a named human attestor
+    # (carried in the event body); "operator" is who ran the control plane.
+    "operator",
+})
+
+# D12 (ADR-007 condition c — no auto-mute, ever): automated actors can never
+# be a mute attestor. Enforced in _validate for every mute_* event, so the
+# invariant lives in the durable log itself — not just in the platform
+# helper. Case-insensitive match; any attestor containing "auto" is rejected.
+HUMAN_ATTESTOR_BLOCKLIST = frozenset({
+    "engine", "forwarder", "watchdog", "checkpoint", "calibration",
+    "migration", "operator", "system", "sentinel", "bot", "scheduler",
+    "cron", "auto", "auto-mute", "automute",
 })
 
 DISPOSITIONS = frozenset({
@@ -97,6 +118,17 @@ _BODY_REQUIRED = {
                       "differing_field", "first_value", "second_value"),
     "checkpoint": ("head_seq", "head_hash", "event_count", "window_start_ts",
                    "window_end_ts", "hmac_hex", "sink_uri", "sink_push_ok"),
+    # D12 (ADR-007): mute-lifecycle bodies. reason/attestor/ttl are the
+    # condition-(b) triple; the attestor is a NAMED HUMAN — _validate rejects
+    # automated actors (condition c) below.
+    "mute_applied": ("fingerprint", "reason", "attestor", "ttl_s",
+                     "muted_at", "expires_at"),
+    "mute_appealed": ("fingerprint", "attestor", "appeal_reason",
+                      "appealed_at"),
+    "mute_lifted": ("fingerprint", "attestor", "lift_reason", "lifted_at"),
+    # mute_expired carries no attestor: expiry is the TTL the human set being
+    # honored by the sweep — the opposite of auto-mute (auto-UNmute).
+    "mute_expired": ("fingerprint", "expired_at", "applied_seq"),
 }
 
 # Type 2 tunables.
@@ -588,7 +620,8 @@ class EventLog:
     def _validate(self, event_type: str, actor: str, body: dict) -> None:
         if event_type not in EVENT_TYPES:
             raise EventLogError(f"unknown event type: {event_type!r} "
-                                f"(the 7 types are the Type-1 vocabulary)")
+                                f"(the {len(EVENT_TYPES)} types are the "
+                                f"Type-1 vocabulary)")
         if actor not in ACTORS:
             raise EventLogError(f"unknown actor: {actor!r}")
         if not isinstance(body, dict):
@@ -604,6 +637,20 @@ class EventLog:
             if body.get("budget_outcome") not in BUDGET_OUTCOMES:
                 raise EventLogError(
                     f"bad budget_outcome: {body.get('budget_outcome')!r}")
+        if event_type in ("mute_applied", "mute_appealed", "mute_lifted"):
+            # D12 (ADR-007 condition c — no auto-mute, ever): the attestor on
+            # a mute transition must be a named human. Automated actors are
+            # rejected at the log layer so no caller can bypass the check by
+            # appending the event directly.
+            attestor = body.get("attestor")
+            if not isinstance(attestor, str) or not attestor.strip():
+                raise EventLogError(
+                    f"{event_type} requires a named human attestor")
+            low = attestor.strip().lower()
+            if low in HUMAN_ATTESTOR_BLOCKLIST or "auto" in low:
+                raise EventLogError(
+                    f"{event_type} attestor {attestor!r} is not a human — "
+                    f"auto-mute is forbidden (ADR-007)")
 
     def _insert_event(self, event_type: str, *, actor: str, alert_id: str,
                       fingerprint: str, episode_id: str,
