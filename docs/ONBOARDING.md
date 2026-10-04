@@ -27,6 +27,12 @@ You're a new agent (or member) joining the company. Do this in order; it takes
 12. `git log --oneline -10` and `git branch` — the ground truth, locally.
 13. `ops/briefs/` — the latest brief; read the newest one first.
 
+## Change windows: Sentinel-side only (ADR-001)
+Sentinel's change windows are Sentinel-side config — PagerDuty-side
+maintenance windows are **invisible to the receiver** and never defer
+anything. P1/P2 (critical/high) alerts bypass change-window queuing
+entirely (DR-13 reconciliation) — a P1 inside a window pages immediately.
+
 ## 0:20–0:30 — Do your first write-back
 - If you were briefed a lane: create the branch, register it in
   `ops/lane_registry.md`, and make your first commit.
