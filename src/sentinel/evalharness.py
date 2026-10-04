@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 
 from sentinel.client import Answer, DecisionResponse, MockSystemOneClient
@@ -461,6 +462,22 @@ def write_report(m: dict, path: str) -> None:
     print(f"wrote calibration report -> {path}")
 
 
+_AB_REPORT_DEFAULT = "research/jev-behavior/ab-2026-10-04.md"
+
+
+def _ab_report_path(args) -> str:
+    # The --ab passthrough is ALWAYS a dry-run (mock answers). It must never
+    # silently overwrite the committed live report with mock data: with the
+    # default path and an existing file, refuse loudly. An explicit
+    # --ab-report path is the operator's own choice.
+    if args.ab_report == _AB_REPORT_DEFAULT and os.path.exists(args.ab_report):
+        raise SystemExit(
+            f"refusing to overwrite existing report {args.ab_report} with "
+            "dry-run output (this is the committed live A/B report); pass an "
+            "explicit --ab-report path for dry-run output")
+    return args.ab_report
+
+
 def _run_ab_passthrough(args) -> None:
     """--ab: delegate to the question-variant A/B harness (sentinel.ab).
 
@@ -505,7 +522,7 @@ def _run_ab_passthrough(args) -> None:
             "state fingerprints, so variant effects are zero by construction. "
             "Plumbing + statistics only. Live: bin/ab_run.py --live."),
     }
-    _ab.write_ab_report(metrics, meta, cost, args.ab_report, conditions)
+    _ab.write_ab_report(metrics, meta, cost, _ab_report_path(args), conditions)
     print(f"ab: n_paired={metrics['n_paired']} "
           f"noise_flip={metrics['noise_floor']['disposition_flip_rate']:.4f} "
           f"variant_flip={metrics['variant']['disposition_flip_rate']:.4f}")
@@ -525,7 +542,7 @@ def main() -> None:
                     help="comma-separated variant file stems (A1,A2,B)")
     ap.add_argument("--ab-n", type=int, default=200)
     ap.add_argument("--ab-report",
-                    default="research/jev-behavior/ab-2026-10-04.md")
+                    default=_AB_REPORT_DEFAULT)
     args = ap.parse_args()
     if args.ab:
         _run_ab_passthrough(args)

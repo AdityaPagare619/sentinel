@@ -423,3 +423,18 @@ def test_k2_aborts_on_auth_error():
     with pytest.raises(RunAborted) as ei:
         run_ab(items, arms, factory, seed=7)
     assert "K2" in str(ei.value)
+
+
+def test_ab_report_guard_refuses_to_clobber_live_report(tmp_path, monkeypatch):
+    # R5 review: evalharness --ab is always dry-run; it must never silently
+    # overwrite the committed live report with mock data.
+    import argparse
+    from sentinel import evalharness as eh
+    live = tmp_path / "ab-live.md"
+    live.write_text("live results")
+    monkeypatch.setattr(eh, "_AB_REPORT_DEFAULT", str(live))
+    with pytest.raises(SystemExit, match="refusing to overwrite"):
+        eh._ab_report_path(argparse.Namespace(ab_report=str(live)))
+    # An explicit non-default path is the operator's own choice: allowed.
+    other = tmp_path / "dryrun.md"
+    assert eh._ab_report_path(argparse.Namespace(ab_report=str(other))) == str(other)
