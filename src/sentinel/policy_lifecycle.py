@@ -72,6 +72,11 @@ class PolicyAttestation:
     preview_hash: str | None
     attestor_ids: tuple[str, ...]
     decided_at: str  # RFC3339 UTC
+    # ADR attestor-identity: attestor_id -> Ed25519 signature hex over
+    # canonical(policy_id, version, content_hash, from_state, to_state,
+    # decided_at). Empty (legacy) when no attestor registry is configured —
+    # deprecated: string IDs are not identity (see module docstring).
+    signatures: dict = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -82,7 +87,8 @@ class PolicyAttestation:
                    from_state=str(d["from_state"]), to_state=str(d["to_state"]),
                    preview_hash=d.get("preview_hash"),
                    attestor_ids=tuple(d.get("attestor_ids", ())),
-                   decided_at=str(d["decided_at"]))
+                   decided_at=str(d["decided_at"]),
+                   signatures=dict(d.get("signatures", {}) or {}))
 
 
 @dataclasses.dataclass
@@ -137,8 +143,15 @@ class PolicyStore:
     DEFAULT_REVIEW_DAYS = 30
     DEFAULT_GRACE_DAYS = 14
 
-    def __init__(self, path: str | None = None):
+    def __init__(self, path: str | None = None,
+                 attestor_registry: str | object | None = None):
         self.path = path
+        # ADR attestor-identity: str path or AttestorRegistry instance. The
+        # registry is loaded FRESH on every transition/unfreeze call (never a
+        # boot cache) so revocation is effective on the next decision.
+        # None = legacy string-ID mode (deprecated, warns loudly).
+        self._attestor_registry = attestor_registry
+        self._warned_no_registry = False
         # policy_id -> list[PolicyVersion] (ascending version)
         self._policies: dict[str, list[PolicyVersion]] = {}
         # policy_id -> signed watchdog baseline dict (B3.3; opaque here —
@@ -146,6 +159,59 @@ class PolicyStore:
         self._baselines: dict[str, dict] = {}
         if path and os.path.exists(path):
             self.load()
+
+    def _registry(self):
+        """Fresh-read the attestor registry (revocation propagation < 1
+        decision). RegistrySealError propagates — a tampered registry fails
+        toward paging, never toward string-ID trust."""
+        from . import attestor as _att
+        reg = self._attestor_registry
+        if reg is None:
+            return None
+        if isinstance(reg, str):
+            return _att.AttestorRegistry(reg)
+        # Instance passed (test convenience): re-read from its path so a
+        # revocation written by another process propagates. The str path
+        # above is the production path; both are fresh reads, never caches.
+        return reg.fresh()
+
+    def _verify_attestations(self, atts: list,
+                             v, now: _dt.datetime) -> None:
+        """ADR attestor-identity: cryptographic verification of the dual
+        attestation. Every attestor_id must be an ACTIVE registry key with a
+        valid signature binding this EXACT content (content_hash), the
+        attestation's declared transition, and decided_at. Any failure raises
+        PolicyTransitionError — the version never goes live, the gate fails
+        toward paging."""
+        from . import attestor as _att
+        reg = self._registry()
+        if reg is None:
+            if not self._warned_no_registry:
+                self._warned_no_registry = True
+                sys.stderr.write(
+                    "[sentinel] DEPRECATED: attestor registry not configured"
+                    " — attestations are bare string IDs, NOT identity-"
+                    "verified. Configure PolicyStore(attestor_registry=...)"
+                    " before first prod cutover: registry-less mode is"
+                    " REMOVED at cutover (no legacy string-ID trust in"
+                    " production; see docs/prod-cutover-checklist.md).\n")
+            return
+        for att in atts:
+            for aid in att.attestor_ids:
+                sig = (att.signatures or {}).get(aid)
+                if not sig:
+                    raise PolicyTransitionError(
+                        f"attestor {aid!r}: missing signature — string IDs "
+                        f"are not attestations")
+                try:
+                    _att.check_attestation(
+                        reg, policy_id=v.policy_id, version=v.version,
+                        content_hash=v.content_hash,
+                        from_state=att.from_state, to_state=att.to_state,
+                        attestor_id=aid, signature_hex=sig,
+                        decided_at=att.decided_at, now=now)
+                except _att.AttestorError as e:
+                    raise PolicyTransitionError(f"attestation rejected: {e}")
 
     # ------------------------------------------------------------ persistence
     def save(self) -> None:
@@ -290,6 +356,11 @@ class PolicyStore:
         if needs_preview and not preview_hash:
             raise PolicyTransitionError(
                 f"{frm.value} -> {to.value} requires a signed preview hash")
+        # ADR attestor-identity: cryptographic verification on the
+        # dual-attestation path. Raises before ANY state mutation — a bad
+        # attestation never partially promotes.
+        if required_attestors:
+            self._verify_attestations(atts, v, now)
 
         # canary -> live signs the watchdog baseline (B3.3): the caller must
         # have recorded it; we require the preview hash as its pointer.
@@ -354,6 +425,10 @@ class PolicyStore:
         if author_id and author_id in ids:
             raise PolicyTransitionError(
                 "unfreeze attestors must be distinct from the author")
+        # ADR attestor-identity: unfreeze re-enables suppression, so the
+        # dual-attestation path verifies cryptographically here too.
+        self._verify_attestations(
+            list(attestations), v, _dt.datetime.now(_dt.timezone.utc))
         v.frozen = False
         v.frozen_reason = None
         v.attestations = tuple(list(v.attestations) + list(attestations))
