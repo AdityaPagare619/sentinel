@@ -30,6 +30,13 @@ from urllib.parse import parse_qs
 
 from . import simulate as sim
 from .datasets import UnknownDataset
+from .integrations import (
+    BadKey,
+    EphemeralStoreError,
+    IntegrationStore,
+    JEV_KEY_NAME,
+    PD_KEY_NAME,
+)
 from .shed import EXPENSIVE_PATHS
 from .store import MAX_REPLAY, ReadStore
 
@@ -74,6 +81,10 @@ class PlatformApp:
         self.ui_dir = os.path.abspath(ui_dir) if ui_dir else None
         if self.ui_dir and not os.path.isdir(self.ui_dir):
             self.ui_dir = None
+        # BYOK integrations settings (the platform tier's ONE write surface —
+        # keys only, namespaced under /api/v1/integrations/). Twin of
+        # sentinel/integrations.py; same file, same format.
+        self.integrations = IntegrationStore()
 
     # ------------------------------------------------------------- WSGI
 
@@ -120,6 +131,19 @@ class PlatformApp:
                 return self._noise(start_response, q)
             if path == "/api/analytics/flips" and method == "GET":
                 return self._flips(start_response, q)
+            # BYOK integrations settings — the platform's one write surface
+            # (keys only). Values are write-only; reads report last4.
+            if path == "/api/v1/integrations/status" and method == "GET":
+                return self._int_status(start_response)
+            if path == "/api/v1/integrations/keys" and method == "POST":
+                return self._int_keys_save(environ, start_response)
+            if path == "/api/v1/integrations/simulated" and method == "POST":
+                return self._int_simulated(environ, start_response)
+            if path == "/api/v1/integrations/test-page" and method == "POST":
+                return self._int_test_page(environ, start_response)
+            m = re.fullmatch(r"/api/v1/integrations/keys/([a-z_]+)", path)
+            if m and method == "DELETE":
+                return self._int_keys_delete(start_response, m.group(1))
         except _BadParam as e:
             return self._error(start_response, 400, e.code, str(e))
         return self._error(start_response, 404, "not_found",
@@ -249,6 +273,168 @@ class PlatformApp:
         }
         return self._ok(start_response, data)
 
+    # --------------------------------------------- BYOK integrations (keys)
+    # The platform tier's ONE write surface. Values are write-only: the API
+    # reports configured/last4, never values. Twin of the engine's
+    # sentinel/integrations.py — same file, same format.
+
+    def _int_body(self, environ, start_response):
+        """Parse a small JSON object body. Returns dict or an error response."""
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_BODY:
+            return None, self._error(start_response, 422, "body_too_large",
+                                     f"body exceeds {MAX_BODY} bytes")
+        raw = environ["wsgi.input"].read(length) if length else b""
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return None, self._error(start_response, 422, "bad_json",
+                                     "request body must be JSON")
+        if not isinstance(body, dict):
+            return None, self._error(start_response, 422, "bad_body",
+                                     "request body must be a JSON object")
+        return body, None
+
+    def _int_status(self, start_response):
+        return self._ok(start_response, {"integrations": self.integrations.status()})
+
+    def _int_keys_save(self, environ, start_response):
+        body, err = self._int_body(environ, start_response)
+        if err:
+            return err
+        saved = {}
+        for name in (PD_KEY_NAME, JEV_KEY_NAME):
+            if name in body:
+                value = body[name]
+                if not isinstance(value, str) or not value.strip():
+                    return self._error(start_response, 422, "bad_key",
+                                       f"{name} must be a non-empty string")
+                try:
+                    self.integrations.set(name, value)
+                except BadKey as e:
+                    return self._error(start_response, 422, "bad_key", str(e))
+                except EphemeralStoreError as e:
+                    return self._error(start_response, 501,
+                                       "persistence_unavailable",
+                                       str(e) + " In this hosted demo, keys are "
+                                       "session-scoped: pass routing_key with each "
+                                       "test-page request instead.")
+                saved[name] = self.integrations.status()[name]
+        if not saved:
+            return self._error(start_response, 422, "bad_body",
+                               "nothing to save — provide pagerduty_routing_key "
+                               "and/or jev_api_key")
+        return self._ok(start_response, {"saved": saved,
+                                         "integrations": self.integrations.status()})
+
+    def _int_keys_delete(self, start_response, name):
+        if name not in (PD_KEY_NAME, JEV_KEY_NAME):
+            return self._error(start_response, 404, "not_found",
+                               f"unknown integration key {name}")
+        try:
+            self.integrations.delete(name)
+        except EphemeralStoreError as e:
+            return self._error(start_response, 501, "persistence_unavailable", str(e))
+        return self._ok(start_response, {"deleted": name,
+                                         "integrations": self.integrations.status()})
+
+    def _int_simulated(self, environ, start_response):
+        body, err = self._int_body(environ, start_response)
+        if err:
+            return err
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return self._error(start_response, 422, "bad_body",
+                               "enabled must be true or false")
+        try:
+            self.integrations.set_flag("simulated_paging", enabled)
+        except EphemeralStoreError:
+            # Serverless: simulated is forced on by env; the toggle can't
+            # persist. Say so honestly instead of pretending.
+            return self._error(start_response, 501, "persistence_unavailable",
+                               "simulated mode is forced ON in this hosted demo "
+                               "(SENTINEL_SIMULATED_PAGING=1) and cannot be "
+                               "toggled here")
+        state = "on — pages are logged, not sent" if enabled else "off — pages go to PagerDuty"
+        return self._ok(start_response,
+                        {"simulated_paging": enabled,
+                         "message": f"Simulated paging {state}."})
+
+    def _int_test_page(self, environ, start_response):
+        """Send a clearly-labeled TEST event to PagerDuty.
+
+        Key precedence: per-request `routing_key` (serverless session scope)
+        → stored user key → PD_ROUTING_KEY env. In simulated mode the page
+        is absorbed and labeled — never sent, honestly reported.
+        """
+        body, err = self._int_body(environ, start_response)
+        if err:
+            return err
+        if self.integrations.simulated_paging():
+            return self._ok(start_response, {
+                "ok": True, "simulated": True,
+                "dedup_key": None,
+                "message": "Simulated paging is ON — no page was sent to "
+                           "PagerDuty. This is what a test page would look "
+                           "like: a trigger labeled [SENTINEL TEST].",
+            })
+        key = body.get("routing_key")
+        if key is not None and (not isinstance(key, str) or not key.strip()):
+            return self._error(start_response, 422, "bad_key",
+                               "routing_key must be a non-empty string")
+        if key:
+            key = key.strip()
+            # Validate the shape without echoing it back on failure.
+            if not re.fullmatch(r"[0-9a-fA-F]{32}", key):
+                return self._error(start_response, 422, "bad_key",
+                                   "routing_key doesn't look like a PagerDuty "
+                                   "Events API v2 routing key (32 hex chars)")
+            source = "request"
+        else:
+            key = self.integrations.get(PD_KEY_NAME) or os.environ.get("PD_ROUTING_KEY")
+            source = "stored" if self.integrations.get(PD_KEY_NAME) else "env"
+        if not key:
+            return self._error(start_response, 422, "no_routing_key",
+                               "no PagerDuty routing key available — save one "
+                               "in Integrations, pass routing_key with this "
+                               "request, or set PD_ROUTING_KEY")
+        dedup = "sentinel-test/%s/%d" % (os.urandom(8).hex(),
+                                         int(time.time()))
+        event = {
+            "routing_key": key,
+            "event_action": "trigger",
+            "dedup_key": dedup,
+            "payload": {
+                "summary": "[SENTINEL TEST] Integrations test page — safe to acknowledge",
+                "severity": "info",
+                "source": "sentinel/integrations",
+                "custom_details": {
+                    "sentinel_test": True,
+                    "key_source": source,
+                    "note": "Sent from Sentinel's Integrations settings. "
+                            "No incident — safe to acknowledge or resolve.",
+                },
+            },
+        }
+        ok, detail = _pd_enqueue(event, timeout_s=10.0)
+        if ok:
+            return self._ok(start_response, {
+                "ok": True, "simulated": False, "dedup_key": dedup,
+                "key_source": source,
+                "message": "Test page accepted by PagerDuty. Look for "
+                           "'[SENTINEL TEST]' in your PagerDuty service.",
+            })
+        # Honest failure: what happened and what to do — never the key.
+        return self._ok(start_response, {
+            "ok": False, "simulated": False, "dedup_key": dedup,
+            "message": f"PagerDuty did not accept the test page ({detail}). "
+                       "Check the routing key (Integrations tab → Events API "
+                       "v2 in your PagerDuty service) and network egress.",
+        })
+
     # --------------------------------------------------------------- SSE
 
     def _stream(self, environ, start_response):
@@ -367,13 +553,36 @@ class PlatformApp:
 
 
 _STATUS_TEXT = {200: "OK", 400: "Bad Request", 404: "Not Found",
-                422: "Unprocessable Entity", 503: "Service Unavailable"}
+                422: "Unprocessable Entity", 501: "Not Implemented",
+                503: "Service Unavailable"}
 
 
 class _BadParam(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def _pd_enqueue(event: dict, timeout_s: float = 10.0) -> tuple[bool, str]:
+    """POST one event to PagerDuty Events API v2. Returns (ok, detail).
+
+    Never logs or returns the routing key — detail carries only the
+    status/error class.
+    """
+    import urllib.request
+    import urllib.error
+    body = json.dumps(event).encode("utf-8")
+    req = urllib.request.Request(
+        "https://events.pagerduty.com/v2/enqueue", data=body,
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except Exception as e:  # timeout, DNS, TLS — name the class, not the body
+        return False, f"{type(e).__name__}"
+    return (200 <= status < 300), f"HTTP {status}"
 
 
 def _opt(q, name):
