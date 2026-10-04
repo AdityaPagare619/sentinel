@@ -825,3 +825,34 @@ class RaceRunner:
         self._pool.shutdown()
         if self._watch.is_alive():
             self._watch.join(timeout=5)
+
+    def probe_vendor(self, state, questions,
+                     timeout_ms: float = 2000.0) -> str:
+        """C1/R15: lightweight vendor health probe for canary recovery.
+
+        Runs ONE Jev call in a daemon thread (NOT the race machinery — no
+        scheduler, no watchdog, no metrics). Returns "answered" (vendor
+        responded), "timer_win" (no response within timeout), or
+        "unhealthy_error" (client raised). Never raises.
+
+        Purpose: while the fail-open ladder is stepped down, the gate
+        makes no vendor calls, starving the health monitor of samples and
+        making step-1 recovery impossible (R15 Blocker 1 — the sensor was
+        downstream of the actuator). Canary probes re-establish the
+        signal: the gate runs these periodically while degraded, feeding
+        only the health monitor (the stepped disposition stands).
+        """
+        result: dict = {}
+        def worker():
+            try:
+                resp = self._client.decide(state, questions)
+                result["ok"] = True
+            except Exception:
+                result["ok"] = False
+        t = threading.Thread(target=worker, daemon=True,
+                             name="sentinel-canary-probe")
+        t.start()
+        t.join(timeout=timeout_ms / 1000.0)
+        if t.is_alive():
+            return "timer_win"
+        return "answered" if result.get("ok") else "unhealthy_error"

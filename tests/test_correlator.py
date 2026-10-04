@@ -112,6 +112,8 @@ class TestDedup(unittest.TestCase):
 
 class TestStorm(unittest.TestCase):
     def test_storm_declared_over_threshold(self):
+        # C1/RFC §2.1: the declaration rule is W(t) >= max(F, k*B) — at
+        # exactly F distinct the storm declares (>=, not the old >).
         clock = FakeClock()
         c = Correlator(storm_fingerprints=5, storm_window_s=60, clock=clock)
         kinds = []
@@ -119,22 +121,21 @@ class TestStorm(unittest.TestCase):
             r = c.ingest(make_alert(service=f"svc{i}", alert_id=f"s{i}"))
             kinds.append(r.kind)
             clock.advance(1)
-        self.assertEqual(kinds[:5], ["new"] * 5)
-        self.assertEqual(kinds[5], "storm")
-        self.assertTrue(kinds[5] == "storm")
+        self.assertEqual(kinds[:4], ["new"] * 4)
+        self.assertEqual(kinds[4], "storm")
         # The declaring ingest carries the counts and the declared flag.
         decl = None
         c2 = Correlator(storm_fingerprints=5, storm_window_s=60, clock=FakeClock())
-        for i in range(6):
+        for i in range(5):
             decl = c2.ingest(make_alert(service=f"svc{i}", alert_id=f"s{i}"))
         self.assertTrue(decl.storm_declared)
-        self.assertEqual(sum(decl.storm_counts.values()), 6)
+        self.assertEqual(sum(decl.storm_counts.values()), 5)
         self.assertEqual(decl.storm_counts.get("svc0"), 1)
 
     def test_storm_continuation_folds_in(self):
         clock = FakeClock()
         c = Correlator(storm_fingerprints=3, storm_window_s=60, clock=clock)
-        for i in range(4):
+        for i in range(3):
             r = c.ingest(make_alert(service=f"svc{i}", alert_id=f"s{i}"))
             clock.advance(1)
         self.assertTrue(r.storm_declared)
@@ -145,17 +146,22 @@ class TestStorm(unittest.TestCase):
     def test_storm_window_expires(self):
         clock = FakeClock()
         c = Correlator(storm_fingerprints=3, storm_window_s=60, clock=clock)
-        for i in range(4):
+        for i in range(2):
             c.ingest(make_alert(service=f"svc{i}", alert_id=f"s{i}"))
         clock.advance(61)
         r = c.ingest(make_alert(service="svcZ", alert_id="sz"))
         self.assertEqual(r.kind, "new")
 
     def test_no_storm_below_threshold(self):
+        # C1: F=20 is the absolute floor — 19 distinct is quiet, the 20th
+        # declares (>= semantics per the RFC's explicit formula).
         c = Correlator(storm_fingerprints=20, storm_window_s=60, clock=FakeClock())
-        for i in range(20):
+        for i in range(19):
             r = c.ingest(make_alert(service=f"svc{i}", alert_id=f"s{i}"))
         self.assertEqual(r.kind, "new")
+        r = c.ingest(make_alert(service="svc19", alert_id="s19"))
+        self.assertEqual(r.kind, "storm")
+        self.assertTrue(r.storm_declared)
 
 
 class TestChangeWindow(unittest.TestCase):

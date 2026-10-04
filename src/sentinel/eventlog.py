@@ -67,6 +67,12 @@ EVENT_TYPES = frozenset({
     # D10 wiring (lane/d10-resolve-wiring): the episode close trace — one
     # event per resolve_episode() close, so no episode ever closes silently.
     "episode_resolved",
+    # C1 (RFC design/rfc-c1-stepped-failopen.md): stepped fail-open
+    # transitions. Every degradation step is a named, event-logged
+    # transition {cause, at} — never silent; full recovery carries the step
+    # history. Governance events, never routing decisions.
+    "failopen_step_entered",
+    "failopen_recovered",
 })
 
 ACTORS = frozenset({
@@ -99,6 +105,9 @@ PAGE_DISPOSITIONS = frozenset({"page_now", "page_business_hours", "passthrough"}
 BUDGET_OUTCOMES = frozenset({
     "answered_in_time", "timer_won", "timer_won_shed", "error_passthrough",
     "reaper_redrive", "structural_passthrough", "pre_race_unknown",
+    # C1: the S2 race never ran — the deterministic stepped-degradation
+    # path decided (failopen_stepN rides in-band on the decision_made body).
+    "failopen_stepped",
 })
 
 # Required body keys per event type (Type 1 vocabulary — design §2).
@@ -139,6 +148,16 @@ _BODY_REQUIRED = {
     # reason is the D10 close authority (operator_resolve | verified_resolve)
     # and resolved_by names the provenance (pagerduty-webhook, operator id).
     "episode_resolved": ("reason", "resolved_by"),
+    # C1 (RFC design/rfc-c1-stepped-failopen.md): the stepped fail-open
+    # transitions. failopen_step_entered is emitted on every step entry
+    # (cause + start time, UTC and local, per the violet-banner contract);
+    # detector_health carries the banner's detector-health line inputs
+    # (W(t), threshold parts, last declaration). failopen_recovered fires
+    # on the return to step 0 with the full step history.
+    "failopen_step_entered": ("step", "cause", "entered_at", "prior_step",
+                              "detector_health"),
+    "failopen_recovered": ("recovered_at", "step_history",
+                           "total_degraded_s"),
 }
 
 # Type 2 tunables.

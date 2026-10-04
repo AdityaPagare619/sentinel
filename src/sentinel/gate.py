@@ -35,6 +35,19 @@ Storm aggregates take ``digest_storm`` (D3, ADR-016) — a separate code
 path, not a flag: it never calls the policy kernel, never arms a race,
 and cannot suppress by construction (see sentinel.storm_digest).
 
+C1 (design/rfc-c1-stepped-failopen.md) — stepped fail-open: when the
+vendor path degrades (timer-win rate over the trailing window, or
+absolute page-rate pressure), the gate steps down an explicit ladder
+instead of falling off a cliff: step 1 = last-known-good compiled policy
+(deterministic, no Jev call; freshness-gated with auto-fall to step 2),
+step 2 = static severity floor (source-critical only, deduped; the rest
+held for the digest), step 3 = rate-capped paging + scannable digest
+(critical-first, level-shift ordered). Each step is a named,
+event-logged transition (``failopen_step_entered`` {cause, at}); each
+step surfaces the violet banner (cause + start time + detector-health
+line). The stepped path never consults the suppress conjunction and
+cannot suppress by construction — see sentinel.failopen.
+
 The gate EMITS decision payloads (decision_made per decision,
 shadow_decision for late answers); it does NOT write events — the
 dispatcher/event-log lane owns persistence (see race_payloads.py's
@@ -62,6 +75,7 @@ from .client import JevError
 from .correlator import legacy_fingerprint_of
 from .counterfactual import (CounterfactualInputs,
                              build_counterfactual_receipt)
+from .failopen import (FailopenConfig, FailopenController, FailoverPolicy)
 from .freshness import (LOCK1_CALIBRATION, lock1_fallback_offered,
                         suppress_precondition)
 from .models import Alert, DecisionRecord, Disposition, Thresholds
@@ -303,7 +317,19 @@ class Gate:
                  legacy_window_ends_at: str | None = None,
                  corroborator=None,
                  silence_floor=None,
-                 attestor_registry=None):
+                 attestor_registry=None,
+                 # C1 (RFC design/rfc-c1-stepped-failopen.md): the stepped
+                 # fail-open ladder. failopen_config: FailopenConfig (Type-2
+                 # knobs; enabled by default). correlator: the Correlator
+                 # instance feeding the violet banner's detector-health line
+                 # (Pager P1) and the digest's level-shift z-score (M1) —
+                 # None leaves the banner's detector line honestly marked
+                 # unavailable. failover_policy: the last-known-good signed
+                 # policy for step 1 (C5 freshness-gated); None uses the
+                 # compiled-in default severity routing.
+                 failopen_config: FailopenConfig | None = None,
+                 correlator=None,
+                 failover_policy: FailoverPolicy | None = None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
@@ -402,6 +428,18 @@ class Gate:
         self.corroborator = corroborator
         self.silence_floor = silence_floor
         self.attestor_registry = attestor_registry
+        # C1 — the stepped fail-open ladder (design/rfc-c1-stepped-failopen.md).
+        # The controller observes every decision (vendor outcome + paging
+        # action) and steps the gate down/up the ladder; the stepped branch
+        # in _decide replaces the S2 race while degraded.
+        self._failopen = FailopenController(
+            failopen_config,
+            clock=self._epoch_now,
+            detector_health_fn=(correlator.detector_health
+                                if correlator is not None else None),
+            zscore_fn=(correlator.fingerprint_level_shift_zscore
+                       if correlator is not None else None),
+            failover_policy=failover_policy)
 
     # --------------------------------- ADR-017/D4 legacy-fingerprint window
 
@@ -425,6 +463,31 @@ class Gate:
         if self.clock:
             return self.clock()
         return _dt.datetime.now(_dt.timezone.utc)
+
+    def _epoch_now(self) -> float:
+        """Epoch seconds for the fail-open ladder. Tolerates both clock
+        shapes the gate accepts: aware datetimes (production/tests) and
+        raw epoch floats (helpers.FakeClock)."""
+        now = self._gate_now()
+        ts = getattr(now, "timestamp", None)
+        return ts() if callable(ts) else float(now)
+
+    def _note(self, vendor_outcome: str, action: str,
+              now: float | None = None) -> None:
+        """Feed one decision observation to the C1 fail-open ladder.
+
+        vendor_outcome: "timer_win" | "answered" | "unhealthy_error" |
+        "structural" | "failopen". Transition payloads (step_entered /
+        recovered / banner / digest) are emitted on the gate's emission
+        channel. Never raises: the ladder must never sink the alert."""
+        try:
+            t = self._epoch_now() if now is None else now
+            for payload in self._failopen.observe(
+                    vendor_outcome=vendor_outcome, action=action, now=t):
+                self._emit(payload)
+        except Exception as exc:
+            print(f"[sentinel] failopen observe failed ({exc})",
+                  file=sys.stderr)
 
     def _effective_allowlist(self, alert: Alert) -> tuple[set[str], bool]:
         """The fingerprint set for the policy kernel + whether legacy fired.
@@ -490,6 +553,7 @@ class Gate:
                                team=None, confidence=None, latency_ms=latency)
             answers = {"jev_model": None, "q_severity": None,
                        "q_team": None, "q_disposition": None}
+            self._note("unhealthy_error", "passthrough")
 
         if self.shadow:
             would_be = disp
@@ -537,6 +601,7 @@ class Gate:
         try:
             disp = storm_digest_disposition(storm_size=storm_size,
                                             storm_counts=storm_counts)
+            self._note("structural", "page_now")
             self._emit(decision_made_payload(
                 alert=agg, input_sha256=input_sha256(agg_state),
                 disposition=disp.action,  # always "page_now"
@@ -875,6 +940,7 @@ class Gate:
         structural = self._structural(alert, state, correlation)
         if structural is not None:
             disp, answers = structural
+            self._note("structural", disp.action)
             self._emit(decision_made_payload(
                 alert=alert, input_sha256=in_sha,
                 disposition=disp.action,
@@ -906,10 +972,33 @@ class Gate:
             # to the shadow report's ASR metric.
             payload["body"].update(hit.body_extra)
             self._emit(payload)
+            self._note("structural", disp.action)
             # as_gate_tuple's answers slot is None by design (no Jev
             # answers exist on this path); normalize so evaluate() always
             # gets the (Disposition, dict) shape every other path returns.
             return disp, _empty_answers()
+
+        # C1 — stepped fail-open: while the ladder is stepped down, the
+        # deterministic degraded path replaces the S2 race (no Jev call —
+        # the vendor path is the thing that's degraded). S1 structural bars
+        # and the D6 firewall above still run first. The suppress
+        # conjunction (policy kernel → D8 → D5) is never consulted on the
+        # stepped path — the step decide() methods only emit page_now /
+        # page_business_hours / passthrough / folded, and FailoverPolicy
+        # refuses suppress-capable severity maps.
+        #
+        # R15 F4 (honest): S1 dedup above CAN emit suppress while degraded
+        # — inheriting a legitimate pre-degradation prior (same fingerprint,
+        # same evidence, decided by the full conjunction at step 0). That
+        # is not a new suppression hole: the suppress was earned before
+        # the ladder stepped down, and the row carries reason="dedup" (not
+        # a step mode). The "cannot suppress" guarantee is about the
+        # stepped path itself, which never consults the suppress
+        # conjunction and never emits suppress.
+        step = self._failopen.current_step
+        if step > 0:
+            return self._on_failopen_step(alert, in_sha, state, step,
+                                          budget_ms)
 
         # S2 — FAST: win the race. The pool submission inside runner.run()
         # is the only Jev-call site on the hot path.
@@ -922,6 +1011,66 @@ class Gate:
                                      context)
         return self._on_timer_won(alert, in_sha, outcome, budget_ms)
 
+    def _on_failopen_step(self, alert, in_sha, state, step, budget_ms):
+        """C1: the deterministic degraded disposition (RFC §3.2).
+
+        No Jev call, no race, no model output — the vendor path is the
+        thing that's degraded. Every row carries its step mode in-band
+        (``mode: failopen_stepN``) for the console's violet banner. Never
+        raises: the company-ending bug is dropping the page.
+
+        R15: canary probes — every canary_every_n-th alert while degraded
+        also runs a lightweight vendor probe. The probe's outcome feeds
+        the health monitor ONLY (the stepped disposition below stands);
+        it is the recovery signal that makes step-1 exit possible.
+        """
+        now = self._epoch_now()
+        if step == 1 and not self._failopen.policy.is_fresh(now):
+            # C5 auto-fall at decision time: a policy past valid_until
+            # fails step 1 into step 2 + alarm — stale fallback is worse
+            # than no fallback.
+            for payload in self._failopen.request_step(
+                    2, f"step-1 policy stale at decision time "
+                       f"(valid_until past); auto-fall to severity floor "
+                       f"(C5)", now):
+                self._emit(payload)
+            step = 2
+        # Canary before the stepped disposition: the probe's latency is
+        # bounded by canary_timeout_ms and it never affects the outcome.
+        if self._failopen.should_canary():
+            self._canary_probe(alert, state, now)
+        disp = self._failopen.decide(alert, step, now)
+        payload = decision_made_payload(
+            alert=alert, input_sha256=in_sha,
+            disposition=disp.action,
+            budget_outcome="failopen_stepped",
+            budget_ms=budget_ms, latency_ms=disp.latency_ms,
+            lock_evaluation=empty_lock_evaluation())
+        payload["body"]["mode"] = f"failopen_step{step}"
+        self._emit(payload)
+        self._note("failopen", disp.action, now)
+        return disp, _empty_answers()
+
+    def _canary_probe(self, alert, state, now):
+        """R15: lightweight vendor health probe while degraded.
+
+        Runs ONE Jev call (no race, no timer competition); the outcome
+        feeds the health monitor ONLY via _note — the stepped disposition
+        is unaffected. Never raises: a failed probe is itself a health
+        signal (unhealthy_error), not a gate error.
+        """
+        try:
+            questions = build_questions(None)
+            outcome = self._runner.probe_vendor(
+                state, questions,
+                timeout_ms=self._failopen.config.canary_timeout_ms)
+            # "canary" is not a page action — _pages ignores it; only the
+            # vendor health monitor records the sample.
+            self._note(outcome, "canary", now)
+        except Exception as exc:
+            print(f"[sentinel] canary probe failed ({exc})",
+                  file=sys.stderr)
+
     def _on_answered(self, alert, in_sha, outcome, budget_ms, context):
         """Inference won the race: run S3–S6 through the shared kernel."""
         res = outcome.result
@@ -932,6 +1081,7 @@ class Gate:
             disp = Disposition(action="passthrough",
                                reason=f"error:{_error_code(err)}",
                                team=None, confidence=None, latency_ms=latency)
+            self._note("unhealthy_error", "passthrough")
             self._emit(decision_made_payload(
                 alert=alert, input_sha256=in_sha,
                 disposition=disp.action,
@@ -1050,6 +1200,7 @@ class Gate:
             lock_evaluation=verdict.lock_evaluation,
             corroboration=corro_body,
             threshold_counterfactual=counterfactual))
+        self._note("answered", disp.action)
         return disp, {"jev_model": verdict.jev_model,
                       "q_severity": q_sev,
                       "q_team": q_team,
@@ -1066,6 +1217,7 @@ class Gate:
                    if outcome.timer_fired_at_ms is not None else 0.0)
         disp = Disposition(action="passthrough", reason=reason,
                            team=None, confidence=None, latency_ms=latency)
+        self._note("timer_win", "passthrough")
         self._emit(decision_made_payload(
             alert=alert, input_sha256=in_sha,
             disposition=disp.action,

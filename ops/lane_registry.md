@@ -39,3 +39,4 @@ at creation — a lane that isn't registered doesn't exist.
 - Unmerged branches are normal mid-wave; at wave end every branch is merged or
   killed. No branch rots silently — Relay's blocker sweep treats a 3-hour-quiet
   branch as blocked until proven otherwise.
+| `lane/c1-stepped-failopen` | Builder C1 | in flight | C1: adaptive storm detector (correlator) + stepped fail-open (gate) as ONE architectural change per design/rfc-c1-stepped-failopen.md. Holds src/sentinel/gate.py + src/sentinel/correlator.py until PR merges | — |
