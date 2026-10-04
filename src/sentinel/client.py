@@ -4,11 +4,18 @@ Wire format ground truth (do not deviate):
   POST {base_url}/v1/systemone
   Headers: Authorization: Bearer <TYPESAFE_API_KEY>, Content-Type: application/json,
            custom User-Agent (urllib default gets HTTP 403)
-  Body: {"state": <dict|str>, "model": "jev-latest",
+  Body: {"state": <dict|str>, "model": "jev-1.13.0",   # PINNED id (ADR-015),
+                                                # never the "jev-latest" alias
          "questions": {qid: {"type": "choice"|"noul"|"score",
                              "instructions": str, "criteria": {...}}}}
   Response: {"model": "jev-1.13.0", "answers": {...},
              "usage": {"input_tokens": int, "output_tokens": int}}
+
+ADR-015 model pinning (D2): the client requires a pinned versioned model
+id at construction. The floating "jev-latest" alias is refused unless the
+caller passes allow_floating_model=True, which fires the loud boot warning
+below — floating means model_drift detection has nothing to compare
+against, so it is an explicit opt-out, never a default.
 
 Retry policy:
   401 -> JevAuthError (no retry)
@@ -25,16 +32,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import random
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+log = logging.getLogger("sentinel.client")
+
 _API_PATH = "/v1/systemone"
-_DEFAULT_MODEL = "jev-latest"
+#: ADR-015 (D2): the vendor's moving alias. Sentinel NEVER floats this by
+#: default — the client requires a pinned versioned model id (e.g.
+#: "jev-1.13.0") and refuses to construct on the alias unless the caller
+#: opts out explicitly via ``allow_floating_model=True``, which fires the
+#: loud boot warning below. A silent vendor remap under a floating alias
+#: changes the probability mapping under fixed thresholds — that is a
+#: supply-chain attack on the safety case.
+FLOATING_MODEL_ALIAS = "jev-latest"
 _USER_AGENT = "sentinel/0.1"
 
 _BACKOFF_BASE_S = 0.1
@@ -71,6 +89,61 @@ class JevTimeout(JevError):
 
 
 # ---------------------------------------------------------------------------
+# ADR-015 model pinning (D2) — resolution of the ``model`` argument.
+# ---------------------------------------------------------------------------
+
+def _floating_opt_out_warning() -> None:
+    """The loud boot warning for the floating-model opt-out (ADR-015).
+
+    ERROR/CRITICAL level + stderr banner, mirroring the ADR-005
+    onboarding warning convention: a silently-floating model is a
+    configuration the operator must never discover in a postmortem.
+    """
+    banner = (
+        "[sentinel] CRITICAL: allow_floating_model=True — the Jev client "
+        f"floats the vendor's moving alias {FLOATING_MODEL_ALIAS!r}. "
+        "ADR-015 model pinning is BYPASSED: a silent vendor remap changes "
+        "the probability mapping under fixed thresholds and model_drift "
+        "detection has nothing to compare against. This is an explicit "
+        "opt-out — pass a pinned versioned id (e.g. 'jev-1.13.0', from "
+        "pinning.json) via the 'model' argument to re-enable pinning."
+    )
+    sys.stderr.write(banner + "\n")
+    log.critical(banner)
+
+
+def _resolve_model(model: str | None, *,
+                   allow_floating_model: bool) -> str:
+    """Resolve and validate the model id (ADR-015, D2).
+
+    Returns the pinned versioned id sent on the wire. Refuses fail-closed:
+    ``None``/empty is never accepted; the floating alias is accepted only
+    behind the explicit ``allow_floating_model`` opt-out, loudly.
+    """
+    if model is None or not str(model).strip():
+        raise ValueError(
+            "ADR-015: a pinned Jev model id is required "
+            f"(got {model!r}). Pass model='jev-1.13.0' (the "
+            "pinned_model_version from pinning.json), or pass "
+            "allow_floating_model=True to float 'jev-latest' as an "
+            "explicit, loudly-warned opt-out."
+        )
+    resolved = str(model).strip()
+    if resolved == FLOATING_MODEL_ALIAS:
+        if not allow_floating_model:
+            raise ValueError(
+                f"ADR-015: refusing to float {FLOATING_MODEL_ALIAS!r} "
+                "without allow_floating_model=True. A floating alias is a "
+                "supply-chain attack on the safety case: the vendor can "
+                "remap the probability mapping under fixed thresholds and "
+                "no model_drift event will fire. Pass a pinned versioned "
+                "id instead (pinning.json), or opt out explicitly."
+            )
+        _floating_opt_out_warning()
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Response shapes
 # ---------------------------------------------------------------------------
 
@@ -102,7 +175,15 @@ class SystemOneClient:
         self,
         api_key: str,
         base_url: str = "https://api.typesafe.ai",
-        model: str = _DEFAULT_MODEL,
+        # ADR-015 (D2): the model is a REQUIRED pinned versioned id.
+        # ``None``/empty is refused fail-closed; the floating alias
+        # ("jev-latest") is refused unless ``allow_floating_model=True``
+        # opts out explicitly — and that opt-out fires the loud boot
+        # warning below, because a floating alias means model_drift
+        # detection has nothing to compare against. The pinned id is the
+        # same one the gate asserts on the response (pinning.json).
+        model: str | None = None,
+        allow_floating_model: bool = False,
         # ADR-010 §6: the inference call runs DETACHED on timer-win, so the
         # socket timeout — not the race budget — bounds the thread's
         # lifetime. Default 30 s; None/infinite is refused fail-closed.
@@ -125,7 +206,8 @@ class SystemOneClient:
                 "only lifetime bound")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.model = model
+        self.model = _resolve_model(model,
+                                    allow_floating_model=allow_floating_model)
         self.timeout_s = float(timeout_s)
         self.max_retries = int(max_retries)
         self.retry_budget_s = float(retry_budget_s)
@@ -276,7 +358,11 @@ class SystemOneClient:
 def client_from_env(**kwargs) -> SystemOneClient:
     """Build a client from the TYPESAFE_API_KEY environment variable.
 
-    Raises JevAuthError with a helpful message when the key is missing.
+    ADR-015 (D2): the model is still REQUIRED and pinned — pass
+    ``model=<pinned_model_version>`` (from pinning.json). Floating
+    ``jev-latest`` needs the explicit ``allow_floating_model=True``
+    opt-out. Raises JevAuthError with a helpful message when the key is
+    missing.
     """
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
@@ -309,10 +395,16 @@ class MockSystemOneClient(SystemOneClient):
     `script` maps a state fingerprint (sha256 of canonical state JSON, same
     encoding as state.input_sha256) to a canned DecisionResponse. Every call
     is recorded in `calls` for test assertions.
+
+    ADR-015: the mock defaults to a clearly-fake pinned id
+    (``jev-mock-0.0.0``) — test doubles float nothing, and the gate's drift
+    assertion stays meaningful under the mock.
     """
 
-    def __init__(self, script: dict[str, DecisionResponse] | None = None):
-        super().__init__(api_key="mock-key", base_url="http://mock.invalid")
+    def __init__(self, script: dict[str, DecisionResponse] | None = None,
+                 *, model: str = "jev-mock-0.0.0"):
+        super().__init__(api_key="mock-key", base_url="http://mock.invalid",
+                         model=model)
         self._script: dict[str, DecisionResponse] = dict(script or {})
         self._calls: list[dict] = []
 

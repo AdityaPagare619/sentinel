@@ -55,7 +55,11 @@ def main():
     client = SystemOneClient(
         api_key="dummy",
         base_url=os.environ.get("JEV_STUB_URL", "http://127.0.0.1:8101"),
-        retry_budget_s=2.0)
+        retry_budget_s=2.0,
+        # ADR-015: this drill talks to a local Jev STUB, not the vendor —
+        # pinning against a stub is theater, so the floating alias is an
+        # explicit, loudly-warned opt-out here (drill only, never prod).
+        allow_floating_model=True)
     audit = AuditLog(db)
     gate = Gate(client, Thresholds(), set(), audit)
     fwd = Forwarder(

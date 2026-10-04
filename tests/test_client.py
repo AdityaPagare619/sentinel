@@ -114,6 +114,9 @@ class ClientTestBase(unittest.TestCase):
     def make_client(self, **kwargs):
         kwargs.setdefault("api_key", "test-key-123")
         kwargs.setdefault("retry_budget_s", 30.0)
+        # ADR-015: the client requires a pinned model; tests default to
+        # the fake pin unless they exercise the refusal/opt-out paths.
+        kwargs.setdefault("model", "jev-1.13.0")
         return SystemOneClient(**kwargs)
 
 
@@ -140,7 +143,8 @@ class TestRequestShape(ClientTestBase):
 
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["state"], state)
-        self.assertEqual(body["model"], "jev-latest")
+        # ADR-015: the wire carries the PINNED id — never the floating alias.
+        self.assertEqual(body["model"], "jev-1.13.0")
         self.assertEqual(body["questions"], questions)
 
         self.assertEqual(resp.model, "jev-1.13.0")
@@ -238,8 +242,9 @@ class TestClientFromEnv(ClientTestBase):
 
     def test_key_from_env(self):
         with unittest.mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "env-key"}):
-            client = client_from_env()
+            client = client_from_env(model="jev-1.13.0")
         self.assertEqual(client.api_key, "env-key")
+        self.assertEqual(client.model, "jev-1.13.0")
 
     def test_api_key_never_leaks_into_error_messages(self):
         opener = self.install([http_error(401)])
