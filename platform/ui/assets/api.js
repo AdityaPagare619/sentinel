@@ -180,6 +180,44 @@ export const Data = {
       meta: { contract_version: '1.0.0', data_source: 'live', window, derived: 'client-side join of decision records + labeled outcomes', agreement: 'unavailable — shadow join not in the read contract' },
     });
   },
+   /* ---------- BYOK integrations (always live — keys are never mocked).
+   * In mock mode these throw an honest, operator-language error: mock mode
+   * has no key store, so there is nothing to configure. */
+  async getIntegrations() {
+    if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
+      message: `Integrations settings need the live API — mock mode has no key store. Switch to live to manage keys.` };
+    return this._touchMeta(await this._live('/api/v1/integrations/status'));
+  },
+  async saveIntegrationKey(name, value) {
+    if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
+      message: `Integrations settings need the live API.` };
+    return this._touchMeta(await this._live('/api/v1/integrations/keys', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [name]: value }),
+    }));
+  },
+  async deleteIntegrationKey(name) {
+    if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
+      message: `Integrations settings need the live API.` };
+    return this._touchMeta(await this._live(`/api/v1/integrations/keys/${name}`, { method: 'DELETE' }));
+  },
+  async setSimulatedPaging(enabled) {
+    if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
+      message: `Integrations settings need the live API.` };
+    return this._touchMeta(await this._live('/api/v1/integrations/simulated', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }));
+  },
+  async testPage(routingKey = null) {
+    if (this.mode === 'mock') throw { status: 0, code: 'mock_no_keys',
+      message: `The test page needs the live API.` };
+    const body = routingKey ? { routing_key: routingKey } : {};
+    return this._touchMeta(await this._live('/api/v1/integrations/test-page', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  },
 };
 
 /* ---------- SSE stream with gap detection (narrative §3.4, §6.1) ---------- */

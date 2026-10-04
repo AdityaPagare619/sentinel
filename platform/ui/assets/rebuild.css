@@ -77,3 +77,33 @@
 .diff-kind { color: var(--tx-1); }
 .diff-ev { margin-left: auto; font-size: 11px; }
 .diff-note { font-size: 11px; color: var(--tx-2); padding: 0 14px 10px; }
+
+/* ---------- integrations settings (BYOK lane) ---------- */
+.int-wrap { max-width: 720px; margin: 0 auto; padding: 8px 16px 32px; }
+.int-title { font-size: 18px; margin: 16px 0 4px; }
+.int-sub { font-size: 11px; color: var(--tx-2); }
+.int-card { border: 1px solid var(--line-0); border-radius: var(--radius-card);
+  background: var(--bg-1); padding: 16px; margin: 12px 0; }
+.int-card h3 { margin: 0 0 4px; font-size: 14px; }
+.int-card-sub { font-size: 10px; color: var(--tx-2); font-weight: normal; }
+.int-note { font-size: 11px; color: var(--tx-1); margin: 6px 0; }
+.int-note.warn { color: var(--sev-2); }
+.int-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+.int-row input[type="password"] { flex: 1; min-width: 220px; background: var(--bg-0);
+  border: 1px solid var(--line-1); border-radius: var(--radius-chip);
+  color: var(--tx-0); font-size: 12px; padding: 8px 10px; }
+.int-err { font-size: 11px; color: var(--sev-1); }
+.key-set { color: var(--state-live); font-size: 11px; }
+.key-unset { color: var(--tx-2); font-size: 11px; }
+.btn.danger { color: var(--sev-1); border-color: var(--sev-1); }
+.test-result { border-radius: var(--radius-card); padding: 12px 14px; font-size: 11px;
+  display: flex; gap: 12px; align-items: flex-start; }
+.test-result.sim { border: 1px dashed var(--sev-3); color: var(--tx-1); }
+.test-result.ok { border: 1px solid var(--state-live); color: var(--tx-0); }
+.test-result.fail { border: 1px solid var(--sev-1); color: var(--tx-0); }
+.ok-tag { color: var(--state-live); border: 1px solid var(--state-live);
+  border-radius: var(--radius-chip); padding: 2px 8px; font-size: 10px;
+  letter-spacing: 1px; flex: none; }
+.fail-tag { color: var(--sev-1); border: 1px solid var(--sev-1);
+  border-radius: var(--radius-chip); padding: 2px 8px; font-size: 10px;
+  letter-spacing: 1px; flex: none; }

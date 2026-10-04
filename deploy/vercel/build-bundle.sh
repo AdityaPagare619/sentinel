@@ -24,7 +24,7 @@ mkdir -p "$DIST/api/_srv" "$DIST/api/_eng/sentinel" "$DIST/api/_data"
 cp "$SRC/api/index.py" "$DIST/api/index.py"
 cp "$SRC/vercel.json" "$DIST/vercel.json"
 cp "$SRC/ABOUT-THIS-DEPLOYMENT.md" "$DIST/ABOUT-THIS-DEPLOYMENT.md"
-for f in __init__.py _pkg.py app.py store.py datasets.py shed.py simulate.py; do
+for f in __init__.py _pkg.py app.py store.py datasets.py shed.py simulate.py integrations.py; do
   cp "$REPO/platform/server/$f" "$DIST/api/_srv/$f"
 done
 for f in "$REPO"/src/sentinel/*.py; do
