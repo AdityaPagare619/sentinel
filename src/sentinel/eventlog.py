@@ -64,6 +64,9 @@ EVENT_TYPES = frozenset({
     "mute_appealed",
     "mute_lifted",
     "mute_expired",
+    # D10 wiring (lane/d10-resolve-wiring): the episode close trace — one
+    # event per resolve_episode() close, so no episode ever closes silently.
+    "episode_resolved",
 })
 
 ACTORS = frozenset({
@@ -129,6 +132,13 @@ _BODY_REQUIRED = {
     # mute_expired carries no attestor: expiry is the TTL the human set being
     # honored by the sweep — the opposite of auto-mute (auto-UNmute).
     "mute_expired": ("fingerprint", "expired_at", "applied_seq"),
+    # D10 wiring (lane/d10-resolve-wiring): the episode close trace.
+    # resolve_episode()'s production callers (the signed PD resolve path and
+    # POST /episodes/resolve) append one of these per close, so no episode
+    # ever closes silently. A governance event, never a routing decision:
+    # reason is the D10 close authority (operator_resolve | verified_resolve)
+    # and resolved_by names the provenance (pagerduty-webhook, operator id).
+    "episode_resolved": ("reason", "resolved_by"),
 }
 
 # Type 2 tunables.
