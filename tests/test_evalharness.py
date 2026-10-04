@@ -13,6 +13,15 @@ from sentinel.evalharness import (
 )
 from sentinel.models import Alert
 from sentinel.synthetic import generate_alerts
+from tests.test_gate import fresh_monitor_for
+
+
+def _monitor_for(pairs):
+    """D1: fixtures that expect suppress must supply the freshness evidence
+    production gives the live gate (a V1 bundle covering the allowlisted
+    fingerprints)."""
+    return fresh_monitor_for(
+        [a.fingerprint for a, lab in pairs if lab.get("allowlist_candidate")])
 
 
 def _mk_alert(i, fp, service, check, sev_in, title):
@@ -81,7 +90,9 @@ class TestEvalMetrics(unittest.TestCase):
 
 class TestEvalBatch(unittest.TestCase):
     def test_clean_fixture_perfect_scores(self):
-        rows = run_batch(_hand_fixture(), seed=11, flip_rate=0.0, label_noise=0.0)
+        pairs = _hand_fixture()
+        rows = run_batch(pairs, seed=11, flip_rate=0.0, label_noise=0.0,
+                         freshness_monitor=_monitor_for(pairs))
         acc = accuracy(rows)
         self.assertEqual(acc["n"], 6)
         self.assertEqual(acc["severity"], 1.0)
@@ -137,7 +148,8 @@ class TestEvalReport(unittest.TestCase):
     def test_synthetic_end_to_end_sane(self):
         # A real generator run: SEVs exist, none suppressed, noise suppressed.
         pairs = generate_alerts(400, seed=21)
-        rows = run_batch(pairs, seed=21, flip_rate=0.0, label_noise=0.0)
+        rows = run_batch(pairs, seed=21, flip_rate=0.0, label_noise=0.0,
+                         freshness_monitor=_monitor_for(pairs))
         fs = false_suppress_rate(rows)
         self.assertGreater(fs["n_sev1"], 0)
         self.assertEqual(fs["rate"], 0.0)

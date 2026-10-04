@@ -138,6 +138,13 @@ def replay_backtest(incidents: list[BacktestIncident], decide_fn,
         miss_disposition = None
         regression_case_id = None
 
+        # D3 note: "folded" (storm-continuation absorbed into the aggregate
+        # page) is deliberately NOT "suppress" here — the aggregate pages,
+        # so a folded continuation is not a missed page. But this replay is
+        # per-incident over the raw alert stream: it cannot see the
+        # synthetic aggregate digest page itself (the digest is emitted by
+        # the live pipeline, not by decide_fn). Folded accounting is
+        # correct; aggregate-page coverage is a known granularity gap.
         if inc.label == LABEL_AMBIGUOUS:
             ambiguous_count += 1
         elif inc.label == LABEL_REAL_SEV12:

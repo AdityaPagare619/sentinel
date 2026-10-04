@@ -64,6 +64,9 @@ ACTORS = frozenset({
 
 DISPOSITIONS = frozenset({
     "passthrough", "page_now", "page_business_hours", "suppress",
+    # D3: "folded" — storm-continuation absorbed into the aggregate page.
+    # Not suppression: no model decided anything about this alert.
+    "folded",
 })
 
 PAGE_DISPOSITIONS = frozenset({"page_now", "page_business_hours", "passthrough"})
@@ -938,6 +941,11 @@ class EventLog:
                 state["status"] = ("passthrough_unconfirmed"
                                    if obid and not is_confirmed
                                    else "passthrough_decided")
+            elif disp == "folded":
+                # D3: absorbed into the storm aggregate's page — neither
+                # suppressed nor individually paged. Explicit status so the
+                # river never misreads it as a pending decision.
+                state["status"] = "folded_into_aggregate"
             if failed and not is_confirmed and disp in PAGE_DISPOSITIONS:
                 state["detail"]["last_forward_error"] = json.loads(
                     failed[-1]["body"]).get("error_detail")
@@ -967,6 +975,38 @@ class EventLog:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def decision_dispositions_since(self, since_seq: int,
+                                    limit: int = 5000) -> tuple[list[dict], int]:
+        """Tail decision_made dispositions for the ADR-022 watchdog.
+
+        Returns ([{seq, ts_epoch, disposition, policy_id}], max_seq).
+        policy_id defaults to "suppression" when the decision body does not
+        carry one (the engine's single suppression policy).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT seq, ts, body FROM events "
+                "WHERE type = 'decision_made' AND seq > ? "
+                "ORDER BY seq ASC LIMIT ?",
+                (since_seq, limit)).fetchall()
+        out: list[dict] = []
+        max_seq = since_seq
+        for seq, ts, body in rows:
+            max_seq = max(max_seq, seq)
+            try:
+                b = json.loads(body)
+            except ValueError:
+                continue
+            try:
+                ts_epoch = datetime.fromisoformat(
+                    ts.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                continue
+            out.append({"seq": seq, "ts_epoch": ts_epoch,
+                        "disposition": b.get("disposition"),
+                        "policy_id": b.get("policy_id", "suppression")})
+        return out, max_seq
 
 
 def _iso_age_s(ts: str, now_iso: str) -> float | None:

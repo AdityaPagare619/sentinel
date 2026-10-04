@@ -33,6 +33,7 @@ from sentinel.race import (RaceClaim, RaceConfig, RaceRunner, TimerWinWatchdog,
 from sentinel.state import build_state
 
 from tests.helpers import FakeClock, make_alert
+from tests.test_gate import fresh_monitor_for
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +297,14 @@ class TestSlowVendorTimerWins(RaceTestBase):
         alert = make_alert()
         client = SlowClient(5.0, canned(p1=0.0, conf=0.95))  # suppress-shaped
         # ADR-013: attested entry so shadow path would-have-suppressed.
+        # D1: the shadow counterfactual runs the live kernel, so it needs
+        # fresh evidence too — otherwise "would-have" means "would-have
+        # vetoed on stale freshness", which is honest but not what this
+        # race-mechanics test exercises.
         gate, _audit = self.make_gate(client, allowlist=[_attested_fp(alert.fingerprint)],
-                                      race_config=RaceConfig(budget_ms=500))
+                                      race_config=RaceConfig(budget_ms=500),
+                                      freshness_monitor=fresh_monitor_for(
+                                          [alert.fingerprint]))
         state = build_state(alert, {}, {})
         t0 = monotonic()
         disp, _rec = gate.evaluate(alert, state, {}, {})
@@ -378,8 +385,13 @@ class TestFastVendorAnsweredInTime(RaceTestBase):
         alert = make_alert()
         client = SlowClient(0.05, canned(p1=0.0, conf=0.95))
         # ADR-013: needs dual attestation to suppress (not bare fingerprint).
+        # D1: suppress additionally requires fresh evidence — wire the monitor
+        # the same way production does (receiver boots it from
+        # SENTINEL_FRESHNESS_BUNDLE).
         gate, _ = self.make_gate(client, allowlist=[_attested_fp(alert.fingerprint)],
-                                 race_config=RaceConfig(budget_ms=1000))
+                                 race_config=RaceConfig(budget_ms=1000),
+                                 freshness_monitor=fresh_monitor_for(
+                                     [alert.fingerprint]))
         t0 = monotonic()
         disp, _rec = gate.evaluate(alert, build_state(alert, {}, {}), {}, {})
         elapsed = monotonic() - t0
