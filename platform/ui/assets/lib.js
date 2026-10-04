@@ -117,6 +117,7 @@ export const SCREENS = [
   { code: 'SIM', id: 'simulator', label: 'Threshold simulator' },
   { code: 'AUDIT', id: 'audit', label: 'Audit explorer' },
   { code: 'SHADOW', id: 'shadow', label: 'Shadow report' },
+  { code: 'KEYS', id: 'settings', label: 'Integrations' },
   { code: 'START', id: 'start', label: 'Onboarding' },
 ];
 

@@ -8,11 +8,12 @@ import { renderCal } from './views-cal.js';
 import { renderSim } from './views-sim.js';
 import { renderAudit } from './views-audit.js';
 import { renderShadow } from './views-shadow.js';
+import { renderSettings } from './views-settings.js';
 import { renderStart } from './views-start.js';
 import { loadPins } from './pins.js';
 
-const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, shadow: renderShadow, start: renderStart };
-const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', shadow: 'SHADOW', start: 'START' };
+const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, shadow: renderShadow, settings: renderSettings, start: renderStart };
+const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', shadow: 'SHADOW', settings: 'KEYS', start: 'START' };
 
 const el = {
   view: document.getElementById('view'),
