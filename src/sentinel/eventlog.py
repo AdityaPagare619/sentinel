@@ -310,7 +310,8 @@ class EventLog:
     def __init__(self, db_path: str = "sentinel.db",
                  spillover_dir: str | None = None,
                  degraded_sender=None,
-                 diskguard_bytes: int | None = None):
+                 diskguard_bytes: int | None = None,
+                 genesis_prev_hash: str = GENESIS_PREV_HASH):
         """
         spillover_dir: emergency spillover records land here on watchdog
             trips (design §4 degraded path). None disables file spillover.
@@ -319,6 +320,11 @@ class EventLog:
             spillover record + control-plane page carry the evidence.
         diskguard_bytes: D14 interim disk-guard watermark (ADR-024, Type 2).
             None -> SENTINEL_DISKGUARD_BYTES env -> 100 MiB default.
+        genesis_prev_hash: D14 retention (RFC 2026-10-05) — chain-of-segments.
+            A freshly-rolled segment starts its hash chain from the previous
+            segment's head hash instead of GENESIS, so the whole history stays
+            verifiable across segment files. Default GENESIS (unchanged
+            behavior for the original single-file deployment).
         """
         self.db_path = db_path
         self.spillover_dir = spillover_dir
@@ -362,7 +368,15 @@ class EventLog:
                 "SELECT seq, row_hash FROM events ORDER BY seq DESC LIMIT 1"
             ).fetchone()
         self._head_seq = row["seq"] if row else 0
-        self._head_hash = row["row_hash"] if row else GENESIS_PREV_HASH
+        self._head_hash = (row["row_hash"] if row
+                           else genesis_prev_hash)
+        self._genesis_prev_hash = genesis_prev_hash
+
+    def head(self) -> tuple[int, str]:
+        """Current chain head: (seq, row_hash). D14 retention uses this to
+        chain a rolled segment to its predecessor."""
+        with self._lock:
+            return self._head_seq, self._head_hash
 
     # ------------------------------------------------------------ internals
 
