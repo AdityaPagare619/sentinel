@@ -553,15 +553,30 @@ def threshold_counterfactual(alert, q_severity, q_team, q_disposition,
     ``suppress_conf_min``. Normalized + validated by
     ``counterfactual.normalize_counterfactual_preset`` — invalid presets
     raise loudly (a silent default here was the old quiet lie).
+
+    R14 F1: presets on axes the tap cannot express (drop_evidence,
+    disable_suppress_leg, silence_floor_version, name-only) are VALID —
+    they pass config validation and work on the live receipt. The tap
+    marks them ``"unsupported_axis"`` instead of raising: raising here
+    propagated uncaught through ``_ingest_event`` → ``handle()`` and
+    permanently lost the webhook observation (idempotency claimed
+    before ingest). A tap never crashes the observation path.
+
+    R14 F3 (documented divergence): the tap evaluates the KERNEL only;
+    the live receipt runs the FULL composition (kernel + D8 policy gate
+    + D5 corroboration leg). Under frozen policy and uncorroborated
+    evidence the tap can answer ``suppress`` where the live receipt
+    answers ``passthrough (policy_blocked)`` / ``page_now
+    (uncorroborated)``. The tap is a kernel what-if, not a replay of
+    the live decision — read it as such.
     """
     out: dict[str, str] = {}
     for raw in presets or ():
         preset = normalize_counterfactual_preset(raw)
         scm = preset.get("suppress_conf_min")
         if scm is None:
-            raise ValueError(
-                f"shadow counterfactual preset {preset['name']!r}: the "
-                "shadow tap only supports the suppress_conf_min axis")
+            out[preset["name"]] = "unsupported_axis"
+            continue
         verdict = evaluate_policy(
             alert, jev_model=jev_model,
             q_severity=q_severity, q_team=q_team, q_disposition=q_disposition,

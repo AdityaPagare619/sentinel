@@ -448,6 +448,42 @@ class TestPresetConfig(CounterfactualGateBase):
                                    msg=f"should reject {raw!r}"):
                 self._load({"counterfactual_presets": raw})
 
+    def test_preset_count_capped_at_64(self):
+        # R14 F4: unbounded preset lists are a suppress-path latency
+        # footgun — validation caps at 64.
+        many = [{"name": f"p{i}", "suppress_conf_min": 0.9}
+                for i in range(65)]
+        with self.assertRaises(ConfigRejected):
+            self._load({"counterfactual_presets": many})
+        ok = [{"name": f"p{i}", "suppress_conf_min": 0.9}
+              for i in range(64)]
+        cfg = self._load({"counterfactual_presets": ok})
+        self.assertEqual(len(cfg.thresholds.counterfactual_presets), 64)
+
+    def test_shadow_tap_marks_unsupported_axes(self):
+        # R14 F1: the shadow tap must NEVER raise on config-valid presets
+        # — it marks axes it cannot express instead of crashing the
+        # webhook ingest path. Only unsupported presets here, so the
+        # kernel is never invoked (no question objects needed).
+        from sentinel.shadow import threshold_counterfactual
+        from sentinel.counterfactual import normalize_counterfactual_preset
+        presets = [
+            {"name": "no_ev", "drop_evidence": True},
+            {"name": "no_leg", "disable_suppress_leg": True},
+            {"name": "floor3", "silence_floor_version": 3},
+            {"name": "bare"},
+        ]
+        normed = [normalize_counterfactual_preset(p) for p in presets]
+        alert = {"fingerprint": "fp1", "title": "t", "severity": "P3"}
+        out = threshold_counterfactual(
+            alert, None, None, None, None, normed)
+        self.assertEqual(out, {
+            "no_ev": "unsupported_axis",
+            "no_leg": "unsupported_axis",
+            "floor3": "unsupported_axis",
+            "bare": "unsupported_axis",
+        })
+
     def test_unknown_threshold_keys_still_rejected(self):
         with self.assertRaises(ConfigRejected):
             self._load({"bogus_key": 1.0})

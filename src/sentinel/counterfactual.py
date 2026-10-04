@@ -126,6 +126,12 @@ def validate_counterfactual_presets(raw) -> tuple:
         raise PresetError(
             "counterfactual_presets must be a list, got "
             f"{type(raw).__name__}")
+    # R14 F4: bound the count — each suppress runs one kernel eval per
+    # preset (~50µs each); an unbounded list is a latency footgun on the
+    # suppress path. 64 is generous for an operator's what-if list.
+    if len(raw) > 64:
+        raise PresetError(
+            f"counterfactual_presets has {len(raw)} entries, max 64")
     out = []
     seen = set()
     for entry in raw:
@@ -167,11 +173,16 @@ class CounterfactualInputs:
 def policy_pin(gate) -> dict:
     """The policy version pin for the receipt. Never raises.
 
+    R14 F2 (honest): this is the version READ AT RECEIPT TIME, not the
+    version the live decision evaluated — the decision's D8 check is a
+    separate earlier read, and each suppressing preset re-reads again. A
+    mid-receipt policy flip can make the pin and the per-preset gating
+    disagree (narrow window; the receipt is advisory, the disposition is
+    already fixed). What the pin guarantees: it names the policy state
+    the receipt was computed against, so a postmortem can spot the skew.
     - policy gate wired: ``PolicyGate.version_info`` — a fresh read of the
       policy-state file, the same fresh-read discipline as ``can_suppress``
-      (D8). The pin is taken once per receipt and covers every preset
-      evaluation in it (they run in the same pass, against the same
-      inputs).
+      (D8). Taken once per receipt.
     - no policy gate wired: version/state null — named, not omitted ("no
       pin" is itself information).
     - unreadable store (or a gate double without ``version_info``): the pin
