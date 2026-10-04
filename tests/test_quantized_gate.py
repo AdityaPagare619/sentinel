@@ -120,15 +120,22 @@ def _fit(n, k, org="org-c", model_pin=PINNED, shift="OK",
 
 def _gate_with(client_resp=None, *, allowlist=None, fit_store=None,
                org="org-c", alert=None, p1=0.0, conf=0.95,
-               freshness_monitor=None):
+               freshness_monitor=None, corroborate=False):
     alert = alert or make_alert()
     resp = client_resp or canned(p1=p1, conf=conf)
     state = build_state(alert, {}, {})
     client = MockSystemOneClient({input_sha256(state): resp})
     audit = AuditLog(":memory:")
+    kw = {}
+    if corroborate:
+        # D5 (ADR-019): the leg is fail-closed — a suppress test must name
+        # its corroboration witness explicitly.
+        from tests.test_corroboration import corroborated_gate_kw
+        kw = corroborated_gate_kw(alert.fingerprint, now=NOW)
     gate = Gate(client, Thresholds(), allowlist or set(), audit,
                 fit_store=fit_store, pinned_model=PINNED, org=org,
-                clock=lambda: NOW, freshness_monitor=freshness_monitor)
+                clock=lambda: NOW, freshness_monitor=freshness_monitor,
+                **kw)
     return gate, alert, state
 
 
@@ -260,7 +267,8 @@ class TestFitArtifact(unittest.TestCase):
         gate, alert, state = _gate_with(allowlist={alert.fingerprint},
                                        fit_store=store, p1=0.0, conf=0.95,
                                        freshness_monitor=fresh_monitor_for(
-                                           [alert.fingerprint]))
+                                           [alert.fingerprint]),
+                                       corroborate=True)
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
 

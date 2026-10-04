@@ -67,12 +67,16 @@ class _GateHarness:
         state = build_state(alert, {}, {})
         client = MockSystemOneClient({input_sha256(state): resp})
         audit = AuditLog(":memory:")
+        # D5 (ADR-019): the leg is fail-closed — this suppress-asserting
+        # test names its corroboration witness explicitly.
+        from tests.test_corroboration import corroborated_gate_kw
         gate = Gate(client, Thresholds(), {v1, *extra_allowlist}, audit,
                     fit_store=store, pinned_model=PINNED, org="org-c",
                     clock=lambda: NOW,
                     freshness_monitor=fresh_monitor_for([v2]),
                     legacy_allowlist={v1: v2},
-                    legacy_window_ends_at=window_ends_at)
+                    legacy_window_ends_at=window_ends_at,
+                    **corroborated_gate_kw(v2, now=NOW))
         return gate, state
 
 

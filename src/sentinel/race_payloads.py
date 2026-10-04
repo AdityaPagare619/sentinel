@@ -100,12 +100,18 @@ def decision_made_payload(*, alert, input_sha256: str,
                           latency_ms: float | None = None,
                           timer_fired_at_ms: float | None = None,
                           lock_evaluation: dict | None = None,
-                          backstop_claimed: bool = False) -> dict:
+                          backstop_claimed: bool = False,
+                          corroboration: dict | None = None) -> dict:
     """Build the ``decision_made`` payload the gate emits per decision.
 
     ``latency_ms`` is the Jev call latency — set ONLY for
     ``answered_in_time`` (null otherwise, per the schema).
     ``timer_fired_at_ms`` is the monotonic ms elapsed when the timer won.
+
+    ``corroboration`` (ADR-019/D5): the leg's verdict dict (see
+    ``corroboration.CorroborationVerdict.to_dict``) — null unless a suppress
+    verdict reached the leg. Extra body keys are permitted by the
+    event-log validator.
     """
     env = _envelope("decision_made", alert, episode_id)
     env["body"] = {
@@ -125,6 +131,10 @@ def decision_made_payload(*, alert, input_sha256: str,
         "backstop_claimed": backstop_claimed,
         "lock_evaluation": (lock_evaluation if lock_evaluation is not None
                             else empty_lock_evaluation()),
+        # ADR-019/D5 corroboration leg — the leg's verdict: which
+        # corroboration fired, or that none did. Null unless a suppress
+        # verdict reached the leg.
+        "corroboration": corroboration,
         # ADR-014 freshness proofs — owned by the freshness lane; null
         # until that lane's cache exists. Never silently approximated.
         "freshness": {

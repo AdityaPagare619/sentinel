@@ -27,6 +27,7 @@ at creation — a lane that isn't registered doesn't exist.
 | `lane/impl-liveness` | SRE | in flight | design 05: livez/healthz, 503-not-429, config validation | — |
 | `lane/remove-ci` | Petu (coordinator) | done (merged PR #20) | removed .github/workflows/ per Aditya 13:42 order; METHODOLOGY.md gate → local tests | `squash-merge` |
 | `lane/d7-history-provenance` | Builder D7 | pending review (PR #72) | design D7: 72h single-clock history provenance, label-pipeline staleness SLO with paging, novelty shadow-first | `b0a3d62` |
+| `lane/d5-corroboration` | Builder D5 | in flight | D5/ADR-019: corroboration leg in the live suppress conjunction; versioned/audited/two-person silence floor; strict-signature resolve path; freshness on evidence. Holds the gate registry (src/sentinel/gate.py) until PR merges; D9 follows | — |
 
 ## Rules
 

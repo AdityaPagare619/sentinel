@@ -3,6 +3,10 @@
 Policy table (frozen §4), evaluated in order:
   suppress            P(p1_critical) < 0.002 AND Q3 conf >= 0.90 AND fp in allowlist
                       AND every freshness proof fresh (ADR-014/D1 — stale ⇒ page_now)
+                      AND the corroboration leg passes (ADR-019/D5 — a suppress
+                      must ALSO be corroborated by an independent signal, not
+                      the same model, not the same data path; un-corroborated
+                      ⇒ page_now, reason "uncorroborated" — never silent)
   page_now            P(p1)+P(p2) > 0.30 OR Q3 conf < 0.50 (uncertainty pages)
   page_business_hours P(p3)+P(p4) dominant AND Q3 conf >= 0.70
   passthrough         client error/timeout, Q3 = cannot_determine, else uncertain
@@ -52,6 +56,7 @@ import sys
 import time
 
 from . import firewall
+from . import corroboration
 from . import race
 from .client import JevError
 from .correlator import legacy_fingerprint_of
@@ -277,12 +282,29 @@ class Gate:
                  policy_id: str = "suppression",
                  freshness_monitor=None,
                  legacy_allowlist: dict[str, str] | None = None,
-                 legacy_window_ends_at: str | None = None):
+                 legacy_window_ends_at: str | None = None,
+                 corroborator=None,
+                 silence_floor=None,
+                 attestor_registry=None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
         watchdog freeze and the B3 expired state are enforced here, on the
-        hot path, not in the UI. Never raises (fail toward the human)."""
+        hot path, not in the UI. Never raises (fail toward the human).
+
+        D5 (ADR-019) corroboration leg:
+          corroborator: optional evidence provider — a callable
+            ``(alert, floor, now) -> list[CorroborationEvidence]`` or an
+            object with ``evidence_for(alert, floor, now)``. The engine lane
+            wires this (e.g. signed resolves from the event log). Evidence
+            is VERIFIED IN THE LEG, never trusted on arrival.
+          silence_floor: a SilenceFloor or SilenceFloorStore (the versioned
+            silence floor). A store is fresh-read on every suppress decision
+            — no boot cache. None ⇒ the default floor (the leg still fails
+            closed without evidence).
+          attestor_registry: the sealed AttestorRegistry used to strictly
+            verify ``signed_resolve`` evidence. None ⇒ signed resolves
+            cannot verify ⇒ they do not corroborate (fail closed)."""
         self.client = client
         self.thresholds = thresholds
         # Allowlist entries: ADR-017/019. Accepts a plain set of fingerprints
@@ -356,6 +378,12 @@ class Gate:
         # validation on the hot path). None ⇒ the freshness legs fail
         # closed and suppress is unreachable.
         self.freshness_monitor = freshness_monitor
+        # ADR-019 (D5): the corroboration leg — the final witness before
+        # silence. All three are optional; the leg FAILS CLOSED when
+        # evidence is absent (uncorroborated suppress ⇒ page_now).
+        self.corroborator = corroborator
+        self.silence_floor = silence_floor
+        self.attestor_registry = attestor_registry
 
     # --------------------------------- ADR-017/D4 legacy-fingerprint window
 
@@ -669,6 +697,57 @@ class Gate:
                   f"suppress unreachable until it serves", file=sys.stderr)
             return None
 
+    # ------------------------------------------------- ADR-019/D5 corroboration
+
+    def _corroboration_floor(self) -> "corroboration.SilenceFloor":
+        """The silence floor for this decision. A store is fresh-read on
+        every call (Type-1 fresh-read discipline — a floor change is
+        effective on the next decision); a SilenceFloor is used as-is; None
+        ⇒ the default floor. The floor can never *grant* silence — only
+        evidence can."""
+        sf = self.silence_floor
+        if sf is None:
+            return corroboration.SilenceFloor.default()
+        if isinstance(sf, corroboration.SilenceFloorStore):
+            return sf.current()
+        return sf
+
+    def _provider_evidence(self, alert, floor, now) -> list:
+        """Evidence from the engine-wired corroborator. Never raises: a
+        broken provider yields no evidence — the leg fails closed, loudly."""
+        prov = self.corroborator
+        if prov is None:
+            return []
+        try:
+            if hasattr(prov, "evidence_for"):
+                return list(prov.evidence_for(alert, floor, now) or [])
+            return list(prov(alert, floor, now) or [])
+        except Exception as exc:
+            print(f"[sentinel] corroborator failed ({exc}) — evidence "
+                  f"ignored; the leg fails closed", file=sys.stderr)
+            return []
+
+    def _corroboration_leg(self, alert, jev_model=None):
+        """D5 (ADR-019): the final leg of the suppress conjunction — a
+        suppress must ALSO be corroborated by an independent signal.
+
+        Never raises: any failure fails the leg CLOSED (no corroboration),
+        and the caller pages on the failure. The verdict is VISIBLE in the
+        decision record (which corroboration fired, or that none did)."""
+        try:
+            floor = self._corroboration_floor()
+            now = self._gate_now()
+            evidences = self._provider_evidence(alert, floor, now)
+            return corroboration.evaluate_corroboration(
+                alert, evidences, floor, now=now,
+                registry=self.attestor_registry,
+                allowlist_entries=self.allowlist_entries,
+                jev_model=jev_model)
+        except Exception as exc:  # fail closed — the leg never sinks the page
+            return corroboration.CorroborationVerdict(
+                passed=False, kind=None, floor_version=0,
+                detail=f"corroboration leg error (fail closed): {exc}")
+
     def _decide(self, alert, state, history, context, correlation):
         in_sha = input_sha256(state)
         budget_ms = self._runner.config.budget_ms
@@ -807,6 +886,25 @@ class Gate:
                                    reason=f"policy_blocked:{why}",
                                    team=disp.team, confidence=disp.confidence,
                                    latency_ms=disp.latency_ms)
+        # ADR-019/D5 — the corroboration leg: the FINAL witness before
+        # silence. Suppress requires the model + the policy gates + an
+        # independent corroboration. Un-corroborated ⇒ page_now with the
+        # explicit "uncorroborated" reason (Law 7: uncertainty pages) —
+        # never silent suppress. The leg's verdict is merged into the lock
+        # evaluation AND the payload body: which corroboration fired, or
+        # that none did, is VISIBLE in the decision record.
+        corro_body = None
+        if disp.action == "suppress":
+            corro = self._corroboration_leg(alert,
+                                            jev_model=verdict.jev_model)
+            corro_body = corro.to_dict()
+            verdict.lock_evaluation["corroboration"] = \
+                corroboration.corroboration_leg_evaluation(corro)[
+                    "corroboration"]
+            if not corro.passed:
+                disp = Disposition(action="page_now", reason="uncorroborated",
+                                   team=disp.team, confidence=disp.confidence,
+                                   latency_ms=disp.latency_ms)
         self._emit(decision_made_payload(
             alert=alert, input_sha256=in_sha,
             disposition=disp.action,
@@ -815,7 +913,8 @@ class Gate:
             q2_team=verdict.q2_team, q3_confidence=verdict.q3_confidence,
             q3_disposition=verdict.q3_disposition,
             latency_ms=res.latency_ms,
-            lock_evaluation=verdict.lock_evaluation))
+            lock_evaluation=verdict.lock_evaluation,
+            corroboration=corro_body))
         return disp, {"jev_model": verdict.jev_model,
                       "q_severity": q_sev,
                       "q_team": q_team,
@@ -916,9 +1015,20 @@ class Gate:
                 jev_model = None
                 error_class = "malformed"
             else:
-                shadow_disposition = ("suppress" if verdict.action == "suppress"
-                                      else "passthrough")
+                # ADR-019/D5: the counterfactual mirrors the full suppress
+                # conjunction — what the gate *would* have decided had the
+                # answer arrived in time, including the corroboration leg.
+                # The leg's verdict rides in the lock evaluation so the
+                # shadow report shows which corroboration fired (or none).
+                corro = self._corroboration_leg(alert, jev_model=jev_model)
                 locks = verdict.lock_evaluation
+                locks["corroboration"] = \
+                    corroboration.corroboration_leg_evaluation(corro)[
+                        "corroboration"]
+                shadow_disposition = (
+                    "suppress"
+                    if verdict.action == "suppress" and corro.passed
+                    else "passthrough")
         self._emit(shadow_decision_payload(
             alert=alert, input_sha256=late.input_sha256,
             episode_id=late.episode_id, jev_model=jev_model,

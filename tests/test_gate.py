@@ -144,6 +144,7 @@ class TestSuppressTripleLock(GateTestBase):
     def test_suppress_via_valid_fit(self):
         # New contract: suppress via the fit path (k=0, n=1351 clears).
         from sentinel.quantized import FitArtifact, WILSON_Z
+        from tests.test_corroboration import corroborated_gate_kw
         now = datetime(2026, 10, 3, tzinfo=timezone.utc)
         art = FitArtifact(
             fit_id="", org="org-c", reference_class=REFERENCE_CLASS,
@@ -166,7 +167,10 @@ class TestSuppressTripleLock(GateTestBase):
                     fit_store=store, pinned_model="jev-1.13.0", org="org-c",
                     clock=lambda: now,
                     freshness_monitor=fresh_monitor_for(
-                        [alert.fingerprint]))
+                        [alert.fingerprint]),
+                    # D5 (ADR-019): the leg is fail-closed — a suppress
+                    # test must name its corroboration witness explicitly.
+                    **corroborated_gate_kw(alert.fingerprint, now=now))
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "suppress")
 
