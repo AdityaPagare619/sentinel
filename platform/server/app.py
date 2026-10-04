@@ -305,28 +305,28 @@ class PlatformApp:
         body, err = self._int_body(environ, start_response)
         if err:
             return err
-        saved = {}
-        for name in (PD_KEY_NAME, JEV_KEY_NAME):
-            if name in body:
-                value = body[name]
-                if not isinstance(value, str) or not value.strip():
-                    return self._error(start_response, 422, "bad_key",
-                                       f"{name} must be a non-empty string")
-                try:
-                    self.integrations.set(name, value)
-                except BadKey as e:
-                    return self._error(start_response, 422, "bad_key", str(e))
-                except EphemeralStoreError as e:
-                    return self._error(start_response, 501,
-                                       "persistence_unavailable",
-                                       str(e) + " In this hosted demo, keys are "
-                                       "session-scoped: pass routing_key with each "
-                                       "test-page request instead.")
-                saved[name] = self.integrations.status()[name]
-        if not saved:
+        # Atomic: validate everything BEFORE persisting anything — a bad
+        # second key must not leave the first one saved (Vault, PR #77).
+        items = {name: body[name]
+                 for name in (PD_KEY_NAME, JEV_KEY_NAME) if name in body}
+        if not items:
             return self._error(start_response, 422, "bad_body",
                                "nothing to save — provide pagerduty_routing_key "
                                "and/or jev_api_key")
+        for name, value in items.items():
+            if not isinstance(value, str) or not value.strip():
+                return self._error(start_response, 422, "bad_key",
+                                   f"{name} must be a non-empty string")
+        try:
+            saved = self.integrations.set_many(items)
+        except (KeyError, ValueError) as e:  # BadKey subclasses ValueError
+            return self._error(start_response, 422, "bad_key", str(e))
+        except EphemeralStoreError as e:
+            return self._error(start_response, 501,
+                               "persistence_unavailable",
+                               str(e) + " In this hosted demo, keys are "
+                               "session-scoped: pass routing_key with each "
+                               "test-page request instead.")
         return self._ok(start_response, {"saved": saved,
                                          "integrations": self.integrations.status()})
 

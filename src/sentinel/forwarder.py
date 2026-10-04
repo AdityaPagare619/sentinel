@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .eventlog import EventLog, EventLogError, utcnow_iso
-from .integrations import resolve_paging_key, simulated_paging
+from .integrations import resolve_paging_key, simulated_paging, sanitize_error
 from .pd_sender import (
     DedupKeyInvalid,
     PagerDutyClient,
@@ -906,7 +906,7 @@ class Forwarder:
         self.default_routing_key = default_routing_key
         # key_resolver: () -> (key|None, source). Per-decision resolution:
         # user store → ctor default → env → unconfigured. The source is safe
-        # to log; the key is NEVER logged (see integrations.redact).
+        # to log; the key is NEVER logged (see integrations.sanitize_error).
         self._key_resolver = key_resolver
         self.metrics: dict = {
             "forwarded": 0,   # POSTs accepted (2xx)
@@ -926,7 +926,8 @@ class Forwarder:
         """Per-decision routing-key resolution (BYOK lane).
 
         Order: explicit key_resolver → user integrations store →
-        constructor default → PD_ROUTING_KEY env → unconfigured.
+        PD_ROUTING_KEY env (inside resolve_paging_key) → constructor
+        default → unconfigured.
         Returns (key_or_None, source); the source is safe to log.
         """
         if self._key_resolver is not None:
@@ -1051,11 +1052,14 @@ class Forwarder:
               exc: BaseException, status_code: int | None = None) -> ForwardResult:
         # The page was already decided; the operator must know the relay failed.
         # Log carries alert_id/action/status only — never the body (routing key).
+        # The exception string is sanitized against known key values: a
+        # hostile/synthetic exception carrying the key must not echo it.
         self.metrics["errors"] += 1
+        err = sanitize_error(str(exc))
         print(f"[sentinel] FORWARD FAILED action={action} alert={alert_id} "
-              f"status={status_code} error={exc}", file=sys.stderr)
+              f"status={status_code} error={err}", file=sys.stderr)
         return ForwardResult(forwarded=False, status_code=status_code,
-                             error=str(exc), action=action, dedup_key=dedup_key)
+                             error=err, action=action, dedup_key=dedup_key)
 
 
 # ------------------------------------------------------------------ helpers

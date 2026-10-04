@@ -38,8 +38,6 @@ ENV_JEV_KEY = "TYPESAFE_API_KEY"
 # PagerDuty Events API v2 integration keys are 32 lowercase hex chars.
 _PD_KEY_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
-_REDACTED = "[REDACTED]"
-
 
 class EphemeralStoreError(RuntimeError):
     """Raised when a write is attempted on an ephemeral (memory-only) store."""
@@ -150,6 +148,20 @@ class IntegrationStore:
         self._write(data)
         return self._public(name, clean)
 
+    def set_many(self, items: dict) -> dict:
+        """Validate ALL, then persist ALL. Never partially persists: a bad
+        second key must not leave the first one saved (Vault, PR #77)."""
+        cleaned = {}
+        for name, value in items.items():
+            if name not in KNOWN_KEYS:
+                raise KeyError(f"unknown integration key {name!r}")
+            cleaned[name] = _VALIDATORS[name](value)
+        data = self._read()
+        data.update(cleaned)
+        self._write(data)
+        return {name: self._public(name, clean)
+                for name, clean in cleaned.items()}
+
     def delete(self, name: str) -> None:
         if name not in KNOWN_KEYS:
             raise KeyError(f"unknown integration key {name!r}")
@@ -231,45 +243,43 @@ def simulated_paging(store: IntegrationStore | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# redaction: defense in depth at emission boundaries
+# error sanitization: the ONE wired-in emission boundary guard.
+#
+# The deleted redact()/scrub_record()/known_secrets() helpers (PR #77 review)
+# had zero production callers — advertised defense-in-depth that didn't exist.
+# This replaces them with a single function that IS called, on every forward
+# failure path: the forwarder knows the configured key values, so it strips
+# those exact values from error strings before they reach stderr/results.
+# Realistic transport exceptions never carry the POST body (the key lives in
+# the body, not the URL); this covers the hostile/synthetic case too.
 
 
-def redact(text: str, secrets: list[str]) -> str:
-    """Replace every known secret value with [REDACTED]."""
+def sanitize_error(text: str) -> str:
+    """Remove known key VALUES from an error string before emission."""
     out = text if isinstance(text, str) else str(text)
-    for s in secrets:
-        if s and isinstance(s, str) and len(s) >= 4:
-            out = out.replace(s, _REDACTED)
+    for secret in _known_key_values():
+        if secret and isinstance(secret, str) and len(secret) >= 8:
+            out = out.replace(secret, "[REDACTED]")
     return out
 
 
-def scrub_record(obj, secrets: list[str]):
-    """Recursively scrub secret values from a record (dict/list/str)."""
-    if isinstance(obj, dict):
-        return {k: scrub_record(v, secrets) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [scrub_record(v, secrets) for v in obj]
-    if isinstance(obj, str):
-        return redact(obj, secrets)
-    return obj
-
-
-def known_secrets(store: IntegrationStore | None = None) -> list[str]:
-    """All secret values currently configured — for scrubbing. Handle the
-    returned list like the secrets themselves (never log it)."""
-    store = store or IntegrationStore()
-    out = []
-    for name in KNOWN_KEYS:
-        try:
-            v = store.get(name)
-        except Exception:
-            v = None
+def _known_key_values() -> list:
+    """Configured key values from store + env. Handle like secrets: the
+    returned list is used for replacement only and never logged."""
+    vals = []
+    try:
+        store = IntegrationStore()
+        for name in KNOWN_KEYS:
+            try:
+                v = store.get(name)
+            except Exception:
+                v = None
+            if v:
+                vals.append(v)
+    except Exception:
+        pass
+    for env_name in (ENV_PD_ROUTING_KEY, ENV_JEV_KEY):
+        v = os.environ.get(env_name)
         if v:
-            out.append(v)
-    env = os.environ.get(ENV_PD_ROUTING_KEY)
-    if env:
-        out.append(env)
-    env = os.environ.get(ENV_JEV_KEY)
-    if env:
-        out.append(env)
-    return out
+            vals.append(v)
+    return vals

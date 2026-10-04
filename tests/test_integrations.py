@@ -130,6 +130,27 @@ class StoreTest(unittest.TestCase):
         finally:
             del os.environ["SENTINEL_SIMULATED_PAGING"]
 
+    def test_set_many_saves_both_when_valid(self):
+        out = self.store.set_many({eng.PD_KEY_NAME: TEST_PD_KEY,
+                                   eng.JEV_KEY_NAME: TEST_JEV_KEY})
+        self.assertTrue(out[eng.PD_KEY_NAME]["configured"])
+        self.assertTrue(out[eng.JEV_KEY_NAME]["configured"])
+        self.assertEqual(self.store.get(eng.PD_KEY_NAME), TEST_PD_KEY)
+
+    def test_set_many_is_atomic_bad_second_key_saves_nothing(self):
+        # Vault (PR #77): a bad second key must not leave the first saved.
+        with self.assertRaises(ValueError):
+            self.store.set_many({eng.PD_KEY_NAME: TEST_PD_KEY,
+                                 eng.JEV_KEY_NAME: "short"})
+        self.assertIsNone(self.store.get(eng.PD_KEY_NAME))
+        self.assertIsNone(self.store.get(eng.JEV_KEY_NAME))
+
+    def test_set_many_rejects_unknown_name_before_any_write(self):
+        with self.assertRaises(KeyError):
+            self.store.set_many({eng.PD_KEY_NAME: TEST_PD_KEY,
+                                 "nope": "x"})
+        self.assertIsNone(self.store.get(eng.PD_KEY_NAME))
+
 
 class EphemeralTest(unittest.TestCase):
     def test_unwritable_dir_goes_ephemeral_and_writes_fail_loud(self):
@@ -197,40 +218,6 @@ class ResolutionTest(unittest.TestCase):
             del os.environ["TYPESAFE_API_KEY"]
 
 
-class RedactionTest(unittest.TestCase):
-    def test_redact_replaces_all_secrets(self):
-        text = f"key={TEST_PD_KEY} and jev={TEST_JEV_KEY} tail"
-        out = eng.redact(text, [TEST_PD_KEY, TEST_JEV_KEY])
-        self.assertNotIn(TEST_PD_KEY, out)
-        self.assertNotIn(TEST_JEV_KEY, out)
-        self.assertIn("[REDACTED]", out)
-        self.assertIn("tail", out)
-
-    def test_scrub_record_recursive(self):
-        rec = {"a": TEST_PD_KEY, "nested": {"b": [TEST_JEV_KEY, "ok"]}, "n": 3}
-        out = eng.scrub_record(rec, [TEST_PD_KEY, TEST_JEV_KEY])
-        blob = json.dumps(out)
-        self.assertNotIn(TEST_PD_KEY, blob)
-        self.assertNotIn(TEST_JEV_KEY, blob)
-        self.assertEqual(out["nested"]["b"][1], "ok")
-        self.assertEqual(out["n"], 3)
-
-    def test_known_secrets_covers_store_and_env(self):
-        tmp = _TmpState()
-        try:
-            store = eng.IntegrationStore()
-            store.set(eng.PD_KEY_NAME, TEST_PD_KEY)
-            os.environ["TYPESAFE_API_KEY"] = "platform-key"
-            try:
-                secrets = eng.known_secrets(store)
-                self.assertIn(TEST_PD_KEY, secrets)
-                self.assertIn("platform-key", secrets)
-            finally:
-                del os.environ["TYPESAFE_API_KEY"]
-        finally:
-            tmp.close()
-
-
 class ForwarderKeyLeakTest(unittest.TestCase):
     """A key in config must NEVER appear in any emitted record.
 
@@ -277,6 +264,11 @@ class ForwarderKeyLeakTest(unittest.TestCase):
         self.assertTrue(res.forwarded)
 
     def test_key_never_in_failure_records(self):
+        # The forwarder sanitizes the exception string against known key
+        # values in _fail (sanitize_error) — so even a HOSTILE exception
+        # carrying the key must not echo it in any emitted record. This
+        # asserts on RAW outputs: no test-side scrubbing (the old version
+        # scrubbed with the helpers under test — circular).
         fwd = Forwarder()
 
         def boom(self, body, action, dedup_key, alert_id):
@@ -286,14 +278,16 @@ class ForwarderKeyLeakTest(unittest.TestCase):
         err = io.StringIO()
         with redirect_stderr(err):
             res = fwd.forward(_non_pd_alert(), _disp())
-        # even a hostile exception is scrubbed at the boundary: forward()
-        # must never raise, and the recorded error must not carry the key
+        # forward() must never raise, and no emitted record carries the key
         self.assertFalse(res.forwarded)
-        scrubbed = eng.scrub_record(
-            {"stderr": err.getvalue(), "error": res.error,
-             "metrics": fwd.metrics}, eng.known_secrets())
-        blob = json.dumps(scrubbed)
+        blob = json.dumps({"stderr": err.getvalue(), "error": res.error,
+                           "metrics": fwd.metrics})
         self.assertNotIn(TEST_PD_KEY, blob)
+        self.assertIn("[REDACTED]", res.error)
+
+    def test_sanitize_error_leaves_benign_text_alone(self):
+        out = eng.sanitize_error("conn refused: timeout after 3s")
+        self.assertEqual(out, "conn refused: timeout after 3s")
 
     def test_per_decision_resolution_picks_up_key_changes(self):
         fwd = Forwarder()

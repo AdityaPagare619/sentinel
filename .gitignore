@@ -8,6 +8,11 @@
 **/*secret*
 **/*credentials*
 kaggle.json
+# BYOK integration key store — live PagerDuty/Jev keys live here at runtime.
+# This repo goes public at Preview-1: a `git add -A` must NEVER be able to
+# commit a live key (Vault finding on PR #77).
+sentinel-state/
+integrations.json
 
 # Python
 __pycache__/

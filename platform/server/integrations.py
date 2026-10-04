@@ -126,6 +126,18 @@ class IntegrationStore:
         self._write(data)
         return self._public(clean)
 
+    def set_many(self, items: dict) -> dict:
+        """Validate ALL, then persist ALL. Never partially persists."""
+        cleaned = {}
+        for name, value in items.items():
+            if name not in KNOWN_KEYS:
+                raise KeyError(name)
+            cleaned[name] = _VALIDATORS[name](value)
+        data = self._read()
+        data.update(cleaned)
+        self._write(data)
+        return {name: self._public(clean) for name, clean in cleaned.items()}
+
     def delete(self, name: str) -> None:
         if name not in KNOWN_KEYS:
             raise KeyError(name)
