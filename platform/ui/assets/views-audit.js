@@ -3,8 +3,10 @@
  *        GET /api/analytics/flips, GET /api/analytics/noise.
  * Read-only. The audit explorer can never alter a decision — only establish what happened. */
 import { Data } from './api.js';
-import { decisionRow, dispChip, skeletonRows, errorBlock, emptyBlock, drawerHtml, esc } from './components.js';
-import { stripAudit, fmtInt, fmtPct, fmtConf, fmtTime, shortHash, SEV_LABEL, DISP_LABEL,
+import { decisionRow, dispChip, skeletonRows, errorBlock, emptyBlock, drawerHtml, esc, derivedMark } from './components.js';
+import { deriveChain, verifyChain } from './chain.js';
+import { freshnessBadge, freshnessState, FRESHNESS_BUDGETS } from './freshness.js';
+import { stripAudit, fmtInt, fmtPct, fmtConf, fmtTime, fmtTimeDual, shortHash, SEV_LABEL, DISP_LABEL,
          DEFAULT_THRESHOLDS } from './lib.js';
 
 const TEAMS = ['platform', 'network', 'data', 'product_backend', 'security', 'cannot_determine'];
@@ -48,6 +50,11 @@ export async function renderAudit(root, params, ctx) {
         <button id="a-export" class="btn">export audit pack</button>
       </div>
       <div id="a-noise" class="noise-strip mono"></div>
+      <div id="a-fresh" class="audit-fresh mono"></div>
+      <details class="chain-panel" id="a-chainwrap">
+        <summary class="mono">event-log chain — tamper-evident, derived locally ${derivedMark('derived', 'the platform does not expose the sealed event log in the read contract; the console derives and verifies this chain from stored decisions')}</summary>
+        <div id="a-chain" class="mono">${skeletonRows(2)}</div>
+      </details>
       <div id="a-results" class="tape">${skeletonRows(8)}</div>
     </section>
   </div>`;
@@ -88,7 +95,7 @@ export async function renderAudit(root, params, ctx) {
     return `<div class="flip-record">
       <div class="flip-head mono">${esc(shortHash(fr.input_sha256, 8))} · ${fr.repeats} repeats · <b>${fr.flipped ? 'FLIPPED' : 'consistent'}</b> · ${esc(fr.fingerprint.slice(0, 8))}</div>
       <div class="flip-tl">${ds.map((d, i) => `
-        <div class="flip-ev"><span class="mono">${esc(fmtTime(d.time))}</span> ${dispChip(d.disposition, null).replace(/·[^<]*<\/span>$/, '</span>')}
+        <div class="flip-ev"><span class="mono">${esc(fmtTimeDual(d.time))}</span> ${dispChip(d.disposition, null).replace(/·[^<]*<\/span>$/, '</span>')}
         <span class="mono">${fmtConf(d.confidence)}</span>${i > 0 && d.disposition !== ds[i - 1].disposition ? ' <span class="flip-flag mono">← FLIP</span>' : ''}</div>
         ${i < ds.length - 1 ? '<div class="flip-link">│ input identical</div>' : ''}`).join('')}</div>
       ${!fr.flipped ? '<p class="drawer-note">One decision on this input — no flip. The machine has been consistent here.</p>' : '<p class="drawer-note">cause: input, thresholds, and tuner identical across repeats — model non-determinism (measured band 1.3–2.2%).</p>'}
@@ -148,11 +155,22 @@ export async function renderAudit(root, params, ctx) {
         rows = labeled; totalLabeled = labeled.length;
       }
       noise = noiseEnv?.data || null;
+      /* §4.1: the audit window's freshness — newest stored decision vs the
+       * audit budget (the log is immutable, so this is about coverage, stated) */
+      const freshEl = root.querySelector('#a-fresh');
+      if (freshEl) {
+        const newest = rows.length ? rows[0].time : null;
+        freshEl.innerHTML = freshnessBadge({
+          state: rows.length ? 'live' : 'degraded',
+          asOfIso: newest, waitingOn: rows.length ? null : 'decisions API',
+          budgetMs: FRESHNESS_BUDGETS.audit,
+        }) + ` <span style="color:var(--tx-2)">window: last ${esc(q.last)} · ${fmtInt(rows.length)} decisions</span>`;
+      }
       try {
         const cal = await Data.getCalibration(rows[0]?.team || 'data');
         calBins = cal.data.bins;
       } catch { calBins = null; }
-      paintNoise(); paintResults();
+      paintNoise(); paintResults(); paintChain();
     } catch (e) {
       results.innerHTML = errorBlock({
         what: `Couldn't reach the audit API (GET /api/decisions → ${e.status || 'unreachable'}).`,
@@ -162,13 +180,47 @@ export async function renderAudit(root, params, ctx) {
     }
   }
 
-  /* export: the postmortem artifact */
-  root.querySelector('#a-export').addEventListener('click', () => {
+  /* The event-log chain (Appendix A <TimelineExplorer>): hash-linked events
+   * derived locally from the stored decisions and re-verified client-side.
+   * A break renders its location in-band — never silently. */
+  async function paintChain() {
+    const el = root.querySelector('#a-chain');
+    if (!el) return;
+    try {
+      const links = await deriveChain(rows);
+      const v = await verifyChain(links);
+      const head = links.slice(-12).reverse();
+      el.innerHTML =
+        `<div class="chain-status ${v.ok ? 'ok' : 'broken'}">` +
+        (v.ok
+          ? `chain whole — ${fmtInt(v.n)} links verified (recomputed locally)`
+          : `CHAIN BROKEN at link #${v.brokenAt} — ${esc(v.reason)}. The stored window is internally inconsistent; escalate to the platform team.`) +
+        `</div>` +
+        head.map((l, i) => `
+          <div class="chain-link${i === 0 ? ' head' : ''}">
+            <span class="mono">#${l.decision_id}</span>
+            <span class="mono">${esc(fmtTimeDual(l.created_at))}</span>
+            <span class="mono">${esc(l.prev.slice(0, 8))}… → <b>${esc(l.hash.slice(0, 8))}…</b></span>
+            <span class="mono">in:${esc(shortHash(l.input_sha256, 6))}</span>
+          </div>`).join('') +
+        (links.length > 12 ? `<div class="mono" style="color:var(--tx-2)">+ ${fmtInt(links.length - 12)} earlier links — widen the window in the export to include them</div>` : '') +
+        `<p class="drawer-note">Derived by the console from stored decisions — not the platform's sealed log (not exposed by the read API; RFC in the build record). It proves the window you hold is internally consistent; it cannot attest to what the platform recorded.</p>`;
+    } catch (e) {
+      el.innerHTML = `<div class="chain-status broken">chain derivation failed: ${esc(e.message || String(e))}</div>`;
+    }
+  }
+
+  /* export: the postmortem artifact — decisions + the derived chain, so the
+   * recipient can re-verify the window without trusting this console */
+  root.querySelector('#a-export').addEventListener('click', async () => {
+    const chain = await deriveChain(rows).catch(() => []);
     const pack = {
       query: searchParams(), dataset_version: Data.datasetVersion,
       data_source: Data.lastMeta?.data_source || 'unknown',
       exported_at: new Date().toISOString(), contract_version: '1.0.0',
       decisions: rows,
+      derived_chain: chain, /* re-verify with assets/chain.js verifyChain() */
+      chain_note: 'console-derived from stored decisions — not the platform sealed log',
     };
     const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');

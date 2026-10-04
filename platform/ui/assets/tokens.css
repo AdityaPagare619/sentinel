@@ -26,6 +26,18 @@
   --src-shadow: #FFB86B;
   --src-production: #5EEAD4;
 
+  /* B1 third channel — system health owns a RESERVED hue set (§2.2 taxonomy).
+   * These roles are reserved for the freshness/health channel and are never
+   * spent on severity or disposition. Freshness badges always carry a text
+   * label (§7), so adjacency to severity hues is safe by construction.
+   * --state-error intentionally shares the page/critical red: error and
+   * "a human was woken" share urgency semantics — documented, not accidental. */
+  --state-live: #34D399;
+  --state-cached: #9AA9C4;
+  --state-stale: #FBBF24;
+  --state-degraded: #F472B6;
+  --state-error: #FF5470;
+
   --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
 

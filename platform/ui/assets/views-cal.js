@@ -3,6 +3,7 @@
  * Law L3: no accuracy claims — calibration, coverage, flips, all with denominators. */
 import { Data } from './api.js';
 import { relDiagram, skeletonRows, errorBlock, emptyBlock, esc } from './components.js';
+import { freshnessBadge, FRESHNESS_BUDGETS } from './freshness.js';
 import { stripCal, gloss80, calVerdict, overconfidentBins, fmtInt, fmtPct, fmtConf,
          routeHref } from './lib.js';
 
@@ -17,6 +18,7 @@ export async function renderCal(root, params, ctx) {
     <div class="team-tabs" role="tablist">
       ${TEAMS.map(t => `<button class="tab${t === team ? ' on' : ''}" data-team="${t}" role="tab">${t === 'all' ? '+ all' : t}</button>`).join('')}
     </div>
+    <div id="cal-fresh" style="margin-bottom:12px"></div>
     <div id="cal-body">${skeletonRows(4)}</div>
   </div>`;
 
@@ -38,6 +40,13 @@ export async function renderCal(root, params, ctx) {
     const c = calEnv.data;
     ctx.setSrcBadge(calEnv.meta?.data_source);
     ctx.setDsVersion(Data.datasetVersion);
+    /* §4.1: calibration freshness is join-bound — the join timestamp is not
+     * exposed by the read API, so the badge states the condition honestly
+     * instead of inventing an as-of. */
+    root.querySelector('#cal-fresh').innerHTML = freshnessBadge({
+      state: 'cached', waitingOn: 'nightly shadow join (join time not exposed by the read API)',
+      budgetMs: FRESHNESS_BUDGETS.calibration,
+    });
 
     const n = c.n_labeled ?? c.n_decisions;
     const thin = n < 100;

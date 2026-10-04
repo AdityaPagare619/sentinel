@@ -46,25 +46,35 @@ The client is checked against `platform/contracts/openapi.yaml` (the type
 authority; mocks are scaffolding):
 
 ```bash
-python3 tests/conformance.py   # endpoint coverage · mock shapes · enum mappings · envelope labels
-node --test tests/lib.test.mjs # pure-function unit tests (strips, calibration math, drill-7 plan)
+python3 tests/conformance.py   # endpoint coverage · mock shapes · enum mappings · envelope labels · shadow derivation
+python3 tests/antislop.py      # §8 anti-slop checklist, mechanical edition (emoji/type/color/gradient/phantom-UI)
+node --test tests/*.test.mjs  # lib · contract · components · payload · pins · freshness · shadow · honesty (§9.2 gates)
 ```
 
 ## Structure
 
 ```
 index.html            shell: top bar, verdict strip, drawer, palette, mock banner
-assets/tokens.css     design tokens — verbatim from design/DESIGN_SYSTEM.md §2
+assets/tokens.css     design tokens — §2.2 taxonomy incl. --state-* (B1 health channel)
 assets/app.css        components + screens
+assets/rebuild.css    prism-rebuild additions: freshness badges, derived marks,
+                      virtualized tape, sim treatment, chain, shadow, companions
 assets/lib.js         pure functions (mappings, strip grammar, calibration math,
                       mock simulate recompute, policy-diff export, startPlan)
-assets/api.js         data layer: live ↔ mock switch, SSE w/ gap detection
+assets/api.js         data layer: live ↔ mock switch, SSE w/ gap detection,
+                      client-derived shadow join (getShadow)
 assets/components.js  atomic components: chips, badges, confidence bar (§3.5),
-                      reliability diagram, river row, drawer, dead states
-assets/views-*.js     the five screens
+                      reliability diagram, river row, drawer, dead states,
+                      FreshnessBadge, ReconstructionMark, decision glyphs,
+                      §4.3 five-state registry
+assets/freshness.js   §4.1 freshness contract: states, per-surface budgets, badge
+assets/shadow.js      S5 metrics: page-precision, suppression-regret, agreement
+assets/chain.js       S4 derived event-log chain: derive + verify (client-side)
+assets/views-*.js     the six screens (river · calibration · simulator ·
+                      audit · shadow · start)
 assets/app.js         router + shell wiring
-data/                 contract mocks, copied from platform/contracts/mocks/
-tests/                conformance.py + lib.test.mjs
+data/                 contract mocks incl. shadow.json (S5 fixture)
+tests/                conformance.py · antislop.py · *.test.mjs
 ```
 
 ## Laws honored

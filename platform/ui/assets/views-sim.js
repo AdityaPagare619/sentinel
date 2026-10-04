@@ -3,7 +3,8 @@
  * Same math as the tuner — the projection panel reprices live on drag.
  * Law L5: the simulator NEVER writes policy. Commit = exported policy diff for review. */
 import { Data } from './api.js';
-import { skeletonRows, errorBlock, emptyBlock, esc } from './components.js';
+import { skeletonRows, errorBlock, emptyBlock, esc, derivedMark } from './components.js';
+import { freshnessBadge, freshnessState, FRESHNESS_BUDGETS } from './freshness.js';
 import { stripSim, fmtInt, fmtPct, fmtConf, THRESHOLD_META, DEFAULT_THRESHOLDS,
          policyDiffYaml, branchName } from './lib.js';
 
@@ -17,7 +18,19 @@ export async function renderSim(root, params, ctx) {
   let cost = { c_fp: 100, c_fn: 50000 };
   let acked = false, curvePts = [];
 
+  /* §4.4 with full force: the simulator is the one surface where EVERYTHING
+   * is derived — so its labeling must be unmistakable. The banner is in-band,
+   * always visible, and cannot be dismissed; every card carries the SIMULATED
+   * mark; exports are watermarked. Simulator confusion (pre-mortem #2) is a
+   * release-blocking defect, not a copy preference. */
+  const SIM_BANNER = `<div class="sim-banner mono" role="note">
+    <span class="sim-banner-tag">SIMULATION</span>
+    Every number on this surface is a projection — none of it happened.
+    Thresholds moved here changed nothing. Nothing is written by this screen.
+  </div>`;
+
   root.innerHTML = `
+  ${SIM_BANNER}
   <div class="sim-layout">
     <aside class="sim-controls">
       <div class="sim-team"><label class="mono">team</label>
@@ -33,8 +46,9 @@ export async function renderSim(root, params, ctx) {
     </aside>
     <section class="sim-projection">
       <div id="sim-strip2" class="strip-inline mono"></div>
+      <div id="sim-fresh" class="sim-freshline mono" style="margin-bottom:8px"></div>
       <div id="sim-cards" class="proj-cards">${skeletonRows(3)}</div>
-      <div class="curve-wrap"><h3>Tradeoff curve <span class="mono curve-sub">x = suppression rate · y = expected false suppresses</span></h3>
+      <div class="curve-wrap"><h3>Tradeoff curve ${derivedMark('simulated', 'each point is a projection with the suppress floor moved; nothing was paged or suppressed')} <span class="mono curve-sub">x = suppression rate · y = expected false suppresses</span></h3>
         <canvas id="sim-curve" width="520" height="300"></canvas></div>
       <div class="prov-block mono" id="sim-prov"></div>
     </section>
@@ -98,6 +112,11 @@ export async function renderSim(root, params, ctx) {
       ctx.setSrcBadge(env.meta?.data_source);
       ctx.setDsVersion('ds:' + prov.dataset_version);
       root.querySelector('#sim-ds').textContent = 'ds:' + prov.dataset_version;
+      /* §4.1: the projection's freshness is the dataset's freshness — stated, budgeted */
+      root.querySelector('#sim-fresh').innerHTML = freshnessBadge({
+        state: freshnessState({ sourceUp: true, asOfMs: prov.computed_at ? new Date(prov.computed_at).getTime() : null, budgetMs: FRESHNESS_BUDGETS.simulator }),
+        asOfIso: prov.computed_at, waitingOn: null, budgetMs: FRESHNESS_BUDGETS.simulator,
+      }) + ' <span style="color:var(--tx-2)">projection dataset</span>';
       paintCards(); paintProv(); paintStrip(); drawCurve();
     } catch (e) {
       if (seq !== simSeq) return;
@@ -121,13 +140,13 @@ export async function renderSim(root, params, ctx) {
     const falseDelta = proj.exp_false_suppresses - (b.exp_false_suppresses ?? 0);
     const danger = falseDelta > 0.05;
     cardsEl.innerHTML = `
-      <div class="pcard"><div class="pcard-k">Pages <span class="would">would have paged</span></div>
+      <div class="pcard"><div class="pcard-k">Pages <span class="would">would have paged</span> ${derivedMark('simulated', 'projection over the 7d shadow window with your thresholds')}</div>
         <div class="pcard-v mono">${fmtInt(b.page_now)} → <b>${fmtInt(proj.page_now)}</b> ${deltaLine(proj.page_now, b.page_now)}</div>
         <div class="pcard-sub mono">of ${fmtInt(proj.n_alerts)} evaluated · ${fmtInt(proj.queue)} queued biz-hrs · ${fmtInt(proj.baseline)} unchanged</div></div>
-      <div class="pcard"><div class="pcard-k">Suppressions <span class="would">would have stood down</span></div>
+      <div class="pcard"><div class="pcard-k">Suppressions <span class="would">would have stood down</span> ${derivedMark('simulated', 'projection over the 7d shadow window with your thresholds')}</div>
         <div class="pcard-v mono">${fmtInt(b.suppress)} → <b>${fmtInt(proj.suppress)}</b> ${deltaLine(proj.suppress, b.suppress)}</div>
         <div class="pcard-sub mono">suppression rate ${fmtPct(proj.suppress_rate)} · avoided page cost $${fmtInt(proj.avoided_page_cost)}</div></div>
-      <div class="pcard${danger ? ' danger' : ''}"><div class="pcard-k">False-suppress watch <span class="would">the conscience</span></div>
+      <div class="pcard${danger ? ' danger' : ''}"><div class="pcard-k">False-suppress watch <span class="would">the conscience</span> ${derivedMark('simulated', 'Σ P(p1) over the would-be-suppressed set — a projection, not a count of real mistakes')}</div>
         <div class="pcard-v mono">${(b.exp_false_suppresses ?? 0).toFixed(1)} → <b>${proj.exp_false_suppresses.toFixed(1)}</b> ${deltaLine(Math.round(proj.exp_false_suppresses * 10) / 10, Math.round((b.exp_false_suppresses ?? 0) * 10) / 10)}</div>
         <div class="pcard-sub mono">Σ P(p1) over suppressed · expected cost $${fmtInt(proj.expected_cost)}</div>
         ${danger ? '<div class="pcard-warn mono">export locked — review each case in the audit explorer first</div>' : ''}</div>`;
@@ -213,9 +232,9 @@ export async function renderSim(root, params, ctx) {
     const modal = root.querySelector('#sim-diff');
     const yaml = policyDiffYaml({ team, oldT: DEFAULT_THRESHOLDS, newT: t, projection: proj, provenance: prov, datasetVersion: prov.dataset_version });
     modal.innerHTML = `<div class="diff-card">
-      <h3>Policy diff — review, then commit in git</h3>
+      <h3>Policy diff — review, then commit in git ${derivedMark('simulated', 'the projection in this diff is simulated, not measured')}</h3>
       <p class="drawer-note">The simulator never writes policy. Applying this is a human code-review decision, with the projection above as the attached evidence.</p>
-      <pre class="mono">${esc(yaml)}</pre>
+      <pre class="mono">${esc('# SIMULATED PROJECTION — not a historical measurement\n' + yaml)}</pre>
       <div class="prov-actions">
         <button class="btn" id="diff-copy">copy diff</button>
         <button class="btn" id="diff-branch">copy branch name</button>
