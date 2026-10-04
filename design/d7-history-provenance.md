@@ -76,17 +76,24 @@ Consequences (all enforced, all tested):
 
 ## Label staleness as a paged SLO
 
-The correlator consumes label snapshots from the label pipeline:
+> **NOT YET WIRED (honest flag, R11).** No in-repo pipeline produces
+> `LabelSnapshot` today — the SLO machinery below is built and tested but
+> unreachable until the label pipeline lands and starts passing snapshots at
+> ingest. The correlator does not *consume* label snapshots yet; it *accepts*
+> them. The "correlator consumes" phrasing elsewhere in this doc is aspirational.
+
+The correlator accepts label snapshots from the label pipeline (when it exists):
 `LabelSnapshot(labels, version, labels_as_of)` — passed at ingest by the
 pipeline that owns them.
 
 **SLO:** `now - labels_as_of ≤ 900s (15 min)`.
 
-Why 15 min: the label pipeline publishes at least every 5 min (its own
-heartbeat); the correlator SLO is **3× the heartbeat** — one missed publish
-is a blip, a sustained stall pages. And 15 min dominates the correlator's own
-short horizons (60s storm window, 5-min dedup): labels older than the decision
-horizon they inform are rotten by definition.
+Why 15 min: **assumed** 3× the pipeline's 5-min heartbeat — but the pipeline
+doesn't exist in-repo, so the 5-min heartbeat is an unverified external
+assumption (R11). Re-derive from the real heartbeat when the pipeline lands.
+One missed publish is a blip, a sustained stall pages. And 15 min dominates
+the correlator's own short horizons (60s storm window, 5-min dedup): labels
+older than the decision horizon they inform are rotten by definition.
 
 **On breach: PAGE.** The correlator emits a structured
 `Page(severity="page", reason="label_pipeline_stale", service, fingerprint,

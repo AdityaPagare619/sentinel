@@ -263,15 +263,25 @@ class TestNoveltyShadow(unittest.TestCase):
     def test_promotion_gate_passes_with_evidence(self):
         clock = FakeClock()
         c = Correlator(clock=clock)
-        for i in range(5):
+        for i in range(100):
             c.ingest(make_alert(service=f"svc{i}", alert_id=f"n{i}"))
-        n = c.promote_novelty_to_live(min_shadow_events=5)
-        self.assertEqual(n, 5)
+        n = c.promote_novelty_to_live()
+        self.assertEqual(n, 100)
         self.assertEqual(c.novelty_mode, "live")
         # ...and the promoted rule immediately flags the next novel alert.
         r = c.ingest(make_alert(service="svcX", alert_id="nx"))
         self.assertTrue(r.novel)
-        self.assertEqual(r.kind, "new")
+
+    def test_promotion_gate_floor_cannot_be_lowered(self):
+        # R11: the 100-event floor is a floor — passing a smaller
+        # min_shadow_events must not promote early.
+        clock = FakeClock()
+        c = Correlator(clock=clock)
+        for i in range(5):
+            c.ingest(make_alert(service=f"svc{i}", alert_id=f"n{i}"))
+        with self.assertRaises(ValueError):
+            c.promote_novelty_to_live(min_shadow_events=5)
+        self.assertEqual(c.novelty_mode, "shadow")
 
     def test_novelty_after_72h_silence(self):
         # A fingerprint unseen for >72h is novel again — the shadow log
@@ -284,6 +294,49 @@ class TestNoveltyShadow(unittest.TestCase):
         self.assertTrue(r.novel_shadow)
         self.assertEqual(r.kind, "new")
         self.assertEqual(r.flap_count, 0)
+
+    def test_label_stale_falls_through_to_full_evaluation(self):
+        # R11: kind="label_stale" is a terminal kind the gate has no
+        # structural branch for — it must fall through to full evaluation
+        # (return None), never short-circuit to suppress/duplicate/fold.
+        from sentinel.gate import Gate
+        from sentinel.correlator import CorrelationResult
+        gate = Gate.__new__(Gate)  # structural only; no client needed
+        stale = CorrelationResult(
+            kind="label_stale", fingerprint="fp1", history_as_of=0.0,
+            label_stale=True, page_pipeline=True, labels_from="label_pipeline")
+        self.assertIsNone(gate._structural(make_alert(), {}, stale))
+
+    def test_shadow_log_is_bounded_by_prune(self):
+        # R11: the shadow log must not grow unbounded — _prune drops events
+        # older than the history window.
+        from sentinel.correlator import NoveltyShadowEvent
+        c = Correlator()
+        c._shadow_log.append(NoveltyShadowEvent(
+            fingerprint="old", history_as_of=0.0, would_do="flag_review"))
+        c._shadow_log.append(NoveltyShadowEvent(
+            fingerprint="new", history_as_of=200 * 3600, would_do="flag_review"))
+        c._prune(200 * 3600)
+        fps = [e.fingerprint for e in c._shadow_log]
+        self.assertNotIn("old", fps)
+        self.assertIn("new", fps)
+
+    def test_page_pipeline_reflects_actual_emission(self):
+        # R11: page_pipeline must be True only when the page was actually
+        # emitted — the 300s cooldown can drop it.
+        from sentinel.correlator import LabelSnapshot
+        clock = FakeClock()
+        pages = []
+        c = Correlator(clock=clock, page_sink=pages.append)
+        snap = LabelSnapshot(labels={}, version="v1", labels_as_of=0.0)
+        r1 = c.ingest(make_alert(), label_snapshot=snap)
+        self.assertTrue(r1.page_pipeline)
+        self.assertEqual(len(pages), 1)
+        # Second ingest within cooldown: page dropped, flag honest.
+        clock.advance(10)
+        r2 = c.ingest(make_alert(alert_id="a2"), label_snapshot=snap)
+        self.assertFalse(r2.page_pipeline)
+        self.assertEqual(len(pages), 1)
 
 
 if __name__ == "__main__":

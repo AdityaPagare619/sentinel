@@ -61,17 +61,25 @@ _P1P2_SEVERITIES = frozenset({"critical", "high", "p1", "p2"})
 # Every history input the correlator reads (past alerts, episode records,
 # label-pipeline labels) is read under ONE clock — the read time — and
 # carries `history_as_of`, the knowledge cutoff: "everything the correlator
-# knew at T". All reads flow through Correlator.read_history(); no other
-# path may consult history.
+# knew at T". Correlator.read_history() is the public provenance path and
+# stamps the HistoryView; the internal classifier reads the same maps under
+# the same lock and the same `now` (truthful today — the view is a provenance
+# sidecar, not yet the classifier's sole input; see R11). history_window_s
+# is injectable for tests; production uses HISTORY_WINDOW_S, kept equal to
+# EPISODE_FRESHNESS_S by test — one number, one law.
 
 # D7: the single 72h bound. Aligned with ADR-001's EPISODE_FRESHNESS_S — one
 # number, one law. Anything older is archaeology: ignored, not down-weighted.
 HISTORY_WINDOW_S = 72 * 3600
 
-# D7: label-pipeline freshness SLO. The label pipeline publishes at least
-# every 5 min (its heartbeat); the correlator SLO is 3x the heartbeat — one
-# missed publish is a blip, a sustained stall pages. 15 min also dominates
-# the correlator's own short horizons (60s storm window, 5-min dedup).
+# D7: label-pipeline freshness SLO. 900s is 3x the pipeline's ASSUMED 5-min
+# heartbeat — the pipeline does not exist in-repo yet, so this is an
+# unverified external assumption (R11): re-derive from the real heartbeat
+# when the pipeline lands. Until then the SLO path is unreachable;
+# LabelSnapshot is accepted at ingest but nothing produces it (honest:
+# the staleness machinery is built and tested, not yet wired).
+# 15 min also dominates the correlator's own short horizons (60s storm
+# window, 5-min dedup).
 LABEL_PIPELINE_SLO_S = 900
 
 # D7: per-(reason, service) emission cooldown for pages. The correlator
@@ -357,7 +365,7 @@ class Correlator:
             stale, snapshot = self._check_label_freshness(label_snapshot, now)
             if stale:
                 age = now - snapshot.labels_as_of
-                self._emit_page_locked(Page(
+                page_emitted = self._emit_page_locked(Page(
                     severity="page",
                     reason="label_pipeline_stale",
                     fingerprint=fp,
@@ -369,7 +377,8 @@ class Correlator:
                 ))
                 return CorrelationResult(
                     kind="label_stale", fingerprint=fp,
-                    history_as_of=now, label_stale=True, page_pipeline=True,
+                    history_as_of=now, label_stale=True,
+                    page_pipeline=page_emitted,
                     labels_from="label_pipeline",
                 )
             res = self._classify_locked(alert, fp, now)
@@ -409,16 +418,20 @@ class Correlator:
                                 min_shadow_events: int = NOVELTY_SHADOW_MIN_EVENTS
                                 ) -> int:
         """D7: promote the novelty rule from shadow to live — gated on
-        evidence. Raises ValueError when fewer than min_shadow_events shadow
-        events have been recorded. (The ≥95% spot-audit agreement and the
-        operator sign-off are process gates recorded in the decision log;
-        this is the in-code minimum-evidence gate.)"""
+        evidence. Raises ValueError when fewer than the required shadow
+        events have been recorded. The floor is NOVELTY_SHADOW_MIN_EVENTS
+        (100): passing a smaller min_shadow_events does NOT lower it —
+        the parameter can only raise the bar, never lower it. (The ≥95%
+        spot-audit agreement and the operator sign-off are process gates
+        recorded in the decision log; this is the in-code minimum-evidence
+        gate.)"""
         with self._lock:
+            floor = max(min_shadow_events, NOVELTY_SHADOW_MIN_EVENTS)
             n = len(self._shadow_log)
-            if n < min_shadow_events:
+            if n < floor:
                 raise ValueError(
                     f"novelty promotion blocked: {n} shadow events < "
-                    f"{min_shadow_events} required — run longer in shadow")
+                    f"{floor} required — run longer in shadow")
             self.novelty_mode = "live"
             return n
 
@@ -640,6 +653,11 @@ class Correlator:
         for fp in [f for f, e in self._episodes.items()
                    if now - e.last_alert_ts > EPISODE_FRESHNESS_S]:
             del self._episodes[fp]
+        # D7: the novelty shadow log is bounded by the same 72h window —
+        # shadow evidence older than the history bound gets no vote in the
+        # promotion decision.
+        self._shadow_log = [e for e in self._shadow_log
+                            if now - e.history_as_of <= self.history_window_s]
         if self._storm_active_until and now >= self._storm_active_until:
             self._storm_active_until = 0.0
             self._storm_counts = {}
