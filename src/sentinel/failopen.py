@@ -184,6 +184,13 @@ class FailopenConfig:
     # the panel majority's bet, falsifiable by K5) or "chronological"
     # (Tripwire's D-1 position; the K5 revert path is this one flip).
     digest_ordering: str = "zscore"
+    # Step-3 budget split: criticals may claim the whole page budget;
+    # non-criticals are capped at this share of it. This is what makes
+    # "critical-first" real under immediate per-alert decisions (no
+    # reorder buffer — a buffer would delay pages and provisionalize
+    # dispositions; the RFC's ordering is realized as budget reservation
+    # + the ranked digest the operator triages, see _decide_step3).
+    non_critical_share: float = 0.5
     runbook_url: str | None = None  # None renders honestly as "not configured"
     # Digest emission cadence (emission-channel payload for the console).
     digest_emit_every_held: int = 50
@@ -296,12 +303,23 @@ def format_detector_health_line(health: dict | None) -> str:
     last_s = (f"{_iso(last)} ({_iso_local(last)} local)" if last
               else "never")
     frozen = " [BASELINE FROZEN]" if health.get("baseline_frozen") else ""
-    return (
-        f"Storm detector: W(t)={health.get('w_distinct_60s')} distinct/60s, "
-        f"threshold=max(F, k·B)={health.get('threshold'):.1f} "
-        f"(F={health.get('floor_f'):.0f}, k={health.get('k')}, "
-        f"B={health.get('baseline_b'):.1f}), "
-        f"last declared {last_s}{frozen}")
+    # Defensive: the banner must never break on a partial health dict —
+    # a degraded banner that crashes is worse than an approximate one.
+    w = health.get("w_distinct_60s")
+    thr = health.get("threshold")
+    if thr is None:
+        core = f"Storm detector: W(t)={w} distinct/60s, threshold unavailable"
+    else:
+        f = health.get("floor_f")
+        k = health.get("k")
+        b = health.get("baseline_b")
+        fs = f"{f:.0f}" if isinstance(f, (int, float)) else "?"
+        ks = f"{k}" if k is not None else "?"
+        bs = f"{b:.1f}" if isinstance(b, (int, float)) else "?"
+        core = (f"Storm detector: W(t)={w} distinct/60s, "
+                f"threshold=max(F, k·B)={thr:.1f} "
+                f"(F={fs}, k={ks}, B={bs})")
+    return f"{core}, last declared {last_s}{frozen}"
 
 
 def failopen_step_entered_payload(*, step: int, cause: str, entered_at: float,
@@ -465,7 +483,7 @@ class FailopenController:
         self._step_history: list[dict] = []
         self._since: dict[str, float] = {}  # sustained-condition tracking
         self._paged_fps: dict[str, float] = {}  # fp -> last paged ts (dedup)
-        self._paged_tokens: deque = deque()  # step-3 page timestamps (60s cap)
+        self._paged_tokens: deque = deque()  # step-3 (ts, is_critical), 60s cap
         self._digest: dict[str, _DigestEntry] = {}  # fp -> entry (ranked view)
         self._digest_seq = 0
         self._paged_total = 0
@@ -732,29 +750,47 @@ class FailopenController:
                            team=None, confidence=None, latency_ms=0.0)
 
     def _decide_step3(self, alert, now: float) -> Disposition:
-        # Rate-capped paging over the ranked digest. Admission is priority
-        # order: the candidate pages iff fewer higher-priority unpaged
-        # candidates are ahead of it than remaining tokens — critical-first,
-        # then level-shift z-score within severity, then arrival. Deduped.
-        # The remainder stays held (folded): triage, not a parking lot.
+        # Rate-capped paging over the ranked digest (RFC §3.2 step 3).
+        #
+        # "Critical-first ordering" under immediate per-alert decisions:
+        # criticals may claim the whole page budget; non-criticals are
+        # capped at non_critical_share of it (budget reservation — a
+        # reorder buffer would delay pages and provisionalize the audit
+        # disposition, so the RFC's ordering is realized here as
+        # reservation + the ranked digest the operator triages from the
+        # banner). Within a class, admission prefers the digest head:
+        # a candidate pages iff fewer same-class unpaged candidates rank
+        # ahead of it than its class's remaining tokens
+        # (novelty-within-severity via the level-shift z-score rank).
+        # Deduped. The remainder stays held (folded): triage, not a
+        # parking lot — held alerts never re-page later.
         if self._deduped(alert.fingerprint, now):
             self._hold(alert, now)
             return Disposition(action="folded", reason="failopen_step3_digest",
                                team=None, confidence=None, latency_ms=0.0)
         entry = self._hold(alert, now)
-        # Prune the 60s token window.
         cutoff = now - 60.0
-        while self._paged_tokens and self._paged_tokens[0] < cutoff:
+        while self._paged_tokens and self._paged_tokens[0][0] < cutoff:
             self._paged_tokens.popleft()
-        remaining = max(0, int(self.config.page_budget_per_min)
-                        - len(self._paged_tokens))
-        if remaining <= 0:
-            return Disposition(action="folded", reason="failopen_step3_digest",
-                               team=None, confidence=None, latency_ms=0.0)
-        ahead = self._count_ahead(entry)
-        if ahead < remaining:
+        cap = int(self.config.page_budget_per_min)
+        total_pages = len(self._paged_tokens)
+        crit_pages = sum(1 for _, c in self._paged_tokens if c)
+        is_crit = self._is_critical(alert)
+        if is_crit:
+            remaining = cap - total_pages
+            admitted = (remaining > 0
+                        and self._count_ahead_in_class(entry, True) < remaining)
+        else:
+            noncrit_cap = int(cap * self.config.non_critical_share)
+            noncrit_pages = total_pages - crit_pages
+            remaining = max(0, min(cap - total_pages,
+                                   noncrit_cap - noncrit_pages))
+            admitted = (remaining > 0
+                        and self._count_ahead_in_class(entry, False)
+                        < remaining)
+        if admitted:
             entry.paged = True
-            self._paged_tokens.append(now)
+            self._paged_tokens.append((now, is_crit))
             self._paged_fps[alert.fingerprint] = now
             self._paged_total += 1
             return Disposition(action="page_now", reason="failopen_step3",
@@ -795,6 +831,18 @@ class FailopenController:
                    if not e.paged and e is not entry
                    and self._rank_key(e) < key)
 
+    def _count_ahead_in_class(self, entry: _DigestEntry,
+                              critical: bool) -> int:
+        """Unpaged same-class digest members ranking strictly ahead —
+        the within-class admission count for step 3."""
+        key = self._rank_key(entry)
+        return sum(
+            1 for e in self._digest.values()
+            if (not e.paged and e is not entry
+                and (e.severity_in.strip().lower() in _CRITICAL_LABELS)
+                == critical
+                and self._rank_key(e) < key))
+
     def _ranked_unpaged(self, limit: int) -> list[_DigestEntry]:
         cands = [e for e in self._digest.values() if not e.paged]
         cands.sort(key=self._rank_key)
@@ -802,12 +850,18 @@ class FailopenController:
 
     def digest_snapshot(self, top_n: int = 10) -> dict:
         top = self._ranked_unpaged(top_n)
+        # "Held" means currently held (unpaged) — entries that paged are
+        # no longer held. _held_total/_critical_held are lifetime counters
+        # for the audit trail, not the current digest depth.
+        unpaged = [e for e in self._digest.values() if not e.paged]
         return {
             "digest_id": f"failopen-step{self._step}-{self._digest_seq}",
             "step": self._step,
-            "held": self._held_total,
+            "held": len(unpaged),
             "paged": self._paged_total,
-            "source_critical_held": self._critical_held,
+            "source_critical_held": sum(
+                1 for e in unpaged if e.severity_in.strip().lower()
+                in _CRITICAL_LABELS),
             "entries": [{
                 "fingerprint": e.fingerprint,
                 "service": e.service,
@@ -846,8 +900,8 @@ class FailopenController:
             step=self._step, cause=self._current_cause, started_at=self._entered_at,
             step_history=self.step_history, detector_health=health,
             config=self.config, policy=self.policy,
-            paged=self._paged_total, held=self._held_total,
-            source_critical_held=self._critical_held,
+            paged=self._paged_total, held=snap["held"],
+            source_critical_held=snap["source_critical_held"],
             digest_top=snap["entries"])
 
 

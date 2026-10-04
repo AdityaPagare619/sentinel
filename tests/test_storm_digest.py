@@ -223,7 +223,8 @@ class TestReceiverStormDigest(unittest.TestCase):
     def test_storm_declaring_aggregate_pages_via_digest(self):
         # End-to-end through Pipeline._triage: drive the correlator to a
         # storm declaration, then assert the aggregate pages (never
-        # suppresses) and is forwarded.
+        # suppresses) and is forwarded. C1/RFC §2.1: declaration is
+        # W >= max(F, k*B) — with F=5 the 5th distinct ingest declares.
         clock = FakeClock()
         correlator = Correlator(storm_fingerprints=5, storm_window_s=60,
                                 clock=clock)
@@ -233,14 +234,14 @@ class TestReceiverStormDigest(unittest.TestCase):
         pipeline = Pipeline(correlator, gate, forwarder, AuditLog(":memory:"),
                             ReceiverConfig())
         disp_action = None
-        for i in range(6):
+        for i in range(5):
             alert = make_alert(alert_id=f"rx-{i}", service=f"svc{i}")
             clock.advance(1)
             disp_action = pipeline._triage(alert, b"{}")
-        # The 6th ingest declared the storm: the aggregate paged.
+        # The 5th ingest declared the storm: the aggregate paged.
         self.assertEqual(disp_action, "page_now")
-        # 5 member pages (kind="new") + 1 aggregate page via the digest.
-        self.assertEqual(len(forwarder.calls), 6)
+        # 4 member pages (kind="new") + 1 aggregate page via the digest.
+        self.assertEqual(len(forwarder.calls), 5)
         agg, agg_disp = forwarder.calls[-1]
         self.assertEqual(agg.service, "storm-aggregate")
         self.assertEqual(agg_disp.action, "page_now")
@@ -327,13 +328,15 @@ class TestShadowDigestMirror(unittest.TestCase):
             incident_url=None, gate_relevant=True, raw={})
 
     def test_storm_declared_would_be_is_digest_page_not_suppress(self):
+        # C1/RFC §2.1: declaration is W >= max(F, k*B) — with F=2 the 2nd
+        # distinct event declares.
         pipeline = self._pipeline()
-        for i in range(3):
+        for i in range(2):
             disp, rec, detail = pipeline._evaluate(self._ev(i))
-            if i < 2:
+            if i < 1:
                 # The setup CAN suppress: pre-storm alerts go through the
                 # gate with suppress-shaped answers and allowlisted
-                # fingerprints — so a page_now on the 3rd is the digest
+                # fingerprints — so a page_now on the 2nd is the digest
                 # branch working, not the setup failing to suppress.
                 self.assertEqual(rec.disposition.action, "suppress")
         # The storm-declaring aggregate's honest would-be is 'paged via the
@@ -342,7 +345,7 @@ class TestShadowDigestMirror(unittest.TestCase):
         self.assertEqual(rec.disposition.reason, "shadow")
         self.assertEqual(disp.action, "passthrough")  # recorded, not executed
         # The digest path never consults Jev — not even in shadow.
-        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(len(self.client.calls), 1)
         # No invented evidence on the digest path (honesty contract — W1).
         self.assertEqual(detail["probs"], {})
         self.assertIsNone(detail["conf3"])
