@@ -82,12 +82,13 @@ CUTOVER: standby direct-to-PD armed — <trigger: T1/T2/T3> — <reason>
 operator=<name> ts=<ISO-8601>
 ```
 
-Write this line into the drill/incident record AND the event log
-(`append_event("cutover_declared", actor=<name>, ...)`). The postmortem
+Write this line into the drill/incident record AND the drill-tracker JSONL
+(the store the cutover gate reads — see `require_drilled_secondary`).
+Do NOT invent an event-log type: the event-log vocabulary is a closed
+Type-1 set, and `append_event` rejects unknown types. The postmortem
 starts here.
 
-**Expected output:** one line in the room. (Note: the event-log vocabulary
-is a closed Type-1 set — drill/cutover lifecycle records live in the drill
+**Expected output:** one line in the room, one row in the drill-tracker JSONL. (Note: drill/cutover lifecycle records live in the drill
 record and the drill-tracker JSONL, not in invented event types. The
 standby send's completion IS event-logged via the spill-replay path —
 see Step 2.)
