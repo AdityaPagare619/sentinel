@@ -1,11 +1,15 @@
-"""Attestor identity — ADR attestor-identity (2026-10-04)."""
+"""Attestor identity — ADR attestor-identity (2026-10-04).
+
+stdlib-only: pure unittest, no pytest (frozen repo decision).
+"""
 
 import datetime as dt
 import json
 import os
+import pathlib
 import sys
-
-import pytest
+import tempfile
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -17,6 +21,15 @@ from sentinel.attestor import (AttestorRegistry, RegistrySealError,
                                verify_attestation_signature)
 
 ROOT = b"0" * 32
+
+
+class _TmpDirTestCase(unittest.TestCase):
+    """unittest equivalent of pytest's tmp_path fixture."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp_path = pathlib.Path(self._tmpdir.name)
 
 
 def _now():
@@ -82,19 +95,19 @@ def _promoted_store(tmp_path, monkeypatch=None):
 
 # ------------------------------------------------------- registry
 
-class TestRegistry:
-    def test_bootstrap_needs_quorum_and_is_one_time(self, tmp_path):
-        reg = _registry(tmp_path)
-        with pytest.raises(att.AttestorError):
+class TestRegistry(_TmpDirTestCase):
+    def test_bootstrap_needs_quorum_and_is_one_time(self):
+        reg = _registry(self.tmp_path)
+        with self.assertRaises(att.AttestorError):
             reg.bootstrap([("solo", generate_keypair()[1])])
         ka, kb = generate_keypair(), generate_keypair()
         reg.bootstrap([("alice", ka[1]), ("bob", kb[1])])
         assert reg.is_active("alice") and reg.is_active("bob")
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             reg.bootstrap([("x", ka[1]), ("y", kb[1])])
 
-    def test_onboard_needs_two_distinct_co_signers(self, tmp_path):
-        reg = _registry(tmp_path)
+    def test_onboard_needs_two_distinct_co_signers(self):
+        reg = _registry(self.tmp_path)
         keys = _bootstrap(reg)
         knew = generate_keypair()
         added_at = _now().strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -103,62 +116,67 @@ class TestRegistry:
         sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(keys["alice"][0]))
         one = {"alice": sk.sign(
             att.canonical_onboard_bytes("carol", knew[1], added_at)).hex()}
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             reg.onboard("carol", knew[1], cosignatures=one, added_by="alice",
                         added_at=added_at)
         # unknown co-signer
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             reg.onboard("carol", knew[1],
                         cosignatures={"mallory": "00" * 64, "alice": one["alice"]},
                         added_by="alice", added_at=added_at)
         _onboard(reg, keys, "carol")
         assert reg.is_active("carol")
 
-    def test_revoke_is_one_way_latch(self, tmp_path):
-        reg = _registry(tmp_path)
+    def test_revoke_is_one_way_latch(self):
+        reg = _registry(self.tmp_path)
         keys = _bootstrap(reg)
         _onboard(reg, keys, "carol")
         reg.revoke("carol", "laptop stolen", by="alice")
         assert not reg.is_active("carol")
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             reg.reactivate("carol")
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             reg.onboard("carol", generate_keypair()[1],
                         cosignatures={}, added_by="alice")
 
-    def test_seal_tamper_fails_closed(self, tmp_path):
-        reg = _registry(tmp_path)
+    def test_seal_tamper_fails_closed(self):
+        reg = _registry(self.tmp_path)
         _bootstrap(reg)
-        path = str(tmp_path / "attestors.json")
+        path = str(self.tmp_path / "attestors.json")
         doc = json.load(open(path))
         doc["attestors"]["mallory"] = {"id": "mallory",
                                        "public_key_hex": "00" * 32,
                                        "status": "active"}
         json.dump(doc, open(path, "w"), sort_keys=True)
-        with pytest.raises(RegistrySealError):
+        with self.assertRaises(RegistrySealError):
             AttestorRegistry(path, root_key=ROOT)
 
-    def test_ceremony_tamper_fails_closed(self, tmp_path):
-        reg = _registry(tmp_path)
+    def test_ceremony_tamper_fails_closed(self):
+        reg = _registry(self.tmp_path)
         _bootstrap(reg)
-        cpath = str(tmp_path / "attestors.json.ceremony.jsonl")
+        cpath = str(self.tmp_path / "attestors.json.ceremony.jsonl")
         lines = open(cpath).read().strip().split("\n")
         rec = json.loads(lines[-1])
         rec["payload"]["founder"] = False  # tamper
         lines[-1] = json.dumps(rec, sort_keys=True)
         open(cpath, "w").write("\n".join(lines) + "\n")
-        with pytest.raises(RegistrySealError):
-            AttestorRegistry(str(tmp_path / "attestors.json"), root_key=ROOT)
+        with self.assertRaises(RegistrySealError):
+            AttestorRegistry(str(self.tmp_path / "attestors.json"), root_key=ROOT)
 
-    def test_missing_root_key_fails_closed(self, tmp_path, monkeypatch):
-        monkeypatch.delenv(att.ROOT_KEY_ENV, raising=False)
-        with pytest.raises(RegistrySealError):
-            AttestorRegistry(str(tmp_path / "n.json"))
+    def test_missing_root_key_fails_closed(self):
+        # was: monkeypatch.delenv(att.ROOT_KEY_ENV, raising=False)
+        _sentinel = os.environ.pop(att.ROOT_KEY_ENV, None)
+        try:
+            with self.assertRaises(RegistrySealError):
+                AttestorRegistry(str(self.tmp_path / "n.json"))
+        finally:
+            if _sentinel is not None:
+                os.environ[att.ROOT_KEY_ENV] = _sentinel
 
 
 # ------------------------------------------------------- signatures
 
-class TestSignatures:
+class TestSignatures(_TmpDirTestCase):
     def test_sign_verify_roundtrip(self):
         priv, pub = generate_keypair()
         sig = sign_attestation(priv, "P", 1, "ch", "shadow", "canary",
@@ -171,14 +189,14 @@ class TestSignatures:
             pub, sig, "P", 1, "OTHER", "shadow", "canary",
             "2026-10-04T12:00:00.000Z")
 
-    def test_check_rejects_unknown_revoked_stale(self, tmp_path):
-        reg = _registry(tmp_path)
+    def test_check_rejects_unknown_revoked_stale(self):
+        reg = _registry(self.tmp_path)
         keys = _bootstrap(reg)
         priv, pub = keys["alice"]
         decided = _now().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         sig = sign_attestation(priv, "P", 1, "ch", "shadow", "canary", decided)
         # unknown attestor
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             att.check_attestation(reg, policy_id="P", version=1,
                                   content_hash="ch", from_state="shadow",
                                   to_state="canary", attestor_id="mallory",
@@ -186,20 +204,20 @@ class TestSignatures:
                                   now=_now())
         # revoked attestor
         reg.revoke("alice", "test", by="bob")
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             att.check_attestation(reg, policy_id="P", version=1,
                                   content_hash="ch", from_state="shadow",
                                   to_state="canary", attestor_id="alice",
                                   signature_hex=sig, decided_at=decided,
                                   now=_now())
         # stale decided_at
-        reg2 = _registry(tmp_path, "r2.json")
+        reg2 = _registry(self.tmp_path, "r2.json")
         keys2 = _bootstrap(reg2)
         old = (_now() - dt.timedelta(days=30)).strftime(
             "%Y-%m-%dT%H:%M:%S.000Z")
         sig2 = sign_attestation(keys2["alice"][0], "P", 1, "ch", "shadow",
                                 "canary", old)
-        with pytest.raises(att.AttestorError):
+        with self.assertRaises(att.AttestorError):
             att.check_attestation(reg2, policy_id="P", version=1,
                                   content_hash="ch", from_state="shadow",
                                   to_state="canary", attestor_id="alice",
@@ -209,9 +227,9 @@ class TestSignatures:
 
 # ------------------------------------------------------- store wiring
 
-class TestStoreWiring:
-    def test_dual_attestation_happy_path(self, tmp_path):
-        store, reg, keys, v = _promoted_store(tmp_path)
+class TestStoreWiring(_TmpDirTestCase):
+    def test_dual_attestation_happy_path(self):
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         atts = [_signed(None, keys, "alice", "P", 1, v.content_hash,
                         "shadow", "canary"),
                 _signed(None, keys, "bob", "P", 1, v.content_hash,
@@ -220,28 +238,28 @@ class TestStoreWiring:
                          preview_hash="ph")
         assert store._get("P", 1).state == "canary"
 
-    def test_unsigned_attestation_rejected_with_registry(self, tmp_path):
-        store, reg, keys, v = _promoted_store(tmp_path)
+    def test_unsigned_attestation_rejected_with_registry(self):
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         atts = [pl.PolicyAttestation(
             policy_id="P", version=1, from_state="shadow", to_state="canary",
             preview_hash="ph", attestor_ids=("alice",),
             decided_at=_now().strftime("%Y-%m-%dT%H:%M:%S.000Z")),
             _signed(None, keys, "bob", "P", 1, v.content_hash,
                     "shadow", "canary")]
-        with pytest.raises(pl.PolicyTransitionError):
+        with self.assertRaises(pl.PolicyTransitionError):
             store.transition("P", 1, "canary", now=_now(), attestations=atts,
                              preview_hash="ph")
         assert store._get("P", 1).state == "shadow"  # never partially promotes
 
-    def test_revoked_attestor_blocks_transition_and_pages(self, tmp_path):
+    def test_revoked_attestor_blocks_transition_and_pages(self):
         # The fail-toward-paging chain: revoked => transition raises =>
         # version never live => can_suppress False => gate pages.
-        store, reg, keys, v = _promoted_store(tmp_path)
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         reg.revoke("alice", "compromised", by="bob")
         # fresh-read propagation: store holds the registry OBJECT here, but
         # the revoke mutated the same file-backed state; re-resolve via path
         # to prove the fresh-read path sees it.
-        store2 = pl.PolicyStore(attestor_registry=str(tmp_path /
+        store2 = pl.PolicyStore(attestor_registry=str(self.tmp_path /
                                                       "attestors.json"))
         store2._policies = store._policies
         import os as _os
@@ -251,7 +269,7 @@ class TestStoreWiring:
                             "shadow", "canary"),
                     _signed(None, keys, "bob", "P", 1, v.content_hash,
                             "shadow", "canary")]
-            with pytest.raises(pl.PolicyTransitionError):
+            with self.assertRaises(pl.PolicyTransitionError):
                 store2.transition("P", 1, "canary", now=_now(),
                                   attestations=atts, preview_hash="ph")
         finally:
@@ -260,18 +278,18 @@ class TestStoreWiring:
         allowed, why = store2.can_suppress("P")
         assert allowed is False  # fail toward paging
 
-    def test_replay_across_content_rejected(self, tmp_path):
-        store, reg, keys, v = _promoted_store(tmp_path)
+    def test_replay_across_content_rejected(self):
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         # attestation signed for DIFFERENT content does not transfer
         atts = [_signed(None, keys, "alice", "P", 1, "WRONG_HASH",
                         "shadow", "canary"),
                 _signed(None, keys, "bob", "P", 1, v.content_hash,
                         "shadow", "canary")]
-        with pytest.raises(pl.PolicyTransitionError):
+        with self.assertRaises(pl.PolicyTransitionError):
             store.transition("P", 1, "canary", now=_now(), attestations=atts,
                              preview_hash="ph")
 
-    def test_legacy_registry_less_mode_preserved(self, tmp_path):
+    def test_legacy_registry_less_mode_preserved(self):
         store = pl.PolicyStore()  # no registry: legacy structural checks
         v = store.create_draft("P", {"t": 1}, _now())
         store.transition("P", 1, "shadow", now=_now())
@@ -288,9 +306,9 @@ class TestStoreWiring:
         assert store._get("P", 1).state == "canary"
 
 
-class TestQuarantine:
-    def test_quarantine_freezes_and_pages(self, tmp_path):
-        store, reg, keys, v = _promoted_store(tmp_path)
+class TestQuarantine(_TmpDirTestCase):
+    def test_quarantine_freezes_and_pages(self):
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         atts = [_signed(None, keys, "alice", "P", 1, v.content_hash,
                         "shadow", "canary"),
                 _signed(None, keys, "bob", "P", 1, v.content_hash,
@@ -316,8 +334,8 @@ class TestQuarantine:
         allowed, why = store.can_suppress("P")
         assert allowed is False and why.startswith("policy_frozen")
 
-    def test_quarantine_leaves_unrelated_versions_alone(self, tmp_path):
-        store, reg, keys, v = _promoted_store(tmp_path)
+    def test_quarantine_leaves_unrelated_versions_alone(self):
+        store, reg, keys, v = _promoted_store(self.tmp_path)
         _onboard(reg, keys, "carol")
         keys["carol"] = keys["carol"]  # noqa - already stored by _onboard
         atts = [_signed(None, keys, "carol", "P", 1, v.content_hash,
@@ -330,11 +348,11 @@ class TestQuarantine:
         events = quarantine_revoked(store, "alice", _now())
         assert events == []  # canary, not live — and alice wasn't involved
 
-    def test_registry_instance_fresh_read_propagates_revocation(self, tmp_path):
+    def test_registry_instance_fresh_read_propagates_revocation(self):
         """R8 sharp: PolicyStore(attestor_registry=<instance>) must not serve
         a boot cache — a revocation written by another process is effective
         on the next decision (ADR Type-1 fresh-read-per-decision)."""
-        p = str(tmp_path / "attestors.json")
+        p = str(self.tmp_path / "attestors.json")
         reg1 = AttestorRegistry(p, root_key=ROOT)
         ka = generate_keypair(); kb = generate_keypair()
         reg1.bootstrap([("alice", ka[1]), ("bob", kb[1])])
@@ -344,3 +362,7 @@ class TestQuarantine:
         reg2 = AttestorRegistry(p, root_key=ROOT)
         reg2.revoke("alice", "key compromise", by="bob")
         assert not store._registry().is_active("alice")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,12 +1,16 @@
-"""D14 retention tiers — RFC 2026-10-05. Tests the decided mechanics."""
+"""D14 retention tiers — RFC 2026-10-05. Tests the decided mechanics.
+
+stdlib-only: pure unittest, no pytest (frozen repo decision).
+"""
 
 import json
 import os
+import pathlib
 import sqlite3
 import sys
+import tempfile
+import unittest
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -16,6 +20,15 @@ from sentinel.retention import (
     compact_to_summary, export_segment, hot_window_days, measure_daily_bytes,
     pseudonymize_record, pseudonymize_value, seal_and_roll, verify_chain,
 )
+
+
+class _TmpDirTestCase(unittest.TestCase):
+    """unittest equivalent of pytest's tmp_path fixture."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp_path = pathlib.Path(self._tmpdir.name)
 
 
 def _mklog(path, **kw):
@@ -37,9 +50,9 @@ def _write_decision(log, i, disposition="suppress"):
 
 # ------------------------------------------------------- self-calibration
 
-class TestSelfCalibration:
-    def test_measure_daily_bytes_from_own_stats(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+class TestSelfCalibration(_TmpDirTestCase):
+    def test_measure_daily_bytes_from_own_stats(self):
+        db = str(self.tmp_path / "ev.sqlite")
         log = _mklog(db)
         for i in range(10):
             _write_decision(log, i)
@@ -69,15 +82,17 @@ class TestSelfCalibration:
     def test_hot_window_mid_range(self):
         cfg = RetentionConfig(disk_budget_bytes=200 * 1e9)
         window, under = hot_window_days(cfg, daily_bytes=2.16 * 1e9)
-        assert window == pytest.approx(200 / 2.16, rel=0.01)
+        # was: pytest.approx(200 / 2.16, rel=0.01)
+        expected = 200 / 2.16
+        assert abs(window - expected) <= 0.01 * abs(expected)
         assert not under
 
 
 # ------------------------------------------------------- chain verification
 
-class TestVerifyChain:
-    def test_verify_ok(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+class TestVerifyChain(_TmpDirTestCase):
+    def test_verify_ok(self):
+        db = str(self.tmp_path / "ev.sqlite")
         log = _mklog(db)
         for i in range(5):
             _write_decision(log, i)
@@ -85,8 +100,8 @@ class TestVerifyChain:
         assert count == 10 and head_seq == 10
         assert head_hash == log.head()[1]
 
-    def test_verify_refuses_tampered_row(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+    def test_verify_refuses_tampered_row(self):
+        db = str(self.tmp_path / "ev.sqlite")
         log = _mklog(db)
         for i in range(3):
             _write_decision(log, i)
@@ -94,24 +109,24 @@ class TestVerifyChain:
         con.execute("UPDATE events SET body = '{}' WHERE seq = 2")
         con.commit()
         con.close()
-        with pytest.raises(ChainBroken):
+        with self.assertRaises(ChainBroken):
             verify_chain(db)
 
-    def test_verify_empty_db(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+    def test_verify_empty_db(self):
+        db = str(self.tmp_path / "ev.sqlite")
         _mklog(db)
         assert verify_chain(db) == (0, "GENESIS", 0)
 
 
 # ------------------------------------------------------- export + seal
 
-class TestExport:
-    def test_export_roundtrip_sealed(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+class TestExport(_TmpDirTestCase):
+    def test_export_roundtrip_sealed(self):
+        db = str(self.tmp_path / "ev.sqlite")
         log = _mklog(db)
         for i in range(4):
             _write_decision(log, i, "page_now" if i % 2 else "suppress")
-        dest = str(tmp_path / "warm" / "seg1")
+        dest = str(self.tmp_path / "warm" / "seg1")
         manifest = export_segment(db, dest, hmac_key=b"k" * 32,
                                   segment_id="seg1")
         assert manifest["event_count"] == 8
@@ -122,29 +137,29 @@ class TestExport:
         assert len(lines) == 8
         assert json.loads(lines[0])["seq"] == 1
 
-    def test_export_refuses_broken_chain(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+    def test_export_refuses_broken_chain(self):
+        db = str(self.tmp_path / "ev.sqlite")
         log = _mklog(db)
         _write_decision(log, 0)
         con = sqlite3.connect(db)
         con.execute("UPDATE events SET row_hash='tampered' WHERE seq=1")
         con.commit()
         con.close()
-        with pytest.raises(ChainBroken):
-            export_segment(db, str(tmp_path / "w"), hmac_key=b"k" * 32,
+        with self.assertRaises(ChainBroken):
+            export_segment(db, str(self.tmp_path / "w"), hmac_key=b"k" * 32,
                            segment_id="segx")
 
-    def test_export_requires_hmac_key(self, tmp_path):
-        db = str(tmp_path / "ev.sqlite")
+    def test_export_requires_hmac_key(self):
+        db = str(self.tmp_path / "ev.sqlite")
         _write_decision(_mklog(db), 0)
-        with pytest.raises(Exception):
-            export_segment(db, str(tmp_path / "w"), hmac_key=b"",
+        with self.assertRaises(Exception):
+            export_segment(db, str(self.tmp_path / "w"), hmac_key=b"",
                            segment_id="segx")
 
 
 # ------------------------------------------------------- pseudonymization
 
-class TestPseudonymization:
+class TestPseudonymization(unittest.TestCase):
     def test_tombstone_is_stable_and_irreversible(self):
         a = pseudonymize_value("alert-123", b"salt")
         b = pseudonymize_value("alert-123", b"salt")
@@ -184,15 +199,15 @@ def _old_segment(tmp_path, days_old, n=4):
     return rolled, ledger, seg_id, seg
 
 
-class TestRoll:
-    def test_roll_chains_segments(self, tmp_path):
-        db = str(tmp_path / "live.sqlite")
+class TestRoll(_TmpDirTestCase):
+    def test_roll_chains_segments(self):
+        db = str(self.tmp_path / "live.sqlite")
         log = _mklog(db)
         for i in range(3):
             _write_decision(log, i)
         old_head = log.head()[1]
-        ledger = SegmentLedger(str(tmp_path / "ledger.json"))
-        new_log = seal_and_roll(log, str(tmp_path / "segments"), ledger)
+        ledger = SegmentLedger(str(self.tmp_path / "ledger.json"))
+        new_log = seal_and_roll(log, str(self.tmp_path / "segments"), ledger)
         _write_decision(new_log, 99)
         # the new segment's first row chains from the old head hash
         con = sqlite3.connect(db)
@@ -204,32 +219,32 @@ class TestRoll:
             old_head
 
 
-class TestRetentionJob:
-    def _job(self, tmp_path, live_log, ledger, **cfg_kw):
+class TestRetentionJob(_TmpDirTestCase):
+    def _job(self, live_log, ledger, **cfg_kw):
         cfg = RetentionConfig(disk_budget_bytes=10**15, **cfg_kw)
         return RetentionJob(live_log, cfg, ledger,
-                            warm_dir=str(tmp_path / "warm"),
-                            cold_dir=str(tmp_path / "cold"),
+                            warm_dir=str(self.tmp_path / "warm"),
+                            cold_dir=str(self.tmp_path / "cold"),
                             hmac_key=b"k" * 32)
 
-    def test_dry_run_plans_but_changes_nothing(self, tmp_path):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=200)
-        job = self._job(tmp_path, live, ledger)
+    def test_dry_run_plans_but_changes_nothing(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=200)
+        job = self._job(live, ledger)
         plan = job.apply(dry_run=True)
         assert plan["hot_to_warm"] == [seg_id]
         assert plan["dry_run"] is True
         assert os.path.exists(seg["path"])  # nothing pruned
         assert plan["checkpoint_seqs"] == []  # nothing checkpointed
 
-    def test_hot_to_warm_promotes_and_checkpoints(self, tmp_path):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=200)
-        job = self._job(tmp_path, live, ledger)
+    def test_hot_to_warm_promotes_and_checkpoints(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=200)
+        job = self._job(live, ledger)
         plan = job.apply(dry_run=False)
         assert plan["hot_to_warm"] == [seg_id]
         assert len(plan["checkpoint_seqs"]) == 1
         assert not os.path.exists(seg["path"])  # pruned AFTER archive
         assert os.path.exists(os.path.join(
-            str(tmp_path / "warm"), seg_id, "manifest.json"))
+            str(self.tmp_path / "warm"), seg_id, "manifest.json"))
         assert ledger.get(seg_id)["tier"] == "warm"
         # deletion is a logged event: ledger + live chain corroborate
         assert ledger.get(seg_id)["deletions"]
@@ -238,23 +253,23 @@ class TestRetentionJob:
             "SELECT type FROM events WHERE seq=?", (cseq,)).fetchone()
         assert row["type"] == "checkpoint"
 
-    def test_young_segment_stays_hot(self, tmp_path):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=5)
-        job = self._job(tmp_path, live, ledger)
+    def test_young_segment_stays_hot(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=5)
+        job = self._job(live, ledger)
         plan = job.apply(dry_run=False)
         assert plan["hot_to_warm"] == []
         assert os.path.exists(seg["path"])
 
-    def test_warm_to_cold_compacts(self, tmp_path):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=400)
-        job = self._job(tmp_path, live, ledger)
+    def test_warm_to_cold_compacts(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=400)
+        job = self._job(live, ledger)
         job.apply(dry_run=False)  # hot -> warm
         plan2 = job.apply(dry_run=False)  # warm -> cold
         assert plan2["warm_to_cold"] == [seg_id]
         seg_year = datetime.fromisoformat(
             ledger.get(seg_id)["sealed_at"].replace("Z", "+00:00")).strftime(
                 "%Y")
-        summary_path = os.path.join(str(tmp_path / "cold"), seg_year,
+        summary_path = os.path.join(str(self.tmp_path / "cold"), seg_year,
                                     seg_id + ".summary.json")
         assert os.path.exists(summary_path)
         summary = json.load(open(summary_path))
@@ -262,12 +277,12 @@ class TestRetentionJob:
         assert summary["event_count"] == 8
         assert ledger.get(seg_id)["tier"] == "cold"
 
-    def test_cold_does_not_expire_without_acceptance(self, tmp_path):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=400)
-        job = self._job(tmp_path, live, ledger)
+    def test_cold_does_not_expire_without_acceptance(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=400)
+        job = self._job(live, ledger)
         job.apply(dry_run=False)
         seg["tier"] = "cold"
-        seg["sink_uri"] = str(tmp_path / "cold" / "x.summary.json")
+        seg["sink_uri"] = str(self.tmp_path / "cold" / "x.summary.json")
         os.makedirs(os.path.dirname(seg["sink_uri"]), exist_ok=True)
         open(seg["sink_uri"], "w").write("{}")
         seg["sealed_at"] = (datetime.now(timezone.utc) -
@@ -279,31 +294,34 @@ class TestRetentionJob:
         assert os.path.exists(seg["sink_uri"])  # retained
         assert any("liability acceptance" in p for p in plan["pages"])
 
-    def test_under_provisioned_pages_never_silently_shortens(
-            self, tmp_path, monkeypatch):
-        live, ledger, seg_id, seg = _old_segment(tmp_path, days_old=200)
+    def test_under_provisioned_pages_never_silently_shortens(self):
+        live, ledger, seg_id, seg = _old_segment(self.tmp_path, days_old=200)
         import sentinel.retention as ret
         # pin the self-calibration to C2-burst volume: 21.6 GB/day
-        monkeypatch.setattr(ret, "measure_daily_bytes",
-                            lambda p: 21.6e9)
-        cfg = RetentionConfig(disk_budget_bytes=10**6)  # 1 MB budget
-        job = RetentionJob(live, cfg, ledger,
-                           warm_dir=str(tmp_path / "warm"),
-                           cold_dir=str(tmp_path / "cold"),
-                           hmac_key=b"k" * 32)
-        plan = job.apply(dry_run=True)
+        # (was: monkeypatch.setattr)
+        _orig = ret.measure_daily_bytes
+        ret.measure_daily_bytes = lambda p: 21.6e9
+        try:
+            cfg = RetentionConfig(disk_budget_bytes=10**6)  # 1 MB budget
+            job = RetentionJob(live, cfg, ledger,
+                               warm_dir=str(self.tmp_path / "warm"),
+                               cold_dir=str(self.tmp_path / "cold"),
+                               hmac_key=b"k" * 32)
+            plan = job.apply(dry_run=True)
+        finally:
+            ret.measure_daily_bytes = _orig
         assert plan["under_provisioned"] is True
         assert plan["hot_window_days"] == 60.0  # floor, not shorter
         assert any("UNDER-PROVISIONED" in p for p in plan["pages"])
 
-    def test_compact_refuses_tampered_manifest(self, tmp_path):
-        warm = tmp_path / "warm" / "seg9"
+    def test_compact_refuses_tampered_manifest(self):
+        warm = self.tmp_path / "warm" / "seg9"
         warm.mkdir(parents=True)
         (warm / "manifest.json").write_text(json.dumps(
             {"segment_id": "seg9", "hmac_hex": "bad"}))
         (warm / "events.jsonl").write_text("")
-        with pytest.raises(Exception):
-            compact_to_summary(str(warm), str(tmp_path / "c.json"),
+        with self.assertRaises(Exception):
+            compact_to_summary(str(warm), str(self.tmp_path / "c.json"),
                                hmac_key=b"k" * 32)
 
     def test_per_customer_override(self):
@@ -312,3 +330,7 @@ class TestRetentionJob:
         acme = cfg.for_customer("acme")
         assert acme.hot_days == 365 and acme.warm_days == 730
         assert cfg.for_customer("other").hot_days == 180
+
+
+if __name__ == "__main__":
+    unittest.main()
