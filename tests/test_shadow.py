@@ -32,7 +32,6 @@ from sentinel.shadow import (
     ShadowConfig,
     ShadowPipeline,
     ShadowStore,
-    policy_action,
     subscription_coverage_check,
     threshold_counterfactual,
     verify_bearer,
@@ -40,6 +39,7 @@ from sentinel.shadow import (
 )
 from sentinel.state import build_state
 
+from tests.helpers import make_alert
 from tests.test_gate import canned, fresh_monitor_for
 
 
@@ -584,41 +584,72 @@ class TestBootRefusal(unittest.TestCase):
 
 # ---------------------------------------------------------------- policy mirror
 
-class TestPolicyMirror(unittest.TestCase):
-    """threshold_counterfactual's policy must agree with the real gate."""
+class TestCounterfactualUsesRealKernel(unittest.TestCase):
+    """DR-26: the shadow's threshold_counterfactual calls the REAL kernel.
 
-    def test_counterfactual_matches_gate_at_live_threshold(self):
-        cases = [
-            # (p1, conf, q3_choice, allowlisted) -> expected live action
-            (dict(p1_critical=0.0, p2_high=0.0, p3_medium=0.9, p4_low=0.1),
-             0.95, "suppress", True, "suppress"),
-            (dict(p1_critical=0.9, p2_high=0.0, p3_medium=0.1, p4_low=0.0),
-             0.95, "page_now", True, "page_now"),
-            (dict(p1_critical=0.0, p2_high=0.0, p3_medium=0.9, p4_low=0.1),
-             0.40, "page_business_hours", True, "page_now"),  # uncertainty
-            (dict(p1_critical=0.0, p2_high=0.0, p3_medium=0.9, p4_low=0.1),
-             0.95, "cannot_determine", True, "passthrough"),
-            (dict(p1_critical=0.0, p2_high=0.0, p3_medium=0.9, p4_low=0.1),
-             0.95, "suppress", False, "page_business_hours"),  # no allowlist
-        ]
+    The old ``policy_action`` mirror ("pure mirror of Gate._decide's policy
+    table") is deleted — it reimplemented the pre-ADR-013 table and had
+    already drifted. One kernel, evaluated N+1 times: each preset entry
+    must equal ``evaluate_policy`` with the same inputs and the preset's
+    confidence-floor override. There is no second function to drift, so
+    agreement holds by construction; these tests pin the contract.
+    """
+
+    def _kernel_inputs(self, conf=0.95, q3_choice="page_business_hours"):
+        alert = make_alert()
+        resp = canned(p1=0.0, conf=conf, q3_choice=q3_choice)
+        return alert, resp
+
+    def _fresh_report(self, alert):
+        return fresh_monitor_for([alert.fingerprint]).current_report()
+
+    def test_each_preset_equals_kernel_with_override(self):
+        from sentinel.gate import evaluate_policy
+        alert, resp = self._kernel_inputs()
         t = Thresholds()
-        for probs, conf, choice, allowlisted, expected in cases:
-            got = policy_action(probs["p1_critical"], probs["p2_high"],
-                                probs["p3_medium"], probs["p4_low"],
-                                conf, choice, allowlisted, t)
-            self.assertEqual(got, expected, (probs, conf, choice))
+        presets = (0.85, 0.90, 0.95, 0.99)
+        kw = dict(jev_model="jev-1.13.0", prob_lock_pass=True,
+                  in_allowlist=True,
+                  freshness_report=self._fresh_report(alert))
+        cf = threshold_counterfactual(
+            alert, resp.answers["severity"], resp.answers["owning_team"],
+            resp.answers["disposition"], t, presets, **kw)
+        self.assertEqual(set(cf), {"conf>=0.85", "conf>=0.90",
+                                   "conf>=0.95", "conf>=0.99"})
+        for p in presets:
+            expected = evaluate_policy(
+                alert, jev_model="jev-1.13.0",
+                q_severity=resp.answers["severity"],
+                q_team=resp.answers["owning_team"],
+                q_disposition=resp.answers["disposition"],
+                thresholds=t, allowlist={alert.fingerprint},
+                latency_ms=0.0, prob_lock_pass=True,
+                freshness_report=kw["freshness_report"],
+                suppress_conf_min_override=p).action
+            self.assertEqual(cf[f"conf>={p:.2f}"], expected,
+                             f"preset conf>={p:.2f}")
 
     def test_counterfactual_presets_shape(self):
+        alert, resp = self._kernel_inputs()
         t = Thresholds()
         cf = threshold_counterfactual(
-            {"p1_critical": 0.0, "p2_high": 0.0,
-             "p3_medium": 0.9, "p4_low": 0.1},
-            0.95, "suppress", True, t, (0.85, 0.90, 0.95, 0.99))
+            alert, resp.answers["severity"], resp.answers["owning_team"],
+            resp.answers["disposition"], t, (0.85, 0.90, 0.95, 0.99),
+            prob_lock_pass=True, in_allowlist=True,
+            freshness_report=self._fresh_report(alert))
         self.assertEqual(set(cf), {"conf>=0.85", "conf>=0.90",
                                    "conf>=0.95", "conf>=0.99"})
         self.assertEqual(cf["conf>=0.85"], "suppress")
         # At 0.99 the confidence lock fails -> falls through to business-hours.
         self.assertEqual(cf["conf>=0.99"], "page_business_hours")
+
+    def test_invalid_preset_raises_loudly(self):
+        alert, resp = self._kernel_inputs()
+        with self.assertRaises(ValueError):
+            threshold_counterfactual(
+                alert, resp.answers["severity"], resp.answers["owning_team"],
+                resp.answers["disposition"], Thresholds(), ["bogus"],
+                prob_lock_pass=True, in_allowlist=True)
 
 
 # ---------------------------------------------------------------- event sink
