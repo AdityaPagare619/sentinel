@@ -51,6 +51,7 @@ import re
 import sys
 import time
 
+from . import firewall
 from . import race
 from .client import JevError
 from .correlator import legacy_fingerprint_of
@@ -684,6 +685,34 @@ class Gate:
                 budget_ms=budget_ms, latency_ms=disp.latency_ms,
                 lock_evaluation=empty_lock_evaluation()))
             return disp, answers
+
+        # D6 (ADR-020) — deterministic instruction-firewall screen, phase 2.
+        # Runs AFTER the S1 structural bars (the correlator's dedup /
+        # storm-collapse has already folded duplicates — Pager's condition:
+        # an injection storm pages once per fingerprint, not once per
+        # injected alert) and BEFORE the S2 Jev race (a flagged alert never
+        # arms the race: no vendor call, no Jev spend, and no model ever
+        # sees the hostile text). A hit is always page_now (fail-closed);
+        # the firewall never suppresses.
+        hit = firewall.apply_firewall(alert)
+        if hit is not None:
+            disp, _ = hit.as_gate_tuple()
+            payload = decision_made_payload(
+                alert=alert, input_sha256=in_sha,
+                disposition=disp.action,
+                budget_outcome=race.STRUCTURAL_PASSTHROUGH,
+                budget_ms=budget_ms, latency_ms=disp.latency_ms,
+                lock_evaluation=empty_lock_evaluation())
+            # Merge the firewall body keys (firewall_flagged + detectors +
+            # evidence + version) into the decision_made body — the
+            # event-log validator permits extra keys, so the field survives
+            # to the shadow report's ASR metric.
+            payload["body"].update(hit.body_extra)
+            self._emit(payload)
+            # as_gate_tuple's answers slot is None by design (no Jev
+            # answers exist on this path); normalize so evaluate() always
+            # gets the (Disposition, dict) shape every other path returns.
+            return disp, _empty_answers()
 
         # S2 — FAST: win the race. The pool submission inside runner.run()
         # is the only Jev-call site on the hot path.
