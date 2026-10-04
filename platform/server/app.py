@@ -129,6 +129,10 @@ class PlatformApp:
         def _sr(status, headers, exc_info=None):
             seen = {n.lower() for n, _ in headers}
             extra = [(n, v) for n, v in cors if n.lower() not in seen]
+            # exc_info must only be passed when present: many test doubles
+            # (and some servers) implement the 2-arg start_response form.
+            if exc_info is None:
+                return _wsgi_start(status, headers + extra)
             return _wsgi_start(status, headers + extra, exc_info)
 
         if method == "OPTIONS" and path.startswith("/api/"):
