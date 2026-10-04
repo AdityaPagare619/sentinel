@@ -71,7 +71,8 @@ class PlatformApp:
     def __init__(self, *, store: ReadStore, registry, gate, degrade,
                  data_source: str = "shadow",
                  labels_version: str = "labels-v3",
-                 ui_dir: str | None = None):
+                 ui_dir: str | None = None,
+                 cors_origins: str = "*"):
         self.store = store
         self.registry = registry
         self.gate = gate
@@ -81,16 +82,66 @@ class PlatformApp:
         self.ui_dir = os.path.abspath(ui_dir) if ui_dir else None
         if self.ui_dir and not os.path.isdir(self.ui_dir):
             self.ui_dir = None
+        # CORS for the hosted-console deployment: the GitHub Pages prod
+        # console (or any static host) fetches this API cross-origin, so the
+        # browser demands Access-Control-Allow-Origin on every /api/*
+        # response plus an OPTIONS preflight for POST/DELETE. "*" (default)
+        # keeps the one-command self-host path working; restrict it to your
+        # console origin(s) with --cors-origins in production.
+        cors_origins = (cors_origins or "").strip()
+        self._cors_off = (cors_origins == "")
+        self._cors_star = (cors_origins == "*")
+        self._cors_set = ({o.strip() for o in cors_origins.split(",")
+                           if o.strip()}
+                          if not (self._cors_off or self._cors_star) else set())
         # BYOK integrations settings (the platform tier's ONE write surface —
         # keys only, namespaced under /api/v1/integrations/). Twin of
         # sentinel/integrations.py; same file, same format.
         self.integrations = IntegrationStore()
+
+    def _cors_headers(self, environ) -> list:
+        """CORS headers for this request. "" disables (proxy owns the
+        policy); "*" needs no Origin check; an allowlist echoes back only
+        a listed Origin (with Vary)."""
+        if self._cors_off:
+            return []
+        if self._cors_star:
+            return [("Access-Control-Allow-Origin", "*")]
+        origin = environ.get("HTTP_ORIGIN", "")
+        if origin and origin in self._cors_set:
+            return [("Access-Control-Allow-Origin", origin),
+                    ("Vary", "Origin")]
+        return []
 
     # ------------------------------------------------------------- WSGI
 
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/") or "/"
         method = environ.get("REQUEST_METHOD", "GET").upper()
+
+        # CORS: inject Access-Control-Allow-Origin on EVERY response via a
+        # wrapped start_response, so _ok/_error/_stream/_static all comply
+        # without per-callsite changes. Preflight first — it is cheap and
+        # must not consume admission-control slots.
+        cors = self._cors_headers(environ)
+        _wsgi_start = start_response  # capture before rebinding below
+
+        def _sr(status, headers, exc_info=None):
+            seen = {n.lower() for n, _ in headers}
+            extra = [(n, v) for n, v in cors if n.lower() not in seen]
+            return _wsgi_start(status, headers + extra, exc_info)
+
+        if method == "OPTIONS" and path.startswith("/api/"):
+            _sr("204 No Content", [
+                ("Content-Length", "0"),
+                ("Access-Control-Allow-Methods",
+                 "GET, POST, DELETE, OPTIONS"),
+                ("Access-Control-Allow-Headers",
+                 "Content-Type, Authorization"),
+                ("Access-Control-Max-Age", "600"),
+            ])
+            return [b""]
+        start_response = _sr
 
         # 1. Admission control — fail fast, never queue unboundedly.
         if not self.gate.try_acquire():

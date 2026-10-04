@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
@@ -33,6 +32,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", required=True)
     ap.add_argument("--seed", type=int, default=42)
+    # Deterministic by default: demo data builds must be byte-identical across
+    # runs (the gh-pages static builder asserts this). Override only for a
+    # genuinely new rehearsal.
+    ap.add_argument("--labeled-at", default="2026-10-03T02:00:00+00:00",
+                    help="rehearsal timestamp for labeled_at (default: fixed)")
     args = ap.parse_args()
 
     con = sqlite3.connect(args.db)
@@ -44,7 +48,7 @@ def main() -> None:
         mttr_min    REAL,
         labeled_at  TEXT NOT NULL
     )""")
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = args.labeled_at
     n = 0
     for alert, label in generate_alerts(40, args.seed):
         con.execute(

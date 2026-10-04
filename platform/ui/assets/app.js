@@ -1,6 +1,6 @@
 /* app.js — shell: hash router, top bar, verdict strip, detail drawer,
  * command palette, SSE badge, MOCK DATA banner. Views own their screens. */
-import { Data } from './api.js';
+import { Data, backendUrlConfigured, setBackendUrl } from './api.js';
 import { drawerHtml, esc, closeGlyph } from './components.js';
 import { parseHash, routeHref, SCREENS } from './lib.js';
 import { renderRiver } from './views-river.js';
@@ -10,6 +10,7 @@ import { renderAudit } from './views-audit.js';
 import { renderShadow } from './views-shadow.js';
 import { renderSettings } from './views-settings.js';
 import { renderStart } from './views-start.js';
+import { renderSetup } from './views-setup.js';
 import { loadPins } from './pins.js';
 
 const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, shadow: renderShadow, settings: renderSettings, start: renderStart };
@@ -48,6 +49,7 @@ const ctx = {
       live: ['● live', 'ok'], paused: ['○ paused', ''],
       reconnecting: [`◌ reconnecting…${attempt ? ' (attempt ' + attempt + ')' : ''}`, 'warn'],
       polling: ['◌ polling', 'warn'],
+      snapshot: ['◌ snapshot — not live', 'warn'],
     };
     const [txt, cls] = map[s] || [s, ''];
     el.sseState.textContent = txt;
@@ -109,7 +111,10 @@ function paintPalette(qtext) {
       label: `river filtered: ${[tok.team && 'team=' + tok.team, tok.fpr && 'fpr=' + tok.fpr, tok.reason && 'reason=' + tok.reason, tok.last && 'last=' + tok.last].filter(Boolean).join(' ')}`,
       href: routeHref('river', { ...(tok.team ? { team: tok.team } : {}), ...(tok.fpr ? { fpr: tok.fpr } : {}), ...(tok.reason ? { reason: tok.reason } : {}), ...(tok.last ? { last: tok.last } : {}), ...(Data.mode === 'mock' ? { mock: '1' } : {}) }),
     });
-  items.push({ label: `toggle data source (now: ${Data.mode})`, action: () => { Data.setMode(Data.mode === 'live' ? 'mock' : 'live'); location.reload(); } });
+  /* build-fixed modes have no data source to toggle (staging is static,
+   * production is live) — the toggle would be phantom interactivity (§8.9). */
+  if (!Data.modeFixed)
+    items.push({ label: `toggle data source (now: ${Data.mode})`, action: () => { Data.setMode(Data.mode === 'live' ? 'mock' : 'live'); location.reload(); } });
   el.paletteList.innerHTML = items.map((it, i) =>
     `<button class="palette-item mono" data-i="${i}">${esc(it.label)}</button>`).join('');
   el.paletteList.querySelectorAll('.palette-item').forEach(b => b.addEventListener('click', () => {
@@ -129,8 +134,17 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !el.drawer.hidden) closeDrawer();
 });
 
-/* ---------- MOCK DATA banner: mocks never render silently ---------- */
+/* ---------- data honesty banner: the build's condition, stated in-band (P3) ---------- */
 function paintMockBanner() {
+  /* static showcase (GitHub Pages staging): the SIMULATED banner is part of the
+   * surface, not a footnote. Synthetic data, simulated paging, pre-rendered
+   * snapshots — nothing here is your system. No "go live" escape: there is no
+   * live backend behind a static host. */
+  if (Data.dataMode === 'static') {
+    el.mockBanner.hidden = false;
+    el.mockBanner.innerHTML = `◈ SIMULATED SHOWCASE — synthetic data · simulated paging · snapshots, not a live stream · not your system`;
+    return;
+  }
   if (Data.mode === 'mock') {
     el.mockBanner.hidden = false;
     el.mockBanner.innerHTML = `◈ MOCK DATA — contract mocks v1.0.0 · illustrative, not your system · <button id="mock-off" class="mono">go live</button>`;
@@ -163,6 +177,14 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
-/* demo-contract: land on START for first-time visitors */
-if (!location.hash) location.hash = '#/start' + (Data.mode === 'mock' ? '?mock=1' : '');
-route();
+/* demo-contract: land on START for first-time visitors.
+ * Production (DATA_MODE='live') with no backend configured: the honest empty
+ * state — backend setup screen, never invented data (P3). */
+if (window.SENTINEL_DATA_MODE === 'live' && !backendUrlConfigured()) {
+  el.nav.innerHTML = '';
+  el.srcBadge.textContent = '◈ no backend';
+  renderSetup(el.view);
+} else {
+  if (!location.hash) location.hash = '#/start' + (Data.mode === 'mock' ? '?mock=1' : '');
+  route();
+}

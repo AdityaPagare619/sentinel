@@ -24,8 +24,9 @@ sys.path.insert(0, os.path.join(repo, "src"))
 from sentinel.eventlog import _SCHEMA, _DECISIONS_VIEW
 
 db_path = os.path.join(out, "demo.db")
-if os.path.exists(db_path):
-    os.remove(db_path)
+for p in (db_path, db_path + "-shm", db_path + "-wal"):
+    if os.path.exists(p):
+        os.remove(p)
 con = sqlite3.connect(db_path)
 con.executescript(_SCHEMA)
 con.executescript(_DECISIONS_VIEW)
