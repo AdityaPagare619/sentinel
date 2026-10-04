@@ -1,17 +1,18 @@
 /* app.js — shell: hash router, top bar, verdict strip, detail drawer,
  * command palette, SSE badge, MOCK DATA banner. Views own their screens. */
 import { Data } from './api.js';
-import { drawerHtml, esc } from './components.js';
+import { drawerHtml, esc, closeGlyph } from './components.js';
 import { parseHash, routeHref, SCREENS } from './lib.js';
 import { renderRiver } from './views-river.js';
 import { renderCal } from './views-cal.js';
 import { renderSim } from './views-sim.js';
 import { renderAudit } from './views-audit.js';
+import { renderShadow } from './views-shadow.js';
 import { renderStart } from './views-start.js';
 import { loadPins } from './pins.js';
 
-const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, start: renderStart };
-const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', start: 'START' };
+const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, shadow: renderShadow, start: renderStart };
+const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', shadow: 'SHADOW', start: 'START' };
 
 const el = {
   view: document.getElementById('view'),
@@ -69,7 +70,7 @@ const ctx = {
         btn.outerHTML = `<span class="mono" style="color:var(--tx-1)">demo build: no page sent — this would page through your normal paging path, audit-logged as an override.</span>`;
       }));
     } catch (e) {
-      el.drawer.innerHTML = `<div class="drawer-head"><span class="mono">decision #${esc(String(id))}</span><button class="drawer-close" aria-label="close">✕</button></div>
+      el.drawer.innerHTML = `<div class="drawer-head"><span class="mono">decision #${esc(String(id))}</span><button class="drawer-close" aria-label="close">${closeGlyph()}</button></div>
         <p class="drawer-note">Couldn't load this decision (${esc(e.message || 'unreachable')}). The gate is unaffected.</p>`;
       el.drawer.hidden = false;
       el.drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);

@@ -64,6 +64,19 @@ export function fmtTimeBoth(iso) {
   } catch { local = 'local time unavailable'; }
   return `${utc} · ${local}`;
 }
+/* Compact in-band dual zone for tape rows (A5): "02:14:07 UTC · 07:44 IST".
+ * Two zones, no hover-only information (§5.2). */
+export function fmtTimeDual(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const utc = d.toISOString().slice(11, 19);
+  let local;
+  try {
+    local = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }) + ' ' + tzAbbr();
+  } catch { local = ''; }
+  return local ? `${utc} UTC · ${local}` : `${utc} UTC`;
+}
 /* A4 live-tail rule state machine (pure; the view owns the DOM).
  * Returns {rate, recent, tooFast}: tooFast latches when the 5s rolling rate
  * exceeds maxPerSec and releases below half of it (hysteresis — no flapping
@@ -103,6 +116,7 @@ export const SCREENS = [
   { code: 'CAL', id: 'calibration', label: 'Calibration' },
   { code: 'SIM', id: 'simulator', label: 'Threshold simulator' },
   { code: 'AUDIT', id: 'audit', label: 'Audit explorer' },
+  { code: 'SHADOW', id: 'shadow', label: 'Shadow report' },
   { code: 'START', id: 'start', label: 'Onboarding' },
 ];
 

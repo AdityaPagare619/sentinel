@@ -1,0 +1,177 @@
+{
+  "data": [
+    {
+      "actual_disposition": "suppress",
+      "confidence": 0.96,
+      "decision_id": 1042,
+      "outcome": {
+        "acked": false,
+        "acted": false,
+        "joined_incident": false,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "known-noise-pattern",
+      "service": "redis-cache",
+      "severity": "known_noise",
+      "shadow_disposition": "suppress",
+      "time": "2026-10-02T18:55:00Z"
+    },
+    {
+      "actual_disposition": "page_now",
+      "confidence": 0.98,
+      "decision_id": 1041,
+      "outcome": {
+        "acked": true,
+        "acted": true,
+        "joined_incident": true,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "sev1-confidence",
+      "service": "payments-svc",
+      "severity": "p1_critical",
+      "shadow_disposition": "page_now",
+      "time": "2026-10-02T18:51:13Z"
+    },
+    {
+      "actual_disposition": "page_business_hours",
+      "confidence": 0.72,
+      "decision_id": 1040,
+      "outcome": {
+        "acked": true,
+        "acted": false,
+        "joined_incident": false,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "biz-hours-queue",
+      "service": "search-api",
+      "severity": "p3_medium",
+      "shadow_disposition": "page_business_hours",
+      "time": "2026-10-02T18:47:02Z"
+    },
+    {
+      "actual_disposition": "page_now",
+      "confidence": 0.91,
+      "decision_id": 1039,
+      "outcome": {
+        "acked": true,
+        "acted": true,
+        "joined_incident": true,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": true
+      },
+      "reason": "known-noise-pattern",
+      "review_note": "shadow suppressed; the on-call paged manually at 18:46 \u2014 consumer lag was a real incident (INC-4821). Suppression regret.",
+      "service": "kafka-ingest",
+      "severity": "known_noise",
+      "shadow_disposition": "suppress",
+      "time": "2026-10-02T18:44:51Z"
+    },
+    {
+      "actual_disposition": "passthrough",
+      "confidence": 0.44,
+      "decision_id": 1038,
+      "outcome": {
+        "acked": false,
+        "acted": false,
+        "joined_incident": false,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "indeterminate-severity",
+      "service": "auth-gateway",
+      "severity": "cannot_determine",
+      "shadow_disposition": "passthrough",
+      "time": "2026-10-02T18:40:20Z"
+    },
+    {
+      "actual_disposition": "page_now",
+      "confidence": 0.94,
+      "decision_id": 1037,
+      "outcome": {
+        "acked": true,
+        "acted": true,
+        "joined_incident": true,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "sev2-confidence",
+      "service": "postgres-primary",
+      "severity": "p2_high",
+      "shadow_disposition": "page_now",
+      "time": "2026-10-02T18:33:09Z"
+    },
+    {
+      "actual_disposition": "suppress",
+      "confidence": 0.97,
+      "decision_id": 1036,
+      "outcome": {
+        "acked": false,
+        "acted": false,
+        "joined_incident": false,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "known-noise-pattern",
+      "service": "cdn-edge",
+      "severity": "known_noise",
+      "shadow_disposition": "suppress",
+      "time": "2026-10-02T18:29:44Z"
+    },
+    {
+      "actual_disposition": "suppress",
+      "confidence": 0.52,
+      "decision_id": 1035,
+      "outcome": {
+        "acked": true,
+        "acted": false,
+        "joined_incident": false,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "uncertainty-below-floor",
+      "review_note": "shadow paged on uncertainty; the deterministic path stood it down and nothing happened \u2014 shadow was wrong here. Calibrated conservatism is intentional.",
+      "service": "k8s-platform",
+      "severity": "known_noise",
+      "shadow_disposition": "page_now",
+      "time": "2026-10-02T18:25:31Z"
+    },
+    {
+      "actual_disposition": "page_business_hours",
+      "confidence": 0.71,
+      "decision_id": 1034,
+      "outcome": null,
+      "reason": "biz-hours-queue",
+      "service": "ci-runners",
+      "severity": "p4_low",
+      "shadow_disposition": "page_business_hours",
+      "time": "2026-10-02T18:21:17Z"
+    },
+    {
+      "actual_disposition": "page_now",
+      "confidence": 0.99,
+      "decision_id": 1033,
+      "outcome": {
+        "acked": true,
+        "acted": true,
+        "joined_incident": true,
+        "labeled_at": "2026-10-03T02:00:00Z",
+        "manually_unsuppressed": false
+      },
+      "reason": "sev1-confidence",
+      "service": "checkout-api",
+      "severity": "p1_critical",
+      "shadow_disposition": "page_now",
+      "time": "2026-10-02T18:17:55Z"
+    }
+  ],
+  "meta": {
+    "contract_version": "1.0.0",
+    "data_source": "shadow",
+    "generated_at": "2026-10-03T02:05:00Z",
+    "note": "contract-shaped mock: shadow dispositions vs actual paging outcomes, joined to labeled outcomes. Live mode derives the same figures client-side from the read contract's decision records + outcomes (see assets/shadow.js).",
+    "window": "7d"
+  }
+}
