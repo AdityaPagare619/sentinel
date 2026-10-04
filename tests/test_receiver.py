@@ -222,7 +222,7 @@ class TestPdEnqueue(ReceiverTestBase):
 class TestSuppressEndToEnd(ReceiverTestBase):
     def test_suppress_never_reaches_pagerduty(self):
         # ADR-013: suppression requires dual attestation (bare fingerprint no longer suppresses — M-1 fix).
-        fp = fingerprint_for("web", "http_5xx", "critical", "us-east")
+        fp = fingerprint_for("web", "http_5xx", "critical", "us-east", env="", cluster="")
         now = datetime(2026, 10, 3, tzinfo=timezone.utc)
         entry = AllowlistEntry(
             fingerprint=fp, author="carol",
@@ -316,7 +316,7 @@ class TestShadowEndToEnd(ReceiverTestBase):
         # shadow returns passthrough -> forwarder relays the original payload
         self.assertEqual(len(self.pd.requests), 1)
         rows = self.pipeline.audit.decisions_for_fingerprint(
-            fingerprint_for("web", "http_5xx", "critical", "us-east"))
+            fingerprint_for("web", "http_5xx", "critical", "us-east", env="", cluster=""))
         self.assertEqual(rows[0]["action"], "page_now")  # would-be logged
         self.assertEqual(rows[0]["reason"], "shadow")
 

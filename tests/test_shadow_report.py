@@ -53,7 +53,8 @@ def _ingest(sp, payload):
 
 
 def _fp(service, priority):
-    return fingerprint_for(service, "pagerduty.incident", priority, "")
+    return fingerprint_for(service, "pagerduty.incident", priority, "",
+                             env="", cluster="")
 
 
 class TestShadowReport(unittest.TestCase):

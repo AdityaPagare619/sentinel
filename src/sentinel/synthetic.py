@@ -72,9 +72,17 @@ _BASE_Q1_PROBS: dict[str, dict[str, float]] = {
 }
 
 
-def fingerprint_of(service: str, check: str, severity_in: str, region: str) -> str:
+def fingerprint_of(service: str, check: str, severity_in: str, region: str,
+                   env: str = "prod", cluster: str | None = None) -> str:
+    """Scheme-v2 fingerprint (ADR-017): env+cluster are in the hash input.
+
+    Defaults mirror the synthetic estate (env=prod, cluster=<region>-a) so
+    generated history accumulates per estate-qualified fingerprint.
+    """
+    if cluster is None:
+        cluster = f"{region}-a"
     return hashlib.sha256(
-        f"{service}|{check}|{severity_in}|{region}".encode("utf-8")
+        f"{service}|{check}|{severity_in}|{region}|{env}|{cluster}".encode("utf-8")
     ).hexdigest()[:16]
 
 
@@ -94,7 +102,7 @@ _NOISE_TEMPLATES = [
 ]
 
 # The normal pool must never share a (service, check, region) triple with the
-# noise pool: fingerprints are hash(service|check|severity_in|region), so a
+# noise pool: fingerprints are hash(service|check|severity_in|region|env|cluster), so a
 # shared triple would let a p3/p4 alert land on a known-noise fingerprint,
 # join the suppression allowlist, and get wrongly suppressed.
 _NOISE_TRIPLES = {(s, c, r) for s, c, _, r in _NOISE_TEMPLATES}

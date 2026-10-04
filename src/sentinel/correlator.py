@@ -9,6 +9,7 @@ In-memory for v0.1 (Redis in the SaaS upgrade). Thread-safe.
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import time
 from collections import deque
@@ -17,16 +18,60 @@ from datetime import datetime, timezone
 
 from .models import Alert, Disposition
 
+logger = logging.getLogger("sentinel.fingerprint")
 
-def fingerprint_for(service: str, check: str, severity_in: str, region: str) -> str:
-    """Fingerprint = first 16 chars of sha256("service|check|severity_in|region")."""
+# ADR-017: fingerprint scheme v2. The v1 formula
+# sha256("service|check|severity_in|region") was env-blind: a staging alert
+# and a prod alert for the same check hashed identically (the staging→prod
+# collision — a concrete missed-SEV1 pre-mortem). v2 appends env+cluster to
+# the hash input so the dedup identity is estate-qualified. Any future
+# consumer matching the raw fingerprint gets the namespaced hash, not a
+# prefix convention that can be silently bypassed.
+FINGERPRINT_SCHEME_VERSION = 2
+
+
+def fingerprint_for(service: str, check: str, severity_in: str, region: str,
+                    *, env: str, cluster: str) -> str:
+    """Scheme-v2 fingerprint: first 16 chars of
+    sha256("service|check|severity_in|region|env|cluster").
+
+    env/cluster are REQUIRED keyword-only — no call site may silently mint
+    an env-blind hash. An empty string is a real namespace ("unknown"), never
+    a wildcard: two alerts that both lack env still dedup together, and that
+    is visible, not accidental.
+    """
+    key = f"{service}|{check}|{severity_in}|{region}|{env}|{cluster}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def legacy_fingerprint_for(service: str, check: str, severity_in: str,
+                           region: str) -> str:
+    """Scheme-v1 fingerprint (env-blind). MIGRATION-ONLY: used solely to
+    resolve pre-migration allowlist entries during the bounded migration
+    window (see docs/fingerprint-migration-adr017.md). Never use for new
+    fingerprints. Target removal: after the migration window closes."""
     key = f"{service}|{check}|{severity_in}|{region}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def fingerprint_of(alert: Alert) -> str:
-    region = (alert.labels or {}).get("region", "")
-    return fingerprint_for(alert.service, alert.check, alert.severity_in, region)
+    labels = alert.labels or {}
+    return fingerprint_for(alert.service, alert.check, alert.severity_in,
+                           labels.get("region", ""),
+                           env=labels.get("env", ""),
+                           cluster=labels.get("cluster", ""))
+
+
+def legacy_fingerprint_of(alert: Alert) -> str:
+    """The v1 fingerprint this alert *would* have had pre-migration.
+
+    Used only for dual-resolution during the migration window: an alert whose
+    v2 fingerprint misses the allowlist may still match a carried-over v1
+    entry (loudly logged). Never used for new writes.
+    """
+    labels = alert.labels or {}
+    return legacy_fingerprint_for(alert.service, alert.check,
+                                  alert.severity_in, labels.get("region", ""))
 
 
 @dataclass

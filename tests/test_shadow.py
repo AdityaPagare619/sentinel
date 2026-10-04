@@ -484,7 +484,7 @@ class TestReadOnlyProof(unittest.TestCase):
                                         q3_choice="suppress",
                                         q1_choice="p4_low")
                 fp = fingerprint_for(service, "pagerduty.incident",
-                                     "P4", "")
+                                     "P4", "", env="", cluster="")
                 allowlist.add(fp)
             else:
                 by_title[title] = canned(p1=0.9, conf=0.95)
@@ -695,7 +695,7 @@ class TestEventSink(unittest.TestCase):
         # Fingerprint is the one the gate actually evaluated.
         self.assertEqual(call["fingerprint"],
                          fingerprint_for("payments-api", "pagerduty.incident",
-                                         "P4", ""))
+                                         "P4", "", env="", cluster=""))
         # Body carries the shadow_decision vocabulary: "links" is REQUIRED
         # by the event-log schema.
         body = call["body"]

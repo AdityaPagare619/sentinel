@@ -294,7 +294,7 @@ class TestShadowDigestMirror(unittest.TestCase):
         audit = AuditLog(":memory:")
         self.client = _AlwaysAnswersClient()
         fps = [fingerprint_for(f"svc-{i}", "pagerduty.incident",
-                               "critical", "")
+                               "critical", "", env="", cluster="")
                for i in range(3)]
         # D1: suppress is unreachable without a freshness monitor (fail
         # closed). This test needs the pre-storm alerts to suppress, so it

@@ -343,7 +343,9 @@ def _aggregate_alert(corr, triggering: Alert) -> Alert:
              "triggering_alert_id": triggering.alert_id},
     )
     alert.fingerprint = fingerprint_for("storm-aggregate", "storm",
-                                        "critical", region)
+                                        "critical", region,
+                                        env=(triggering.labels or {}).get("env", ""),
+                                        cluster=(triggering.labels or {}).get("cluster", ""))
     return alert
 
 
@@ -744,6 +746,43 @@ def _freshness_monitor_from_env():
     return mon
 
 
+def _legacy_allowlist_from_env() -> tuple[dict[str, str], str | None]:
+    """Load the ADR-017 migration-window legacy map.
+
+    Reads SENTINEL_LEGACY_FINGERPRINTS — the ``legacy_allowlist.json``
+    written by scripts/migrate_fingerprints_v1_v2.py:
+    ``{"window_ends_at": <RFC3339>, "entries": {v1_fp: v2_fp}}``.
+
+    Unset/missing file ⇒ ({}, None): no legacy resolution (fail closed —
+    post-migration steady state). Unparseable ⇒ loud warning + ({}, None):
+    a corrupt legacy map must never silently widen or narrow suppression.
+    """
+    path = os.environ.get("SENTINEL_LEGACY_FINGERPRINTS")
+    if not path:
+        return {}, None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = data.get("entries")
+        window_ends_at = data.get("window_ends_at")
+        if not isinstance(entries, dict) or not window_ends_at:
+            raise ValueError("expected {window_ends_at, entries: {v1: v2}}")
+        clean = {str(k): str(v) for k, v in entries.items()}
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(
+            f"[sentinel] WARNING: SENTINEL_LEGACY_FINGERPRINTS={path} "
+            f"unreadable ({exc}) — legacy v1 fingerprints will NOT resolve; "
+            f"pre-migration allowlist entries cannot suppress until the "
+            f"file is repaired (ADR-017).\\n")
+        return {}, None
+    sys.stderr.write(
+        f"[sentinel] WARNING: legacy v1 fingerprint resolution is ACTIVE "
+        f"({len(clean)} entries, window ends {window_ends_at}) — every "
+        f"resolution is logged as LEGACY-FINGERPRINT-RESOLVED. Re-attest "
+        f"and remove the file before the window ends (ADR-017).\\n")
+    return clean, str(window_ends_at)
+
+
 def build_pipeline_from_env(policy=None,
                             config_loader: ConfigLoader | None = None,
                             state_dir: str | None = None) -> Pipeline:
@@ -826,10 +865,14 @@ def build_pipeline_from_env(policy=None,
     policy_gate = PolicyGate(os.environ.get("SENTINEL_POLICY_STATE",
                                              "./policy-state.json"))
     freshness_monitor = _freshness_monitor_from_env()
+    # ADR-017/D4: bounded migration window for scheme-v1 fingerprints.
+    legacy_map, legacy_window_ends_at = _legacy_allowlist_from_env()
     gate = Gate(client, policy.thresholds, set(policy.allowlist), audit,
                 shadow=shadow, policy_gate=policy_gate,
                 freshness_monitor=freshness_monitor,
-                pinned_model=pinned_model)
+                pinned_model=pinned_model,
+                legacy_allowlist=legacy_map,
+                legacy_window_ends_at=legacy_window_ends_at)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
@@ -874,11 +917,16 @@ def build_shadow_pipeline_from_env(*, client, thresholds, allowlist,
         return None
     # B2: the shadow gate consults the same enforcement file — shadow
     # would-be verdicts evaluate identical policy state to production.
+    # ADR-017/D4: same legacy window as the live gate (env-driven, so the
+    # shadow mirror resolves exactly what production resolves).
+    legacy_map, legacy_window_ends_at = _legacy_allowlist_from_env()
     shadow_gate = Gate(client, thresholds, set(allowlist or []), audit,
                        shadow=True, freshness_monitor=freshness_monitor,
                        pinned_model=pinned_model,
                        policy_gate=PolicyGate(os.environ.get(
-                           "SENTINEL_POLICY_STATE", "./policy-state.json")))
+                           "SENTINEL_POLICY_STATE", "./policy-state.json")),
+                       legacy_allowlist=legacy_map,
+                       legacy_window_ends_at=legacy_window_ends_at)
     return ShadowPipeline(gate=shadow_gate, correlator=Correlator(),
                           store=ShadowStore(), config=config,
                           allowlist=set(allowlist or []))

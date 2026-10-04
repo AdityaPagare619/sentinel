@@ -3,7 +3,7 @@
 import hashlib
 import unittest
 
-from sentinel.correlator import fingerprint_for
+from sentinel.correlator import fingerprint_of
 from sentinel.models import Alert
 
 
@@ -12,11 +12,10 @@ def make_alert(service="web", check="http_5xx", severity="critical",
                title="boom", labels=None, raw=None):
     labels = dict(labels or {})
     labels.setdefault("region", region)
-    fp = fingerprint_for(service, check, severity, region)
-    return Alert(
+    alert = Alert(
         alert_id=alert_id,
         received_at="2026-10-02T12:00:00+00:00",
-        fingerprint=fp,
+        fingerprint="",
         service=service,
         check=check,
         severity_in=severity,
@@ -25,6 +24,10 @@ def make_alert(service="web", check="http_5xx", severity="critical",
         labels=labels,
         raw=dict(raw or {"summary": title}),
     )
+    # ADR-017: the fingerprint is the scheme-v2 hash over the alert's own
+    # labels (env/cluster included) — never computed from a subset.
+    alert.fingerprint = fingerprint_of(alert)
+    return alert
 
 
 class FakeClock:

@@ -10,7 +10,8 @@ if _SRC not in sys.path:  # makes `python -m unittest discover -s tests` work
 import hashlib
 import unittest
 
-from sentinel.correlator import Correlator, fingerprint_for, fingerprint_of
+from sentinel.correlator import (Correlator, fingerprint_for, fingerprint_of,
+                                   legacy_fingerprint_for)
 from sentinel.models import Disposition
 
 from tests.helpers import FakeClock, make_alert
@@ -18,21 +19,55 @@ from tests.helpers import FakeClock, make_alert
 
 class TestFingerprint(unittest.TestCase):
     def test_format_and_determinism(self):
-        fp = fingerprint_for("web", "http_5xx", "critical", "us-east")
+        fp = fingerprint_for("web", "http_5xx", "critical", "us-east",
+                             env="prod", cluster="us-east-1a")
         self.assertEqual(len(fp), 16)
         int(fp, 16)  # hex
         expected = hashlib.sha256(
-            b"web|http_5xx|critical|us-east").hexdigest()[:16]
+            b"web|http_5xx|critical|us-east|prod|us-east-1a").hexdigest()[:16]
         self.assertEqual(fp, expected)
-        self.assertEqual(fingerprint_for("web", "http_5xx", "critical", "us-east"), fp)
+        self.assertEqual(fingerprint_for("web", "http_5xx", "critical",
+                                         "us-east", env="prod",
+                                         cluster="us-east-1a"), fp)
 
-    def test_region_from_labels(self):
-        a = make_alert(region="eu-west")
+    def test_env_cluster_are_in_the_hash(self):
+        # ADR-017: the staging→prod collision dies here. Same
+        # service/check/severity/region, different env => different
+        # fingerprint. Same for cluster.
+        base = dict(service="web", check="http_5xx", severity_in="critical",
+                    region="us-east")
+        prod = fingerprint_for(env="prod", cluster="us-east-1a", **base)
+        staging = fingerprint_for(env="staging", cluster="us-east-1a", **base)
+        other_cluster = fingerprint_for(env="prod", cluster="us-east-1b",
+                                        **base)
+        self.assertNotEqual(prod, staging)
+        self.assertNotEqual(prod, other_cluster)
+        self.assertNotEqual(staging, other_cluster)
+
+    def test_v2_differs_from_legacy_v1(self):
+        v2 = fingerprint_for("web", "http_5xx", "critical", "us-east",
+                             env="prod", cluster="us-east-1a")
+        v1 = legacy_fingerprint_for("web", "http_5xx", "critical", "us-east")
+        self.assertNotEqual(v2, v1)
+        self.assertEqual(v1, hashlib.sha256(
+            b"web|http_5xx|critical|us-east").hexdigest()[:16])
+
+    def test_env_required_keyword_only(self):
+        # No call site may silently mint an env-blind hash.
+        with self.assertRaises(TypeError):
+            fingerprint_for("web", "http_5xx", "critical", "us-east")
+
+    def test_labels_drive_fingerprint(self):
+        a = make_alert(region="eu-west",
+                       labels={"env": "staging", "cluster": "eu-west-1a"})
         self.assertEqual(fingerprint_of(a),
-                         fingerprint_for("web", "http_5xx", "critical", "eu-west"))
+                         fingerprint_for("web", "http_5xx", "critical",
+                                         "eu-west", env="staging",
+                                         cluster="eu-west-1a"))
 
     def test_distinct_inputs_distinct_fingerprints(self):
-        fps = {fingerprint_for(f"svc{i}", "chk", "critical", "r") for i in range(50)}
+        fps = {fingerprint_for(f"svc{i}", "chk", "critical", "r",
+                               env="prod", cluster="c") for i in range(50)}
         self.assertEqual(len(fps), 50)
 
 
