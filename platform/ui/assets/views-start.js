@@ -150,7 +150,7 @@ Authorization: Bearer &lt;ops-token&gt;
       }
       const d = ordered[i++];
       if (d.disposition === 'suppress') nSupp++; else if (d.disposition === 'page_now') nPage++;
-      tape.insertAdjacentHTML('afterbegin', decisionRow(d, { density: 'tape', thresholds: DEFAULT_THRESHOLDS }));
+      tape.insertAdjacentHTML('afterbegin', decisionRow(d, { density: 'tape', thresholds: DEFAULT_THRESHOLDS, dataSource: 'synthetic' }));
       const first = tape.firstElementChild;
       if (first) { first.classList.add('row-new'); setTimeout(() => first.classList.remove('row-new'), 140); }
       meta.textContent = `storm running… ${i}/${ordered.length} · ${nSupp} suppressed · ${nPage} paged`;
@@ -168,7 +168,7 @@ Authorization: Bearer &lt;ops-token&gt;
       const det = await Data.getDecision(1042);
       const d = det.data;
       root.querySelector('#why-body').innerHTML = `
-        <div class="why-row">${decisionRow(d, { density: 'comfortable', thresholds: DEFAULT_THRESHOLDS })}</div>
+        <div class="why-row">${decisionRow(d, { density: 'comfortable', thresholds: DEFAULT_THRESHOLDS, dataSource: 'synthetic' })}</div>
         <div class="why-walk">
           <div class="why-step"><b>1 · the confidence bar.</b> Marker vs the team's Q3 vs the suppress floor — is 0.96 sure <i>by your standards</i>?</div>
           <div class="why-step"><b>2 · the reason code.</b> <span class="mono">triple-lock</span> — the machine's receipt, not a vibe.</div>

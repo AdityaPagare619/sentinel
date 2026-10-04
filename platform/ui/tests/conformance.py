@@ -141,6 +141,31 @@ for v in team_enum:
 COMP = (ROOT / "assets" / "components.js").read_text()
 check("dispChip requires a reason code", "reason missing — rendering bug" in COMP)
 
+# 6. shadow surface: the client derives S5 figures from the read contract —
+# there is no /api/analytics/shadow in the frozen contract (asserted), the
+# fixture is contract-shaped, and the view joins it to real decision ids.
+PATHS_TEXT = json.dumps(list(SPEC.get("paths", {}).keys()))
+check("no /api/analytics/shadow in the frozen contract (S5 is client-derived)",
+      "/api/analytics/shadow" not in SPEC.get("paths", {}))
+API = (ROOT / "assets" / "api.js").read_text()
+check("client implements shadow derivation (getShadow)", "getShadow" in API)
+shadow_fx = json.loads((ROOT / "data" / "shadow.json").read_text())
+check("shadow.json is a non-empty list", isinstance(shadow_fx["data"], list) and len(shadow_fx["data"]) > 0)
+dec_ids = {r["id"] for r in json.loads((ROOT / "data" / "decisions.json").read_text())["data"]}
+check("shadow.json rows join to real decision ids",
+      all(r["decision_id"] in dec_ids for r in shadow_fx["data"]),
+      str([r["decision_id"] for r in shadow_fx["data"] if r["decision_id"] not in dec_ids]))
+check("shadow.json rows carry both disposition sides",
+      all("shadow_disposition" in r and "actual_disposition" in r for r in shadow_fx["data"]))
+check("shadow.json envelope contract_version=1.0.0",
+      shadow_fx["meta"].get("contract_version") == "1.0.0")
+check("shadow.json envelope data_source ∈ enum",
+      shadow_fx["meta"].get("data_source") in ("synthetic", "shadow", "production"))
+VIEWS_JS2 = " ".join((ROOT / "assets" / f).read_text()
+                     for f in ["views-river.js", "views-cal.js", "views-sim.js", "views-audit.js", "views-shadow.js"])
+for v in team_enum:
+    check(f"views (+shadow) list contract team '{v}'", v in VIEWS_JS2)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURES")

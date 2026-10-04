@@ -3,9 +3,9 @@
 
 /* ---------- shell ---------- */
 .mock-banner {
-  background: #171126; color: var(--src-synthetic);
+  background: var(--bg-1); color: var(--src-synthetic);
   font-family: var(--font-mono); font-size: 11px;
-  padding: 6px 12px; border-bottom: 1px solid var(--line-1);
+  padding: 6px 12px; border-bottom: 1px solid var(--src-synthetic);
   display: flex; gap: 12px; align-items: center;
 }
 .mock-banner[hidden] { display: none; }
@@ -100,7 +100,7 @@
 .density-tape .row { padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
 .density-comfortable .row { padding-top: 12px; padding-bottom: 12px; }
 .row-new { animation: rownew 120ms ease-out; }
-@keyframes rownew { from { background: rgba(232, 238, 247, 0.08); } to { background: transparent; } }
+@keyframes rownew { from { background: color-mix(in srgb, var(--tx-0) 8%, transparent); } to { background: transparent; } }
 .gap-marker { justify-content: center; color: var(--sev-2); cursor: default; border-bottom: 1px dashed var(--sev-2); }
 .gap-marker:hover { background: none; }
 .jump-pill {
@@ -155,7 +155,7 @@
 
 /* ---------- command palette ---------- */
 .palette {
-  position: fixed; inset: 0; background: rgba(6, 9, 15, 0.7); z-index: 200;
+  position: fixed; inset: 0; background: color-mix(in srgb, var(--bg-0) 70%, transparent); z-index: 200;
   display: flex; justify-content: center; padding-top: 12vh;
 }
 .palette[hidden] { display: none; }
@@ -232,7 +232,7 @@ a.hcard:hover { border-color: var(--line-1); text-decoration: none; }
 .curve-sub { color: var(--tx-2); font-size: 10px; }
 #sim-curve { max-width: 100%; background: var(--bg-1); border: 1px solid var(--line-0); border-radius: var(--radius-card); }
 .prov-block { font-size: 11px; color: var(--tx-1); background: var(--bg-1); border: 1px solid var(--line-0); border-radius: var(--radius-card); padding: 14px 16px; line-height: 1.7; }
-.diff-modal { position: fixed; inset: 0; background: rgba(6, 9, 15, 0.8); z-index: 200; display: flex; justify-content: center; align-items: center; }
+.diff-modal { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg-0) 80%, transparent); z-index: 200; display: flex; justify-content: center; align-items: center; }
 .diff-modal[hidden] { display: none; }
 .diff-card { width: 640px; max-width: 92vw; max-height: 86vh; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--line-1); border-radius: var(--radius-card); padding: 20px; }
 .diff-card h3 { margin: 0 0 8px; font-size: 14px; }
@@ -274,7 +274,7 @@ a.hcard:hover { border-color: var(--line-1); text-decoration: none; }
 .trace { margin-top: 12px; }
 .trace-ev { font-size: 12px; padding: 6px 0; color: var(--tx-2); }
 .trace-ev.done { color: var(--tx-0); }
-.deg-banner { background: #2a1f0d; color: var(--sev-2); font-size: 11px; padding: 10px 24px; border-bottom: 1px solid var(--sev-2); }
+.deg-banner { background: var(--bg-1); color: var(--sev-2); font-size: 11px; padding: 10px 24px; border-bottom: 1px solid var(--sev-2); }
 .storm-tape-wrap { border: 1px solid var(--line-0); border-radius: var(--radius-card); overflow: hidden; margin-top: 12px; }
 .storm-meta { padding: 8px 14px; font-size: 11px; color: var(--tx-2); border-bottom: 1px solid var(--line-0); background: var(--bg-1); }
 .storm-tape { max-height: 340px; overflow-y: auto; }

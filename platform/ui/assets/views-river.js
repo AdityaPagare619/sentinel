@@ -3,18 +3,25 @@
  * Freedom 2: "See why this paged you — and why the others didn't." */
 import { Data, Stream } from './api.js';
 import { decisionRow, driftRow, srcBadge, skeletonRows, errorBlock, emptyBlock, gapMarker,
-         drawerHtml, esc } from './components.js';
+         drawerHtml, esc, closeGlyph } from './components.js';
 import { validateDecisionSummary, isQueryableField } from './contract.js';
 import { loadPins, savePins, makePin, validatePinDoc, validatePinAgainstSample,
          resolvePath, exportPins, importPinsJson } from './pins.js';
 import { parseHash, routeHref, stripRiver, fmtInt, SEV_LABEL, DISP_LABEL,
          DEFAULT_THRESHOLDS, ageStr, tailState } from './lib.js';
+import { freshnessBadge, streamFreshness, FRESHNESS_BUDGETS } from './freshness.js';
 
 const TEAMS = ['platform', 'network', 'data', 'product_backend', 'security', 'cannot_determine'];
 const SEVS = [['1', 'p1_critical'], ['2', 'p2_high'], ['3', 'p3_medium'], ['4', 'p4_low']];
 const DISPS = ['page_now', 'page_business_hours', 'suppress', 'passthrough'];
 const WINDOWS = ['1h', '24h', '7d', '30d'];
 const DENSITIES = ['comfortable', 'compact', 'tape'];
+/* §6: 60fps at 10,000+ rows — windowed rendering is mandatory, not an
+ * optimization. Fixed row heights per density keep the window math O(1);
+ * rows are keyed by decision id (stable rows — the tape never re-sorts
+ * under you, and focus/selection survive re-renders). */
+const ROW_H = { comfortable: 46, compact: 30, tape: 24 };
+const OVERSCAN = 12;
 
 function windowToIso(win) {
   const m = win.match(/^(\d+)([smhd])$/);
@@ -34,13 +41,14 @@ export async function renderRiver(root, params, ctx) {
   let rows = [], flips = {}, calBins = null, newestIso = null, apiDown = false, apiMsg = '';
   let pinned = false, pendingNew = 0, selIdx = -1;
   let pins = loadPins(), pinsOff = false;
+  let dataSource = 'unknown'; /* R7 B1: row badges derive from envelope evidence, never hardcoded */
 
   /* The fixed typed decision contract is the renderer’s authority (contract.js).
    * A row the contract cannot describe renders as drift — never as a decision. */
   function rowHtml(d, i) {
     const v = validateDecisionSummary(d);
     if (!v.ok) return driftRow(d, v.errors);
-    return decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS, pins, pinsOff });
+    return decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS, pins, pinsOff, dataSource });
   }
 
   root.innerHTML = `
@@ -87,14 +95,18 @@ export async function renderRiver(root, params, ctx) {
     </aside>
     <section class="tape-col">
       <div id="filter-tokens" class="filter-tokens"></div>
+      <div id="tape-fresh" class="tape-fresh mono"></div>
       <div id="jump-pill" class="jump-pill mono" hidden>▲ <span id="jump-n">0</span> new — jump to live <span class="mono-dim">(Shift+G)</span></div>
       <div id="tail-banner" class="tail-banner mono" hidden></div>
-      <div id="tape" class="tape" tabindex="0" aria-label="decision tape">${skeletonRows(10)}</div>
+      <div id="tape" class="tape" tabindex="0" aria-label="decision tape"><div id="tape-spacer" class="tape-spacer"><div id="tape-win" class="tape-win"></div></div></div>
     </section>
   </div>`;
 
   const tape = root.querySelector('#tape');
+  const spacer = root.querySelector('#tape-spacer');
+  const win = root.querySelector('#tape-win');
   const pill = root.querySelector('#jump-pill');
+  let rowH = ROW_H[f.density] || ROW_H.compact;
 
   const apiParams = () => {
     const p = { limit: 50 };
@@ -118,7 +130,7 @@ export async function renderRiver(root, params, ctx) {
     if (f.q) toks.push(['q', '“' + f.q + '”']);
     toks.push(['window', 'last ' + f.last]);
     root.querySelector('#filter-tokens').innerHTML = toks.map(([k, v]) =>
-      `<button class="token mono" data-k="${k}" title="clear">${esc(k)}=${esc(v)} ✕</button>`).join('');
+      `<button class="token mono" data-k="${k}" title="clear">${esc(k)}=${esc(v)} ${closeGlyph()}</button>`).join('');
     root.querySelectorAll('.token').forEach(t => t.addEventListener('click', () => {
       const k = t.dataset.k;
       if (k === 'team') f.team = ''; else if (k === 'action') f.action = '';
@@ -128,31 +140,59 @@ export async function renderRiver(root, params, ctx) {
     }));
   }
 
-  function paintRows() {
-    if (!rows.length) {
-      const desc = [f.team && `team=${f.team}`, f.action && `action=${f.action}`, f.reason && `reason=${f.reason}`].filter(Boolean).join(' ');
-      tape.innerHTML = emptyBlock(
-        `No decisions in the last ${f.last}${desc ? ' for ' + desc : ''}. The gate is armed and watching — widen the window or check another team.`,
-        'hint: last=7d');
-      return;
-    }
-    tape.innerHTML = rows.map((d, i) => rowHtml(d, i)).join('');
-    tape.querySelectorAll('.row[data-id]').forEach(r => {
+  /* ---------- windowed tape: only the visible rows (+overscan) exist in the DOM.
+   * Rows are keyed by decision id — selection and focus survive re-renders
+   * (stable rows), and the window never moves under the cursor. ---------- */
+  function wireRowEvents(scope) {
+    scope.querySelectorAll('.row[data-id]').forEach(r => {
       r.addEventListener('click', (e) => {
         if (e.target.closest('a,button')) return;
-        ctx.openDrawer(Number(r.dataset.id), { bins: calBins, flips });
+        ctx.openDrawer(Number(r.dataset.id), { bins: calBins, flips, freshness: freshForDrawer() });
       });
-      r.addEventListener('keydown', (e) => { if (e.key === 'Enter') ctx.openDrawer(Number(r.dataset.id), { bins: calBins, flips }); });
+      r.addEventListener('keydown', (e) => { if (e.key === 'Enter') ctx.openDrawer(Number(r.dataset.id), { bins: calBins, flips, freshness: freshForDrawer() }); });
     });
-    tape.querySelectorAll('.row-team').forEach(b => b.addEventListener('click', (e) => {
+    scope.querySelectorAll('.row-team').forEach(b => b.addEventListener('click', (e) => {
       e.stopPropagation(); f.team = b.dataset.team; syncRoute(); load();
     }));
-    tape.querySelectorAll('.fpr-link').forEach(a => a.addEventListener('click', (e) => {
+    scope.querySelectorAll('.fpr-link').forEach(a => a.addEventListener('click', (e) => {
       if (e.altKey || e.metaKey || e.ctrlKey) return;
       e.preventDefault();
       try { navigator.clipboard.writeText(a.dataset.fpr); } catch {}
       location.hash = a.getAttribute('href');
     }));
+  }
+
+  function paintRows() {
+    if (!rows.length) {
+      spacer.style.height = 'auto';
+      const desc = [f.team && `team=${f.team}`, f.action && `action=${f.action}`, f.reason && `reason=${f.reason}`].filter(Boolean).join(' ');
+      win.innerHTML = emptyBlock(
+        `No decisions in the last ${f.last}${desc ? ' for ' + desc : ''}. The gate is armed and watching — widen the window or check another team.`,
+        'hint: last=7d');
+      return;
+    }
+    const st = tape.scrollTop, vh = tape.clientHeight || 640;
+    const start = Math.max(0, Math.floor(st / rowH) - OVERSCAN);
+    const end = Math.min(rows.length, Math.ceil((st + vh) / rowH) + OVERSCAN);
+    spacer.style.height = (rows.length * rowH) + 'px';
+    let html = '';
+    for (let i = start; i < end; i++) {
+      html += `<div class="vrow" style="transform:translateY(${i * rowH}px)">${rowHtml(rows[i], i)}</div>`;
+    }
+    win.innerHTML = html;
+    wireRowEvents(win);
+    paintTapeFresh();
+  }
+
+  function freshForDrawer() {
+    const sf = streamFreshness({ streamState: stream.state, lastEventAt, nowMs: Date.now() });
+    return { state: sf.state, asOfIso: sf.asOfIso, waitingOn: sf.waitingOn, budgetMs: FRESHNESS_BUDGETS.decision };
+  }
+  function paintTapeFresh() {
+    const sf = streamFreshness({ streamState: stream.state, lastEventAt, nowMs: Date.now() });
+    root.querySelector('#tape-fresh').innerHTML =
+      freshnessBadge({ state: sf.state, asOfIso: sf.asOfIso, waitingOn: sf.waitingOn, budgetMs: FRESHNESS_BUDGETS.river, compact: true }) +
+      `<span class="mono-dim"> ${fmtInt(rows.length)} decisions · virtualized</span>`;
   }
 
   function paintStrip() {
@@ -163,7 +203,8 @@ export async function renderRiver(root, params, ctx) {
 
   async function load() {
     renderTokens();
-    tape.innerHTML = skeletonRows(10);
+    spacer.style.height = 'auto';
+    win.innerHTML = skeletonRows(10);
     ctx.setSrcBadge(null); /* badge shows first, skeleton after — Law L2 */
     try {
       const [env, flipEnv] = await Promise.all([
@@ -171,7 +212,9 @@ export async function renderRiver(root, params, ctx) {
         Data.getFlips('7d').catch(() => null),
       ]);
       rows = env.data || [];
+      dataSource = env.meta?.data_source || 'unknown';
       newestIso = rows.length ? rows[0].time : null;
+      lastEventAt = newestIso ? new Date(newestIso).getTime() : null;
       apiDown = false;
       if (flipEnv?.data?.flips) {
         flips = {};
@@ -194,11 +237,14 @@ export async function renderRiver(root, params, ctx) {
       }));
     } catch (e) {
       apiDown = true; apiMsg = `GET /api/decisions → ${e.status || 'unreachable'}`;
-      tape.innerHTML = errorBlock({
+      spacer.style.height = 'auto';
+      win.innerHTML = errorBlock({
         what: `Couldn't reach the decisions API (GET /api/decisions → ${e.status || 'unreachable'}).`,
         detail: e.message || '',
         retryFn: load,
       }) + (rows.length ? '<div class="stale-note mono">showing last-known snapshot below — the gate is unaffected.</div>' : '');
+      paintStrip();
+      return;
     }
     paintRows(); paintStrip();
   }
@@ -236,7 +282,7 @@ export async function renderRiver(root, params, ctx) {
     list.innerHTML = pins.length
       ? pins.map(p => `<div class="pin-row"><span class="mono">${esc(p.name)}</span>` +
           `<span class="pin-path mono">${esc(p.path)}</span>` +
-          `<button class="opt" data-del="${esc(p.id)}" title="remove pin" style="margin-left:auto">✕</button></div>`).join('')
+          `<button class="opt" data-del="${esc(p.id)}" title="remove pin" style="margin-left:auto">${closeGlyph()}</button></div>`).join('')
       : '<span class="mono" style="color:var(--tx-dim)">no pins — the river works without them</span>';
     list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => {
       pins = savePins(pins.filter(p => p.id !== b.dataset.del));
@@ -295,11 +341,15 @@ export async function renderRiver(root, params, ctx) {
   });
   renderPins();
 
-  /* pin-on-scroll: the tape never re-sorts under you */
+  /* pin-on-scroll: the tape never re-sorts under you. Scroll re-renders the
+   * visible window (rAF-throttled) — the window position is the only thing
+   * scroll is allowed to change. */
+  let scrollRaf = 0;
   tape.addEventListener('scroll', () => {
     const atHead = tape.scrollTop < 40;
-    if (atHead && pinned) { pinned = false; pendingNew = 0; pill.hidden = true; paintRows(); }
+    if (atHead && pinned) { pinned = false; pendingNew = 0; pill.hidden = true; }
     else if (!atHead && !pinned) pinned = true;
+    if (!scrollRaf) scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; paintRows(); });
   });
   pill.addEventListener('click', () => {
     pinned = false; pendingNew = 0; pill.hidden = true;
@@ -310,7 +360,7 @@ export async function renderRiver(root, params, ctx) {
    * stream is slow enough to read. Above LIVE_TAIL_MAX_PER_SEC the tail pauses
    * itself WITH a visible reason — the operator narrows the filter to regain it.
    * The threshold is a Type 2 starting point, tunable with measurement. */
-  let evtTimes = [], tooFast = false;
+  let evtTimes = [], tooFast = false, lastEventAt = null;
   function paintTailBanner(rate) {
     const b = root.querySelector('#tail-banner');
     if (tooFast) {
@@ -324,6 +374,7 @@ export async function renderRiver(root, params, ctx) {
   stream.on('decision', (d) => {
     if (rows.some(r => r.id === d.id)) return;
     evtTimes.push(Date.now());
+    lastEventAt = Date.now();
     const ts = tailState(evtTimes, Date.now(), tooFast);
     evtTimes = ts.recent; tooFast = ts.tooFast;
     paintTailBanner(ts.rate);
@@ -335,7 +386,7 @@ export async function renderRiver(root, params, ctx) {
       pill.hidden = false;
     } else {
       paintRows();
-      const first = tape.querySelector('.row');
+      const first = win.querySelector('.row');
       if (first) { first.classList.add('row-new'); setTimeout(() => first.classList.remove('row-new'), 140); }
     }
     paintStrip();
@@ -344,10 +395,12 @@ export async function renderRiver(root, params, ctx) {
     const secs = g.quietMs != null ? Math.round(g.quietMs / 1000) : null;
     const marker = document.createElement('div');
     marker.innerHTML = gapMarker({ seconds: secs, attempt: stream.attempt, reason: g.reason || 'SSE down' });
-    tape.prepend(marker.firstChild);
+    /* gap markers pin to the head of the visible window — they are part of
+     * the honest tape, never silently skipped */
+    win.insertAdjacentHTML('afterbegin', marker.innerHTML);
     ctx.setStrip(stripRiver({ nPages: 0, nSuppress: 0, windowLabel: f.last, gap: true }));
   });
-  stream.on('state', (s) => ctx.setSseState(s, stream.attempt));
+  stream.on('state', (s) => { ctx.setSseState(s, stream.attempt); paintTapeFresh(); });
   ctx.registerCleanup(() => stream.stop());
 
   /* keyboard: the river is fully operable without a mouse */
@@ -355,15 +408,21 @@ export async function renderRiver(root, params, ctx) {
     if (e.target.matches('input,textarea')) return;
     const move = (dir) => {
       selIdx = Math.max(0, Math.min(rows.length - 1, selIdx + dir));
+      /* keep the selection inside the rendered window, then paint */
+      const y = selIdx * rowH, vh = tape.clientHeight || 640;
+      if (y < tape.scrollTop || y > tape.scrollTop + vh - rowH) tape.scrollTop = Math.max(0, y - vh / 2);
       paintRows();
-      tape.querySelectorAll('.row')[selIdx]?.scrollIntoView({ block: 'nearest' });
-      tape.querySelectorAll('.row')[selIdx]?.focus({ preventScroll: true });
+      const el = win.querySelector(`.row[data-id="${rows[selIdx]?.id}"]`);
+      el?.focus({ preventScroll: true });
     };
     if (e.key === 'j') move(1);
     else if (e.key === 'k') move(-1);
-    else if (e.key === 'Enter' && selIdx >= 0) ctx.openDrawer(rows[selIdx].id, { bins: calBins, flips });
+    else if (e.key === 'Enter' && selIdx >= 0) ctx.openDrawer(rows[selIdx].id, { bins: calBins, flips, freshness: freshForDrawer() });
     else if (e.key === '/') { e.preventDefault(); ctx.openPalette('q='); }
     else if (e.key === 'G' && e.shiftKey) pill.click();
+    else if (e.key === 'x') { /* the one-keypress pins escape hatch */
+      pinsOff = !pinsOff; renderPins(); paintRows();
+    }
     else if (e.key === 'p' || e.key === 's' || e.key === 'e' || e.key === 'd') {
       const map = { p: 'page_now', s: 'suppress', e: 'page_business_hours', d: 'passthrough' };
       f.action = f.action === map[e.key] ? '' : map[e.key];
@@ -371,6 +430,7 @@ export async function renderRiver(root, params, ctx) {
       syncRoute(); load();
     } else if (e.key >= '1' && e.key <= '3') {
       f.density = DENSITIES[Number(e.key) - 1];
+      rowH = ROW_H[f.density];
       root.querySelectorAll('#f-density .opt').forEach((o, i) => o.classList.toggle('on', i === Number(e.key) - 1));
       syncRoute(); paintRows();
     } else if (e.key === '?') ctx.showKeymap();

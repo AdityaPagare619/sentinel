@@ -150,6 +150,36 @@ export const Data = {
     if (this.mode === 'mock') return this._touchMeta(await this._mock('flips.json'));
     return this._touchMeta(await this._live('/api/analytics/flips?window=' + encodeURIComponent(window)));
   },
+
+  /* ---------- shadow comparison: derived client-side from the read contract ----------
+   * There is no /api/analytics/shadow in the frozen contract — so the S5
+   * figures are COMPUTED from decision records + their labeled outcomes,
+   * never fetched. Every figure is labeled derived; unlabeled outcomes are
+   * excluded from denominators and the exclusion is stated (shadow.js).
+   * The agreement/disagreement dimension (shadow disposition vs what actually
+   * paged) needs a shadow join the read contract does not expose: mock mode
+   * shows the full S5 shape from the contract-shaped fixture; live mode
+   * renders page-precision + suppression-regret (computable) and the honest
+   * absence of the agreement dimension (RFC recorded in the build record). */
+  async getShadow(window = '7d') {
+    if (this.mode === 'mock') return this._touchMeta(await this._mock('shadow.json'));
+    const env = await this.getDecisions({ limit: 500 });
+    const rows = [];
+    for (const r of (env.data || []).slice(0, 200)) {
+      try {
+        const det = await this.getDecision(r.id);
+        rows.push({
+          decision_id: r.id, service: r.service, severity: r.severity,
+          time: r.time, reason: r.reason, confidence: r.confidence,
+          disposition: r.disposition, outcome: det.data.outcome || null,
+        });
+      } catch { /* a decision we cannot detail is excluded — stated in the view */ }
+    }
+    return this._touchMeta({
+      data: rows,
+      meta: { contract_version: '1.0.0', data_source: 'live', window, derived: 'client-side join of decision records + labeled outcomes', agreement: 'unavailable — shadow join not in the read contract' },
+    });
+  },
 };
 
 /* ---------- SSE stream with gap detection (narrative §3.4, §6.1) ---------- */

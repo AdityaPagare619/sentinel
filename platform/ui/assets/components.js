@@ -2,13 +2,40 @@
  * One source of truth for chips, badges, the confidence bar, river rows,
  * the detail drawer, skeletons, and error blocks. No screen logic here. */
 import { SEV_LABEL, DISP_LABEL, DISP_COLOR, SRC_LABEL,
-         fmtInt, fmtPct, fmtConf, fmtTime, fmtTimeBoth, ageStr, shortFpr, shortHash,
+         fmtInt, fmtPct, fmtConf, fmtTime, fmtTimeBoth, fmtTimeDual, tzAbbr, ageStr, shortFpr, shortHash,
          binForConf, quartilesFromBins, receiptLine, verdictSentence } from './lib.js';
 import { renderPayload, payloadEmptyHtml, payloadSkeletonHtml } from './payload.js';
 import { pinnedSectionHtml, pinCellsHtml } from './pins.js';
+import { freshnessBadge, freshnessState, FRESHNESS_BUDGETS } from './freshness.js';
+export { freshnessBadge }; /* the catalog re-exports the shared components */
+
+/* §8.7 CONSTRAINT (R1 ruling, recorded in code): any rule-driven highlight
+ * color — headline rules (banked, D2) or any future annotation layer — must
+ * resolve to a token in the §2.2 taxonomy. Literal colors are banned here;
+ * the anti-slop suite (tests/antislop.py) fails the build on any #hex/rgb()
+ * literal in components or views. */
 
 export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ---------- <ReconstructionMark> (Appendix A) — §4.4 in code ----------
+ * ANY value that is derived, reconstructed, simulated, or backfilled carries
+ * this mark IN-BAND at the point of display, with the same visual weight as
+ * the value. Footnotes and tooltips do not satisfy the law. */
+export function derivedMark(kind, detail = '') {
+  const labels = {
+    derived: 'derived', reconstructed: 'reconstructed',
+    simulated: 'SIMULATED', backfilled: 'backfilled', projected: 'projected',
+  };
+  return `<span class="derived-mark mono" title="${esc(detail || 'this value was computed from stored data, not measured')}">${esc(labels[kind] || kind)}</span>`;
+}
+
+/* ---------- drawn close glyph (§8.3 — no text-glyph icons) ----------
+ * Text close-glyphs render inconsistently and are not part of the drawn icon
+ * set (R12). Every dismiss control uses this shape. */
+export function closeGlyph() {
+  return `<svg class="icon-close" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 1.5 L10.5 10.5 M10.5 1.5 L1.5 10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 }
 
 /* ---------- §3.1 severity: signal bars in neutral ink (B1 three-channel separation) ----------
@@ -23,12 +50,30 @@ export function sevChip(sev) {
   return `<span class="sev-sig" role="img" aria-label="severity ${esc(String(label))}"><span class="sev-bars" aria-hidden="true">${bars}</span><span class="sev-label">${esc(String(label))}</span></span>`;
 }
 
-/* ---------- §3.2 disposition chip — reason code is MANDATORY ---------- */
+/* ---------- §3.2 disposition chip — reason code is MANDATORY ----------
+ * Decision channel = color + SHAPE (B1, R12 icon discipline): the glyph is a
+ * drawn shape distinct per disposition, so disposition survives color-vision
+ * deficiency and dimmed screens (§7 — never color-only).
+ *   page_now            ▲ triangle   — a human was woken
+ *   page_business_hours ◐ half disc  — queued, half-urgent
+ *   suppress            ○ hollow     — stood down, deliberate
+ *   passthrough         ▮ square     — unchanged by the gate          */
+const DISP_GLYPH = {
+  page_now: '<path d="M8 1 L15 14 L1 14 Z" fill="currentColor"/>',
+  page_business_hours: '<path d="M8 1 A7 7 0 0 1 8 15 Z" fill="currentColor"/><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/>',
+  suppress: '<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>',
+  passthrough: '<rect x="2.5" y="2.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"/>',
+};
+export function dispGlyph(disposition) {
+  const color = DISP_COLOR[disposition] || 'var(--tx-2)';
+  const shape = DISP_GLYPH[disposition] || DISP_GLYPH.passthrough;
+  return `<svg class="disp-glyph" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style="color:${color}">${shape}</svg>`;
+}
 export function dispChip(disposition, reason) {
   const label = DISP_LABEL[disposition] || esc(disposition);
   const color = DISP_COLOR[disposition] || 'var(--tx-2)';
   const r = reason ? `<span class="disp-reason">· ${esc(reason)}</span>` : `<span class="disp-reason disp-reason-missing">· reason missing — rendering bug</span>`;
-  return `<span class="chip disp-chip" style="color:${color};border-color:${color}"><span class="disp-bar" style="background:${color}"></span>${esc(label)}${r}</span>`;
+  return `<span class="chip disp-chip" style="color:${color};border-color:${color}">${dispGlyph(disposition)}<span class="disp-bar" style="background:${color}"></span>${esc(label)}${r}</span>`;
 }
 
 /* ---------- §3.3 data-source badge — reserved colors, never reused ---------- */
@@ -213,7 +258,7 @@ export function relDiagram(el, { bins, threshold, thresholdLabel = 'gate' }) {
  * The row renders the CLOSED contract vocabulary only (contract.js). Vendor
  * payload never enters row chrome. Field pins append as display-only cells —
  * they are never filter operands (synthesis §3). */
-export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null, pins = [], pinsOff = false } = {}) {
+export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null, pins = [], pinsOff = false, freshness = null, dataSource = 'unknown' } = {}) {
   const flip = flips[d.input_sha256];
   const flipBadge = flip && flip.flipped
     ? `<span class="flip-badge mono" title="the machine changed its mind — see flip timeline">${esc(DISP_LABEL[d.disposition] || d.disposition)} →(flip ${fmtTime(flip.last_seen)})→ ${esc(DISP_LABEL[flip.decisions[flip.decisions.length - 1].disposition] || '')}</span>`
@@ -221,15 +266,16 @@ export function decisionRow(d, { flips = {}, density = 'compact', selected = fal
   const receipt = thresholds ? receiptLine(d, thresholds) : null;
   return `<div class="row density-${density}${selected ? ' selected' : ''}${d.disposition === 'page_now' ? ' is-page' : ''}"
       data-id="${d.id}" tabindex="0" role="button" aria-label="decision ${d.id} ${esc(d.disposition)}">
-    <span class="row-time mono" title="${esc(fmtTimeBoth(d.time))} · ${esc(ageStr(d.time))}">${esc(fmtTime(d.time))}</span>
+    <span class="row-time mono" title="${esc(fmtTimeBoth(d.time))} · ${esc(ageStr(d.time))}">${esc(fmtTimeDual(d.time))}</span>
     ${sevChip(d.severity)}
     ${dispChip(d.disposition, d.reason)}
-    <span class="row-conf"><span class="mono">${fmtConf(d.confidence)}</span> <span class="mono row-denom">(shadow)</span></span>
+    <span class="row-conf"><span class="mono">${fmtConf(d.confidence)}</span></span>
     <button class="row-team mono" data-team="${esc(d.team)}" title="filter to team">${esc(d.team)}</button>
     ${fprLink(d.fingerprint)}
     ${flipBadge}
-    ${srcBadge('shadow')}
-    ${receipt ? `<span class="row-receipt mono">${esc(receipt)} <span class="receipt-derived">(derived from gate defaults — live thresholds are not exposed by the read API)</span></span>` : ''}
+    ${srcBadge(dataSource)}
+    ${freshness ? freshnessBadge(freshness) : ''}
+    ${receipt ? `<span class="row-receipt mono">${esc(receipt)} ${derivedMark('derived', 'recomputed from gate defaults — the read API does not expose live thresholds')}</span>` : ''}
     ${pinsOff ? '' : pinCellsHtml(d, pins)}
   </div>`;
 }
@@ -248,11 +294,20 @@ export function driftRow(d, errors) {
   </div>`;
 }
 
-/* ---------- detail drawer (river §5 / audit §1 — locked reading order) ---------- */
-export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion = '', flips = {}, pins = [] } = {}) {
+/* ---------- detail drawer (river §5 / audit §1 — locked reading order) ----------
+ * P2 (show the work): every decision carries its five companions —
+ *   1. evidence (what the model saw)      2. uncertainty (quantized + calibration)
+ *   3. freshness (badge + as-of)           4. policy version that produced it
+ *   5. fallback reason (deterministic path, when it decided instead of Jev)
+ * Companions 3–5 render their HONEST ABSENCE when the read contract does not
+ * expose them (synthesis §7) — never invented (P3). */
+export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion = '', flips = {}, pins = [], freshness = null } = {}) {
   const pm = d.prob_map || {};
   const triple = (t, name) => t ? `<div class="ev-triple"><span class="mono ev-name">${esc(name)}</span><span class="mono">Choice: <b>${esc(t.choice)}</b> · conf ${fmtConf(t.confidence)}</span><span class="mono ev-probs">${Object.entries(t.probs || {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${esc(k)} ${fmtConf(v)}`).join(' · ')}</span></div>` : '';
   const flip = flips[d.input_sha256];
+  const fallback = d.jev_model && d.jev_model !== 'deterministic path'
+    ? `Jev model ${d.jev_model} evaluated this alert`
+    : 'deterministic path decided — no model call was made for this decision';
   const flipHtml = flip && flip.flipped ? `
     <section class="drawer-sec"><h3>Flip timeline</h3>
       <div class="flip-tl">${flip.decisions.map((fd, i) => `
@@ -264,11 +319,16 @@ export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion =
   return `
   <div class="drawer-head">
     <span class="mono drawer-id">decision #${d.id}</span>
-    <button class="drawer-close" data-close aria-label="close (Esc)">✕</button>
+    <button class="drawer-close" data-close aria-label="close (Esc)">${closeGlyph()}</button>
   </div>
   <section class="drawer-sec"><h3>Verdict</h3>
     <div class="drawer-verdict">${dispChip(d.disposition, d.reason)} ${sevChip(d.severity)}</div>
     <p class="drawer-sentence">${esc(verdictSentence(d))}</p>
+    <div class="companions mono">
+      <span class="comp"><span class="comp-k">freshness</span> ${freshness ? freshnessBadge(freshness) : freshnessBadge({ state: 'degraded', waitingOn: 'stream state unavailable' })}</span>
+      <span class="comp"><span class="comp-k">policy</span> ${d.policy_version ? esc(d.policy_version) : `<span class="comp-absent">not exposed by the read API ${derivedMark('derived', '')}</span>`}</span>
+      <span class="comp"><span class="comp-k">fallback</span> ${esc(fallback)}</span>
+    </div>
   </section>
   <section class="drawer-sec"><h3>Evidence</h3>
     ${bins ? confBar({ conf: d.confidence, bins, threshold: thresholds?.suppress_conf_min, thresholdLabel: 'suppress floor' }) : '<p class="drawer-note">Team distribution unavailable — confidence shown without its typical band.</p>'}
@@ -283,9 +343,10 @@ export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion =
   </section>
   ${flipHtml}
   ${pinnedSectionHtml(d, pins)}
-  <section class="drawer-sec"><h3>Vendor payload</h3>
+  ${facetsSectionHtml(d)}
+  <section class="drawer-sec"><h3>Unmapped bag — vendor payload</h3>
     ${d.alert ? renderPayload(d.alert) : payloadEmptyHtml()}
-    <p class="drawer-note">Rendered structurally by the generic payload viewer — it shows the payload's shape, never its meaning. Secret-shaped values are redacted.</p>
+    <p class="drawer-note">Rendered structurally by the generic payload viewer — it shows the payload's shape, never its meaning. Secret-shaped values are redacted. Flattened dotted paths; the raw payload is untouched above the viewer.</p>
   </section>
   <section class="drawer-sec"><h3>Provenance</h3>
     <div class="prov mono">input&nbsp;&nbsp; ${esc(shortHash(d.input_sha256, 12))}<br>
@@ -307,6 +368,49 @@ export function drawerHtml(d, { bins = null, thresholds = null, datasetVersion =
     <details class="raw"><summary class="mono">GET /api/decision/${d.id}</summary><pre class="mono">${esc(JSON.stringify(d, null, 2))}</pre></details>
   </section>`;
 }
+
+/* ---------- facets (A1 data architecture): envelope / facets / unmapped bag ----------
+ * Facets are PLATFORM-promoted fields (indexed, costed at promotion; see the
+ * Field Catalog follow-up). Pins are console-level display bindings and the
+ * discovery mechanism; facets are the promotion target (K2 path). The two are
+ * different layers, not competitors — a pin NEVER becomes a facet by being
+ * pinned (behavior firewall). When the contract carries no facets, the
+ * section states that honestly instead of inventing a facet browser. */
+export function facetsSectionHtml(d) {
+  const facets = d.facets && typeof d.facets === 'object' ? d.facets : null;
+  const keys = facets ? Object.keys(facets) : [];
+  if (!keys.length) {
+    return `<section class="drawer-sec"><h3>Facets</h3>
+      <p class="drawer-note">No promoted facets on this decision — the platform has not promoted vendor fields into the contract yet. Field pins (above) are the discovery mechanism; promotion is by RFC with cardinality, coverage, and index-weight cost display.</p>
+    </section>`;
+  }
+  return `<section class="drawer-sec"><h3>Facets <span class="mono" style="color:var(--tx-2)">· promoted by the platform</span></h3>
+    <div class="facet-grid">${keys.map(k => `<div class="facet-cell"><span class="mono facet-k">${esc(k)}</span><span class="mono facet-v">${esc(String(facets[k]).slice(0, 120))}</span></div>`).join('')}</div>
+  </section>`;
+}
+
+/* ---------- §4.3 registry: the five states of every data-bearing component ----------
+ * Blank is never one of the five. This registry is the automated gate for
+ * honesty invariant 4 (§9.2): tests/honesty.test.mjs asserts every data
+ * component names a renderer for each state. A component that reaches review
+ * with only 'ready' designed is sent back — the registry makes that
+ * checkable, not a matter of opinion. */
+export const FIVE_STATES = ['loading', 'ready', 'stale_degraded', 'error', 'empty'];
+export const COMPONENT_STATE_COVERAGE = {
+  DecisionRow:       { loading: 'skeletonRows',  ready: 'decisionRow',    stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  FreshnessBadge:    { loading: 'freshnessBadge', ready: 'freshnessBadge', stale_degraded: 'freshnessBadge', error: 'freshnessBadge', empty: null },
+  ConfidenceMeter:   { loading: 'skeletonRows',  ready: 'confBar',        stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  DispositionTag:    { loading: 'skeletonRows',  ready: 'dispChip',       stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  EvidencePanel:     { loading: 'skeletonRows',  ready: 'drawerHtml',     stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  ReconstructionMark:{ loading: null,            ready: 'derivedMark',    stale_degraded: null,              error: null,         empty: null },
+  TimelineExplorer:  { loading: 'skeletonRows',  ready: 'paintChain',     stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  ThresholdSimulator:{ loading: 'skeletonRows',  ready: 'paintCards',     stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  ShadowDiffTable:   { loading: 'skeletonRows',  ready: 'renderShadow',   stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
+  DegradedBanner:    { loading: null,            ready: 'freshnessBadge', stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: null },
+};
+/* A renderer name of null means the state is not applicable to the component
+ * (e.g. ReconstructionMark is a pure label) — the test asserts the null is
+ * deliberate, i.e. present as a key with value null, not missing. */
 
 /* ---------- dead states (design system §5 — written first, happy path is the enhancement) ---------- */
 export function skeletonRows(n = 8) {
