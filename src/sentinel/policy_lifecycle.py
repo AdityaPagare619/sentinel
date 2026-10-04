@@ -170,7 +170,10 @@ class PolicyStore:
             return None
         if isinstance(reg, str):
             return _att.AttestorRegistry(reg)
-        return reg
+        # Instance passed (test convenience): re-read from its path so a
+        # revocation written by another process propagates. The str path
+        # above is the production path; both are fresh reads, never caches.
+        return reg.fresh()
 
     def _verify_attestations(self, atts: list,
                              v, now: _dt.datetime) -> None:
@@ -189,7 +192,9 @@ class PolicyStore:
                     "[sentinel] DEPRECATED: attestor registry not configured"
                     " — attestations are bare string IDs, NOT identity-"
                     "verified. Configure PolicyStore(attestor_registry=...)"
-                    " before the design partner (ADR attestor-identity).\n")
+                    " before first prod cutover: registry-less mode is"
+                    " REMOVED at cutover (no legacy string-ID trust in"
+                    " production; see docs/prod-cutover-checklist.md).\n")
             return
         for att in atts:
             for aid in att.attestor_ids:

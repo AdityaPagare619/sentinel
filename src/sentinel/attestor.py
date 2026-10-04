@@ -174,6 +174,12 @@ class AttestorRegistry:
         else:
             self._sealed_write()  # creates the sealed empty registry
 
+    def fresh(self) -> "AttestorRegistry":
+        """Re-read this registry from disk. PolicyStore calls this on every
+        transition/unfreeze so a revocation written by another process is
+        effective on the next decision (ADR §2, Type 1: never a boot cache)."""
+        return AttestorRegistry(self.path, root_key=self._root_key)
+
     # ------------------------------------------------------------ persistence
 
     def _seal(self, body: dict) -> str:

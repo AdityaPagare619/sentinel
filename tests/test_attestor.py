@@ -329,3 +329,18 @@ class TestQuarantine:
         reg.revoke("alice", "test", by="bob")
         events = quarantine_revoked(store, "alice", _now())
         assert events == []  # canary, not live — and alice wasn't involved
+
+    def test_registry_instance_fresh_read_propagates_revocation(self, tmp_path):
+        """R8 sharp: PolicyStore(attestor_registry=<instance>) must not serve
+        a boot cache — a revocation written by another process is effective
+        on the next decision (ADR Type-1 fresh-read-per-decision)."""
+        p = str(tmp_path / "attestors.json")
+        reg1 = AttestorRegistry(p, root_key=ROOT)
+        ka = generate_keypair(); kb = generate_keypair()
+        reg1.bootstrap([("alice", ka[1]), ("bob", kb[1])])
+        store = pl.PolicyStore(attestor_registry=reg1)
+        assert store._registry().is_active("alice")
+        # another process revokes alice
+        reg2 = AttestorRegistry(p, root_key=ROOT)
+        reg2.revoke("alice", "key compromise", by="bob")
+        assert not store._registry().is_active("alice")
