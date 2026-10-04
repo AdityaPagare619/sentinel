@@ -540,3 +540,31 @@ class PolicyGate:
         except Exception:
             # Unreadable/corrupt enforcement file: fail toward the human.
             return False, "policy_state_unreadable"
+
+    def version_info(self, policy_id: str) -> dict:
+        """Fresh-read pin of the policy version in force (D9/ADR-023).
+
+        Same fresh-read discipline as ``can_suppress``: the watchdog's
+        freeze or a version roll lands on the next decision — never a boot
+        cache. Never raises: an unreadable store records the failure in
+        the pin (``pin_error``) instead of sinking the receipt — the
+        decision is unaffected either way, and the receipt says what it
+        can.
+        """
+        try:
+            if not os.path.exists(self.path):
+                return {"policy_id": policy_id, "version": None,
+                        "state": None, "frozen": False,
+                        "pin_error": "policy_gate_not_configured"}
+            store = PolicyStore(self.path)
+            v = store.effective_version(policy_id)
+            if v is None:
+                return {"policy_id": policy_id, "version": None,
+                        "state": None, "frozen": False,
+                        "pin_error": "no_effective_version"}
+            return {"policy_id": policy_id, "version": v.version,
+                    "state": v.state, "frozen": bool(v.frozen)}
+        except Exception as exc:  # noqa: BLE001
+            return {"policy_id": policy_id, "version": None,
+                    "state": None, "frozen": False,
+                    "pin_error": f"policy_state_unreadable: {exc}"}

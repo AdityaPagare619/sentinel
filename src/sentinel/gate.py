@@ -60,6 +60,8 @@ from . import corroboration
 from . import race
 from .client import JevError
 from .correlator import legacy_fingerprint_of
+from .counterfactual import (CounterfactualInputs,
+                             build_counterfactual_receipt)
 from .freshness import (LOCK1_CALIBRATION, lock1_fallback_offered,
                         suppress_precondition)
 from .models import Alert, DecisionRecord, Disposition, Thresholds
@@ -142,12 +144,25 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
                     thresholds: Thresholds, allowlist: set,
                     latency_ms: float, prob_lock_pass: bool = False,
                     freshness_report=None,
-                    lock1_dual_attested: bool = False) -> PolicyVerdict:
+                    lock1_dual_attested: bool = False,
+                    suppress_leg_enabled: bool = True,
+                    suppress_conf_min_override: float | None = None
+                    ) -> PolicyVerdict:
     """The pure policy kernel — the frozen §4 table, no I/O, no clocks.
 
-    Shared by the live gate AND the race's late-answer path (one kernel,
-    not a copy — ADR-010 §4.2: ``shadow_disposition`` is what the gate
-    *would* have decided had the answer arrived in time).
+    Shared by the live gate, the race's late-answer path, the shadow tap,
+    and the D9 counterfactual receipt — one kernel, not a copy (DR-26;
+    ADR-010 §4.2: ``shadow_disposition`` is what the gate *would* have
+    decided had the answer arrived in time).
+
+    D9/ADR-023 counterfactual axes (parameters of the kernel itself, not a
+    wrapper — the receipt re-runs THIS function with different flags, so
+    there is no second implementation to drift):
+      suppress_leg_enabled: False removes the suppress branch — the
+        definitional ``no_suppress_leg`` counterfactual (what disposition
+        would this alert have received without the suppress leg?).
+      suppress_conf_min_override: override the suppress confidence floor
+        for this evaluation (the "what if the floor were higher?" preset).
 
     ADR-014: the freshness legs are part of the suppress conjunction.
     ``freshness_report`` is the cached FreshnessReport (two-point
@@ -178,12 +193,15 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
     conf3 = q3.confidence  # may be None -> uncertainty pages
     team = getattr(q2, "choice", None) if q2 is not None else None
     t = thresholds
+    # D9 counterfactual axis: the confidence floor under evaluation.
+    scm = (t.suppress_conf_min if suppress_conf_min_override is None
+           else suppress_conf_min_override)
 
     # Per-lock verdicts, evaluated at answer time. The detail strings say
     # exactly what was checked.
     # ADR-013: quantized lock replaces the naive p1 threshold.
     prob_pass = prob_lock_pass
-    conf_pass = conf3 is not None and conf3 >= t.suppress_conf_min
+    conf_pass = conf3 is not None and conf3 >= scm
     allow_pass = alert.fingerprint in allowlist
     locks = lock_evaluation(
         prob_pass,
@@ -191,7 +209,7 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
         f"suppress_p1_max={t.suppress_p1_max}",
         conf_pass,
         f"q3_confidence={conf3} "
-        f"{'>=' if conf_pass else '<'} suppress_conf_min={t.suppress_conf_min}",
+        f"{'>=' if conf_pass else '<'} suppress_conf_min={scm}",
         allow_pass,
         ("fingerprint in allowlist" if allow_pass
          else "fingerprint NOT in allowlist"),
@@ -205,7 +223,7 @@ def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
 
     if q3.choice == "cannot_determine":
         action, reason = "passthrough", "uncertain"
-    elif prob_pass and conf_pass and allow_pass:
+    elif suppress_leg_enabled and prob_pass and conf_pass and allow_pass:
         if fresh_ok:
             action, reason = "suppress", "allowlist"          # triple lock
         else:
@@ -727,26 +745,126 @@ class Gate:
                   f"ignored; the leg fails closed", file=sys.stderr)
             return []
 
-    def _corroboration_leg(self, alert, jev_model=None):
+    def _policy_allows_suppress(self) -> tuple[bool, str]:
+        """ADR-022/D8 enforcement: a frozen or expired suppression policy
+        cannot suppress, no matter what the triple lock says. Fail toward
+        the human. Never raises — an unreadable policy state is itself a
+        reason to page, not to suppress."""
+        if self.policy_gate is None:
+            return True, "ok"
+        try:
+            return self.policy_gate.can_suppress(self.policy_id)
+        except Exception:  # noqa: BLE001
+            return False, "policy_state_unreadable"
+
+    def _corroboration_leg(self, alert, jev_model=None, *,
+                           drop_evidence: bool = False,
+                           corro_inputs=None):
         """D5 (ADR-019): the final leg of the suppress conjunction — a
         suppress must ALSO be corroborated by an independent signal.
 
         Never raises: any failure fails the leg CLOSED (no corroboration),
         and the caller pages on the failure. The verdict is VISIBLE in the
-        decision record (which corroboration fired, or that none did)."""
+        decision record (which corroboration fired, or that none did).
+
+        Returns ``(verdict, (floor, evidences, now))`` — the resolved
+        inputs are returned so the D9 counterfactual receipt can
+        re-evaluate presets against byte-identical inputs without
+        re-calling the evidence provider (perishable inputs: the floor is
+        fresh-read per decision, evidence ages out). ``drop_evidence``
+        evaluates the leg with no evidence (fails closed) — the D9
+        "what if the corroborating evidence were absent?" preset.
+        ``corro_inputs`` reuses a previously resolved triple instead of
+        fresh-reading (no provider I/O).
+        """
         try:
-            floor = self._corroboration_floor()
-            now = self._gate_now()
-            evidences = self._provider_evidence(alert, floor, now)
-            return corroboration.evaluate_corroboration(
+            if corro_inputs is not None:
+                floor, evidences, now = corro_inputs
+            else:
+                floor = self._corroboration_floor()
+                now = self._gate_now()
+                evidences = self._provider_evidence(alert, floor, now)
+            if drop_evidence:
+                evidences = []
+            verdict = corroboration.evaluate_corroboration(
                 alert, evidences, floor, now=now,
                 registry=self.attestor_registry,
-                allowlist_entries=self.allowlist_entries,
+                # drop_evidence: "what if the corroborating evidence were
+                # absent?" means ALL of it — the built-in
+                # allowlist_attestation derivation is evidence too. With
+                # no entry the leg sees nothing and fails closed.
+                allowlist_entries=({} if drop_evidence
+                                    else self.allowlist_entries),
                 jev_model=jev_model)
+            return verdict, (floor, evidences, now)
         except Exception as exc:  # fail closed — the leg never sinks the page
             return corroboration.CorroborationVerdict(
                 passed=False, kind=None, floor_version=0,
-                detail=f"corroboration leg error (fail closed): {exc}")
+                detail=f"corroboration leg error (fail closed): {exc}"), None
+
+    def _resolve_suppress_path(self, alert, *, jev_model, q_sev, q_team,
+                               q_disp, latency_ms,
+                               lock1_dual_attested: bool = False,
+                               freshness_report=None,
+                               prob_lock_pass: bool = False,
+                               allowlist_for_kernel=None, via_legacy=False,
+                               suppress_leg_enabled: bool = True,
+                               suppress_conf_min_override=None,
+                               drop_evidence: bool = False,
+                               corro_inputs=None):
+        """DR-26: the kernel, the D8 policy gate, and the D5 corroboration
+        leg composed ONCE.
+
+        The live answered path, the late-answer path, and the D9
+        counterfactual receipt ALL call this — one composition, not three.
+        The next policy-table change edits ``evaluate_policy``; every
+        consumer moves together.
+
+        Returns ``(action, reason, verdict, corro_verdict, corro_inputs)``.
+        ``corro_verdict``/``corro_inputs`` are None unless the kernel said
+        suppress AND the D8 gate allowed it (the leg never runs otherwise);
+        the leg's verdict is merged into ``verdict.lock_evaluation`` so it
+        stays VISIBLE in the decision record.
+
+        The kernel may raise JevError on malformed answers (callers
+        translate that to the uncertainty-pages path, as before); the D8
+        hook and the leg never raise by construction.
+        """
+        verdict = evaluate_policy(
+            alert, jev_model=jev_model,
+            q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
+            thresholds=self.thresholds,
+            allowlist=(self.allowlist if allowlist_for_kernel is None
+                       else allowlist_for_kernel),
+            latency_ms=latency_ms, prob_lock_pass=prob_lock_pass,
+            freshness_report=freshness_report,
+            lock1_dual_attested=lock1_dual_attested,
+            suppress_leg_enabled=suppress_leg_enabled,
+            suppress_conf_min_override=suppress_conf_min_override)
+        if via_legacy:
+            _mark_legacy_resolution(verdict)
+        action, reason = verdict.action, verdict.reason
+        corro = None
+        used_inputs = None
+        if action == "suppress":
+            # ADR-022/D8 enforcement: a frozen or expired suppression
+            # policy cannot suppress, no matter what the triple lock says.
+            allowed, why = self._policy_allows_suppress()
+            if not allowed:
+                action, reason = "passthrough", f"policy_blocked:{why}"
+            else:
+                corro, used_inputs = self._corroboration_leg(
+                    alert, jev_model=jev_model, drop_evidence=drop_evidence,
+                    corro_inputs=corro_inputs)
+                verdict.lock_evaluation["corroboration"] = \
+                    corroboration.corroboration_leg_evaluation(corro)[
+                        "corroboration"]
+                if not corro.passed:
+                    # ADR-019/D5 — un-corroborated ⇒ page_now with the
+                    # explicit "uncorroborated" reason (Law 7: uncertainty
+                    # pages) — never silent suppress.
+                    action, reason = "page_now", "uncorroborated"
+        return action, reason, verdict, corro, used_inputs
 
     def _decide(self, alert, state, history, context, correlation):
         in_sha = input_sha256(state)
@@ -844,16 +962,21 @@ class Gate:
             # ADR-017/D4: the kernel always sees one set; legacy v1
             # resolution (migration window) is folded in here, loudly logged.
             allowlist_for_kernel, via_legacy = self._effective_allowlist(alert)
-            verdict = evaluate_policy(
-                alert, jev_model=getattr(resp, "model", None),
-                q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
-                thresholds=self.thresholds, allowlist=allowlist_for_kernel,
-                latency_ms=res.latency_ms, prob_lock_pass=_lock,
-                freshness_report=self._freshness_report(),
-                lock1_dual_attested=bool(
-                    (context or {}).get("lock1_dual_attested", False)))
-            if via_legacy:
-                _mark_legacy_resolution(verdict)
+            freshness_report = self._freshness_report()
+            lock1_dual = bool(
+                (context or {}).get("lock1_dual_attested", False))
+            jev_model = getattr(resp, "model", None)
+            # DR-26: the kernel + the D8 policy gate + the D5 corroboration
+            # leg composed once — the same composition the late-answer path
+            # and the D9 counterfactual receipt call.
+            (action, reason, verdict, corro, corro_inputs
+             ) = self._resolve_suppress_path(
+                alert, jev_model=jev_model,
+                q_sev=q_sev, q_team=q_team, q_disp=q_disp,
+                latency_ms=res.latency_ms, lock1_dual_attested=lock1_dual,
+                freshness_report=freshness_report, prob_lock_pass=_lock,
+                allowlist_for_kernel=allowlist_for_kernel,
+                via_legacy=via_legacy)
         except JevError as exc:
             # S3 — malformed/untrustworthy answer: uncertainty pages.
             disp = Disposition(action="passthrough",
@@ -869,42 +992,53 @@ class Gate:
                 lock_evaluation=empty_lock_evaluation()))
             return disp, _empty_answers()
 
-        disp = Disposition(action=verdict.action, reason=verdict.reason,
+        disp = Disposition(action=action, reason=reason,
                            team=verdict.team, confidence=verdict.confidence,
                            latency_ms=verdict.latency_ms)
-        # ADR-022/D8 enforcement: a frozen or expired suppression policy
-        # cannot suppress, no matter what the triple lock says. Fail toward
-        # the human. Never raises — an unreadable policy state is itself a
-        # reason to page, not to suppress.
-        if disp.action == "suppress" and self.policy_gate is not None:
-            try:
-                allowed, why = self.policy_gate.can_suppress(self.policy_id)
-            except Exception:  # noqa: BLE001
-                allowed, why = False, "policy_state_unreadable"
-            if not allowed:
-                disp = Disposition(action="passthrough",
-                                   reason=f"policy_blocked:{why}",
-                                   team=disp.team, confidence=disp.confidence,
-                                   latency_ms=disp.latency_ms)
-        # ADR-019/D5 — the corroboration leg: the FINAL witness before
-        # silence. Suppress requires the model + the policy gates + an
-        # independent corroboration. Un-corroborated ⇒ page_now with the
-        # explicit "uncorroborated" reason (Law 7: uncertainty pages) —
-        # never silent suppress. The leg's verdict is merged into the lock
-        # evaluation AND the payload body: which corroboration fired, or
-        # that none did, is VISIBLE in the decision record.
-        corro_body = None
+        # ADR-019/D5 — the leg's verdict is merged into the lock evaluation
+        # AND the payload body (by _resolve_suppress_path): which
+        # corroboration fired, or that none did, is VISIBLE in the
+        # decision record.
+        corro_body = corro.to_dict() if corro is not None else None
+        # ADR-023/D9 — the counterfactual receipt: computed at event-write
+        # time, on the live suppress path only, BEFORE the decision_made
+        # payload is emitted. The disposition above is already final; the
+        # receipt is pure and can never alter it (the builder is fully
+        # wrapped — any exception becomes an error receipt, never a
+        # changed disposition). Non-suppress decisions carry null — the
+        # field stays null rather than pretending every decision needs
+        # contrast (zero hot-path cost on page/passthrough).
+        counterfactual = None
         if disp.action == "suppress":
-            corro = self._corroboration_leg(alert,
-                                            jev_model=verdict.jev_model)
-            corro_body = corro.to_dict()
-            verdict.lock_evaluation["corroboration"] = \
-                corroboration.corroboration_leg_evaluation(corro)[
-                    "corroboration"]
-            if not corro.passed:
-                disp = Disposition(action="page_now", reason="uncorroborated",
-                                   team=disp.team, confidence=disp.confidence,
-                                   latency_ms=disp.latency_ms)
+            try:
+                counterfactual = build_counterfactual_receipt(
+                    self, alert,
+                    CounterfactualInputs(
+                        jev_model=verdict.jev_model,
+                        q_sev=q_sev, q_team=q_team, q_disp=q_disp,
+                        latency_ms=res.latency_ms,
+                        prob_lock_pass=_lock,
+                        freshness_report=freshness_report,
+                        allowlist_for_kernel=allowlist_for_kernel,
+                        via_legacy=via_legacy,
+                        lock1_dual_attested=lock1_dual,
+                        corro_floor=(corro_inputs[0]
+                                     if corro_inputs is not None else None),
+                        corro_evidences=(corro_inputs[1]
+                                         if corro_inputs is not None else None),
+                        corro_now=(corro_inputs[2]
+                                   if corro_inputs is not None else None)),
+                    getattr(self.thresholds, "counterfactual_presets", None)
+                    or ())
+            except Exception:
+                # Belt and suspenders over the builder's own never-raises
+                # contract: the receipt must never be able to sink, delay,
+                # or alter a suppression. Loud, then null — the disposition
+                # above is already final.
+                logger.exception(
+                    "counterfactual receipt failed for alert %s; emitting "
+                    "null receipt", alert.alert_id)
+                counterfactual = None
         self._emit(decision_made_payload(
             alert=alert, input_sha256=in_sha,
             disposition=disp.action,
@@ -914,7 +1048,8 @@ class Gate:
             q3_disposition=verdict.q3_disposition,
             latency_ms=res.latency_ms,
             lock_evaluation=verdict.lock_evaluation,
-            corroboration=corro_body))
+            corroboration=corro_body,
+            threshold_counterfactual=counterfactual))
         return disp, {"jev_model": verdict.jev_model,
                       "q_severity": q_sev,
                       "q_team": q_team,
@@ -986,8 +1121,14 @@ class Gate:
             q_team = answers.get("owning_team")
             q_disp = answers.get("disposition")
             try:
-                # The SAME pure policy kernel the live gate uses — not a
-                # copy (design §4.2). ADR-013: quantized lock for shadow too.
+                # DR-26: the SAME composition the live gate uses — the
+                # kernel + the D8 policy gate + the D5 corroboration leg,
+                # composed once in _resolve_suppress_path (not a copy, and
+                # not the old hand re-composition that skipped the D8
+                # policy gate: under a frozen/expired policy the live gate
+                # pages while a gate-less shadow would have said "would
+                # have suppressed" — a lying mirror in the over-trust
+                # direction). ADR-013: quantized lock for shadow too.
                 # ADR-014 (D1): the same cached freshness report, so the
                 # counterfactual answers what the gate *would* have decided
                 # with the proofs live at decision time. The lock-1 interim
@@ -999,15 +1140,15 @@ class Gate:
                 # Same effective allowlist as the live path: the
                 # counterfactual answers what the gate *would* have decided.
                 allowlist_for_kernel2, via_legacy2 = self._effective_allowlist(alert)
-                verdict = evaluate_policy(
+                (action2, _reason2, verdict, _corro2, _inputs2
+                 ) = self._resolve_suppress_path(
                     alert, jev_model=jev_model,
-                    q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
-                    thresholds=self.thresholds, allowlist=allowlist_for_kernel2,
-                    latency_ms=late.latency_ms, prob_lock_pass=_lock2,
+                    q_sev=q_sev, q_team=q_team, q_disp=q_disp,
+                    latency_ms=late.latency_ms, lock1_dual_attested=False,
                     freshness_report=self._freshness_report(),
-                    lock1_dual_attested=False)
-                if via_legacy2:
-                    _mark_legacy_resolution(verdict)
+                    prob_lock_pass=_lock2,
+                    allowlist_for_kernel=allowlist_for_kernel2,
+                    via_legacy=via_legacy2)
             except JevError:
                 # Malformed late answer: still vendor evidence — q-fields
                 # null, error_class set; never acts.
@@ -1015,20 +1156,16 @@ class Gate:
                 jev_model = None
                 error_class = "malformed"
             else:
-                # ADR-019/D5: the counterfactual mirrors the full suppress
-                # conjunction — what the gate *would* have decided had the
-                # answer arrived in time, including the corroboration leg.
-                # The leg's verdict rides in the lock evaluation so the
-                # shadow report shows which corroboration fired (or none).
-                corro = self._corroboration_leg(alert, jev_model=jev_model)
+                # The composed action mapped to the shadow vocabulary:
+                # suppress stays suppress, anything else becomes
+                # passthrough — preserving the shadow_decision payload
+                # contract. The corroboration leg's verdict rides in the
+                # lock evaluation (merged by _resolve_suppress_path) so
+                # the shadow report shows which corroboration fired (or
+                # none).
                 locks = verdict.lock_evaluation
-                locks["corroboration"] = \
-                    corroboration.corroboration_leg_evaluation(corro)[
-                        "corroboration"]
-                shadow_disposition = (
-                    "suppress"
-                    if verdict.action == "suppress" and corro.passed
-                    else "passthrough")
+                shadow_disposition = ("suppress" if action2 == "suppress"
+                                      else "passthrough")
         self._emit(shadow_decision_payload(
             alert=alert, input_sha256=late.input_sha256,
             episode_id=late.episode_id, jev_model=jev_model,

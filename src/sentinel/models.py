@@ -56,3 +56,8 @@ class Thresholds:
     uncertain_conf_max: float = 0.50  # below this -> page_now (uncertainty pages)
     queue_conf_min: float = 0.70
     # tuned per org by tuner.py; serialized to thresholds.json
+    # D9/ADR-023: operator what-if presets for the counterfactual receipt —
+    # a tuple of normalized preset dicts (see
+    # counterfactual.validate_counterfactual_presets). Empty by default:
+    # the receipt always carries the definitional no_suppress_leg.
+    counterfactual_presets: tuple = ()
