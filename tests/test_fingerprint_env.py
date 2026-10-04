@@ -34,8 +34,8 @@ from sentinel.state import build_state, input_sha256
 
 from tests.freshness_fixtures import make_allowlist_entry
 from tests.helpers import make_alert
-from test_gate import canned, fresh_monitor_for
-from test_quantized_gate import _fit, PINNED
+from tests.test_gate import canned, fresh_monitor_for
+from tests.test_quantized_gate import _fit, PINNED
 
 NOW = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
 
@@ -103,6 +103,29 @@ class TestLegacyWindowResolution(unittest.TestCase, _GateHarness):
         self.assertTrue(
             any("LEGACY-FINGERPRINT-RESOLVED" in m for m in logs.output),
             f"expected the loud log, got: {logs.output}")
+
+    def test_cross_env_v1_collision_does_not_suppress(self):
+        """Tripwire-2: a staging alert whose env-blind v1 hits the legacy map
+        must NOT resolve — its v2 is not the attested successor. Only the
+        prod alert (v2 == mapped successor) resolves during the window."""
+        from tests.helpers import make_alert
+        prod = make_alert(labels={"env": "prod", "cluster": "c1"})
+        staging = make_alert(labels={"env": "staging", "cluster": "c1"})
+        v1 = legacy_fingerprint_of(prod)
+        self.assertEqual(legacy_fingerprint_of(staging), v1)  # env-blind collide
+        self.assertNotEqual(prod.fingerprint, staging.fingerprint)
+        v2_prod = prod.fingerprint
+        gate = self._plain_gate(_rfc3339(NOW + timedelta(days=29)))
+        # rewire the map to the attested prod successor (not the alert's own v2)
+        gate._legacy_map = {v1: v2_prod}
+        gate.allowlist = {v1}
+        eff_prod, via_prod = gate._effective_allowlist(prod)
+        self.assertTrue(via_prod)
+        self.assertIn(v2_prod, eff_prod)
+        with self.assertNoLogs("sentinel.gate", level="WARNING"):
+            eff_staging, via_staging = gate._effective_allowlist(staging)
+        self.assertFalse(via_staging)
+        self.assertNotIn(staging.fingerprint, eff_staging)
 
     def test_closed_window_does_not_resolve(self):
         gate = self._plain_gate(_rfc3339(NOW - timedelta(days=1)))

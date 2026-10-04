@@ -383,17 +383,24 @@ class Gate:
         """The fingerprint set for the policy kernel + whether legacy fired.
 
         Normal path: the v2 allowlist, unchanged. Migration-window path: the
-        alert's v1 fingerprint hits the legacy map => the alert's v2
-        fingerprint is unioned into the kernel's set (so the pure kernel sees
-        one set, as before) and a LOUD warning is logged. The caller
-        post-fixes the lock detail so the audit trail names the legacy
-        resolution; the disposition ``reason`` taxonomy is unchanged.
+        alert's v1 fingerprint hits the legacy map AND the alert's v2 equals
+        the map's attested successor => the successor v2 is unioned into the
+        kernel's set (so the pure kernel sees one set, as before) and a LOUD
+        warning is logged. A different env's alert collides on the env-blind
+        v1 but its v2 won't match the successor — it is NOT unioned and
+        pages. The caller post-fixes the lock detail so the audit trail names
+        the legacy resolution; the disposition ``reason`` taxonomy is unchanged.
         """
         if (alert.fingerprint not in self.allowlist and self._legacy_map
                 and self._legacy_window_open(self._gate_now())):
             v1 = legacy_fingerprint_of(alert)
             v2 = self._legacy_map.get(v1)
-            if v2 is not None:
+            # The alert must BE the attested successor: its v2 must equal the
+            # map's v2. A different env's alert collides on the env-blind v1,
+            # but its v2 won't match the attested successor — it pages. This
+            # is the staging→prod collision ADR-017 was built to kill
+            # (Tripwire-2: unioning the alert's own v2 re-opened it).
+            if v2 is not None and alert.fingerprint == v2:
                 self.legacy_resolutions += 1
                 logger.warning(
                     "LEGACY-FINGERPRINT-RESOLVED scheme=v1 fingerprint=%s "
@@ -403,7 +410,7 @@ class Gate:
                     "legacy resolution stops at window end)",
                     v1, v2, alert.alert_id, alert.service, alert.check,
                     self._legacy_window_ends_at)
-                return set(self.allowlist) | {alert.fingerprint}, True
+                return set(self.allowlist) | {v2}, True
         return self.allowlist, False
 
     def _legacy_entry_for(self, alert: Alert):
