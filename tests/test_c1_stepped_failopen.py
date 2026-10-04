@@ -888,3 +888,213 @@ class TestGateSteppedPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# R15 fixes: canary recovery, cold-start bootstrap, digest bounds, dedup honesty
+
+
+class FlappingClient:
+    """Vendor that dies, then recovers — for the canary recovery test."""
+
+    def __init__(self):
+        self.calls = 0
+        self.dead = True
+
+    def decide(self, state, questions):
+        self.calls += 1
+        if self.dead:
+            raise JevOverloaded("vendor down")
+        # Healthy: minimal valid response shape.
+        from sentinel.client import DecisionResponse
+        return DecisionResponse(
+            model="jev-1.13.0", answers={}, input_tokens=10)
+
+
+class TestCanaryRecovery(unittest.TestCase):
+    def test_step1_recovers_via_canaries_not_hand_feeding(self):
+        # R15 Blocker 1: step-1 exit was impossible — the health monitor
+        # is fed only by vendor outcomes, which never occur while
+        # degraded. Canary probes re-establish the signal: every 20th
+        # alert while degraded probes the vendor; when the vendor
+        # recovers, canaries succeed and the ladder steps back to 0.
+        # This test goes through the gate's canary path — the monitor is
+        # NEVER hand-fed.
+        from sentinel.gate import Gate
+        from sentinel.models import Thresholds
+        from sentinel.audit import AuditLog
+        clock = FakeClock(t=1_000_000.0)
+        client = FlappingClient()
+        cfg = FailopenConfig(min_decisions=5, dwell_s=0,
+                             health_window_s=600, exit_hold_s=60,
+                             canary_every_n=2, canary_timeout_ms=100)
+        gate = Gate(client, Thresholds(), [], AuditLog(":memory:"),
+                    clock=lambda: clock.t, failopen_config=cfg)
+        self.addCleanup(gate.close)
+        # Dead vendor drives the ladder to step 1.
+        _drive(gate, 6, severity="critical")
+        self.assertEqual(gate._failopen.current_step, 1)
+        self.assertEqual(client.calls, 5, "no Jev call while degraded")
+        # Vendor recovers. Drive alerts; canaries (every 5th) probe it.
+        client.dead = False
+        for i in range(30):
+            alert = make_alert(alert_id=f"rec-{i}", severity="critical")
+            state = build_state(alert, {}, {})
+            gate.evaluate(alert, state, {}, {})
+            clock.advance(30)
+        # Canaries ran and fed the health monitor.
+        self.assertGreater(client.calls, 5,
+                           "canaries must probe the vendor while degraded")
+        # Healthy canary samples → recovery.
+        recovered = [p for p in gate.emitted
+                     if p["type"] == "failopen_recovered"]
+        self.assertTrue(recovered,
+                        "step 1 must recover via canary health samples")
+        self.assertEqual(gate._failopen.current_step, 0)
+
+    def test_canary_never_affects_disposition(self):
+        # The canary is a health signal only — the stepped disposition
+        # stands even when the canary succeeds.
+        clock = FakeClock(t=1_000_000.0)
+        client = FlappingClient()
+        client.dead = False  # vendor healthy, but ladder forced down
+        gate, _ = _c1_gate(
+            client, clock=lambda: clock.t,
+            failopen_kw={"canary_every_n": 1, "canary_timeout_ms": 100})
+        self.addCleanup(gate.close)
+        gate._failopen.request_step(1, "test", now=clock.t)
+        alert = make_alert(alert_id="can-1", severity="critical")
+        state = build_state(alert, {}, {})
+        disp, _ = gate.evaluate(alert, state, {}, {})
+        self.assertEqual(disp.reason, "failopen_step1",
+                         "canary must not change the stepped disposition")
+        self.assertGreater(client.calls, 0, "canary probed the vendor")
+
+
+class TestColdStartBootstrap(unittest.TestCase):
+    def test_busy_estate_bootstraps_baseline(self):
+        # R15 Blocker 2: a fresh correlator on a busy estate (1000
+        # distinct/min) folded 98.1% — the C2 cliff. After the bootstrap
+        # window, B learns the observed velocity and the fold stops.
+        clock = FakeClock(t=2_000_000.0)
+        c = Correlator(storm_fingerprints=20, storm_window_s=60,
+                       clock=lambda: clock.t)
+        # 40 minutes at 1000 distinct/min, spread across each 60s.
+        for tick in range(40):
+            for i in range(1000):
+                alert = make_alert(service=f"b{tick}-{i}",
+                                   alert_id=f"b{tick}-{i}")
+                alert.fingerprint = f"fp-busy-{tick}-{i}"
+                c.ingest(alert)
+            clock.advance(60)
+        # Bootstrap fired (30min window passed); B ≈ 1000.
+        self.assertTrue(c._bootstrapped)
+        self.assertGreater(c._storm_baseline, 500,
+                           "baseline must bootstrap from observed velocity")
+        # Threshold is now max(20, 5*B) ≈ 5000 — normal 1000/min traffic
+        # no longer declares.
+        health = c.detector_health()
+        self.assertGreater(health["threshold"], 1000)
+
+    def test_spiking_bootstrap_refuses(self):
+        # Discrimination: quiet (10/min, below F) for 20min, then a 500/min
+        # spike for 10min. Declarations cluster in the last third → incident,
+        # not a busy estate → refuse to bootstrap.
+        clock = FakeClock(t=3_000_000.0)
+        c = Correlator(storm_fingerprints=20, storm_window_s=60,
+                       clock=lambda: clock.t)
+        for tick in range(20):
+            for i in range(10):
+                alert = make_alert(service=f"q{tick}-{i}",
+                                   alert_id=f"q{tick}-{i}")
+                alert.fingerprint = f"fp-quiet-{tick}-{i}"
+                c.ingest(alert)
+            clock.advance(60)
+        for tick in range(10):
+            for i in range(500):
+                alert = make_alert(service=f"s{tick}-{i}",
+                                   alert_id=f"s{tick}-{i}")
+                alert.fingerprint = f"fp-spike-{tick}-{i}"
+                c.ingest(alert)
+            clock.advance(60)
+        clock.advance(60)  # ensure past the 30min window
+        c.ingest(make_alert(alert_id="trigger"))
+        self.assertTrue(c._bootstrapped)
+        # Bootstrap must REFUSE (not set B to the spike velocity). Small
+        # EWMA learning during the quiet period (< 1.0) is fine.
+        self.assertLess(c._storm_baseline, 1.0,
+                        "spiking bootstrap must not set baseline to spike")
+
+
+class TestDigestBounds(unittest.TestCase):
+    def test_digest_evicts_at_cap(self):
+        # R15 F3: the digest is bounded — oldest-held evicted at cap.
+        clock = FakeClock(t=4_000_000.0)
+        cfg = FailopenConfig(digest_max_entries=10)
+        ctl = FailopenController(config=cfg, clock=lambda: clock.t)
+        ctl.request_step(2, "test", now=clock.t)
+        for i in range(15):
+            alert = make_alert(alert_id=f"d{i}", severity="low")
+            alert.fingerprint = f"fp-digest-{i}"
+            ctl.decide(alert, 2, clock.t)
+            clock.advance(1)
+        self.assertLessEqual(len(ctl._digest), 10,
+                             "digest must respect the cap")
+        self.assertEqual(ctl._held_total, 15,
+                         "evicted holds still count in the total")
+
+    def test_backlog_escalates_step2_to_step3(self):
+        # R15 F3: step 2 pages criticals only — with no critical labels
+        # the page rate is 0, so escalation must ALSO fire on digest
+        # backlog.
+        clock = FakeClock(t=5_000_000.0)
+        cfg = FailopenConfig(min_decisions=5, dwell_s=0,
+                             pressure_window_s=60,
+                             digest_pressure_backlog=10)
+        ctl = FailopenController(config=cfg, clock=lambda: clock.t)
+        ctl.request_step(2, "test", now=clock.t)
+        for i in range(25):
+            alert = make_alert(alert_id=f"e{i}", severity="low")
+            alert.fingerprint = f"fp-esc-{i}"
+            ctl.observe(vendor_outcome="failopen", action="folded",
+                        now=clock.t)
+            ctl.decide(alert, 2, clock.t)
+            clock.advance(10)
+        self.assertEqual(ctl.current_step, 3,
+                         "digest backlog must escalate step 2 → 3")
+
+
+class TestDedupHonesty(unittest.TestCase):
+    def test_dedup_inherited_suppress_while_degraded(self):
+        # R15 F4: S1 dedup can inherit a legitimate pre-degradation
+        # suppress while the ladder is down. The row carries
+        # reason="dedup" (honest) — the "never suppress" guarantee is
+        # about the stepped path itself.
+        clock = FakeClock(t=6_000_000.0)
+        client = ExplodingClient()
+        gate, _ = _c1_gate(client, clock=lambda: clock.t)
+        self.addCleanup(gate.close)
+        # Step-0 suppress prior for this fingerprint.
+        alert = make_alert(alert_id="orig", severity="low")
+        fp = alert.fingerprint
+        prior = type("P", (), {"action": "suppress", "team": "t",
+                               "confidence": 0.9})()
+        corr = type("C", (), {"kind": "duplicate", "prior": prior})()
+        state = build_state(alert, {}, {})
+        disp, _ = gate.evaluate(alert, state, {}, {}, corr)
+        self.assertEqual(disp.action, "suppress")
+        # Ladder steps down. The duplicate inherits the suppress.
+        gate._failopen.request_step(1, "test", now=clock.t)
+        alert2 = make_alert(alert_id="dup", severity="low")
+        alert2.fingerprint = fp
+        state2 = build_state(alert2, {}, {})
+        disp2, _ = gate.evaluate(alert2, state2, {}, {}, corr)
+        self.assertEqual(disp2.action, "suppress")
+        self.assertEqual(disp2.reason, "dedup")
+        bodies = [p["body"] for p in gate.emitted
+                  if p["type"] == "decision_made"]
+        # The stepped path itself never emits suppress.
+        stepped = [b for b in bodies if b.get("mode", "").startswith(
+            "failopen_step")]
+        self.assertNotIn("suppress",
+                         [b["disposition"] for b in stepped])

@@ -131,6 +131,13 @@ NOVELTY_SHADOW_MIN_EVENTS = 100
 STORM_BASELINE_TICK_S = 60          # B re-estimated every 60s
 STORM_BASELINE_HALF_LIFE_S = 6 * 3600  # 6h half-life over the trailing 24h
 STORM_BASELINE_FROZEN_S = 300  # I-1: B frozen 5min after each declaration
+# C1/R15: cold-start bootstrap. A fresh correlator has B=0, so the
+# threshold is just the floor F — on a busy estate every tick declares
+# storm (R15: 98.1% fold, the C2 cliff reproduced). After this window,
+# if B is still ~0, the correlator bootstraps B from the storm
+# declarations observed (loudly logged). Discrimination: declarations
+# spread across the window → busy estate; clustered late → incident.
+BOOTSTRAP_WINDOW_S = 1800  # 30min of observation before bootstrapping
 STORM_K_DEFAULT = 5.0
 STORM_K_MIN, STORM_K_MAX = 3.0, 12.0   # the P99.9+1.5 clamp
 # C1/Vault V3: the anti-poisoning guard — baseline growth beyond 3x the
@@ -433,6 +440,23 @@ class Correlator:
         # The explicit active-window check below is belt-and-suspenders.
         self._storm_baseline: float = 0.0
         self._baseline_last_tick: float = self._now()
+        # C1/R15: cold-start bootstrap state. _bootstrap_until marks the
+        # end of the observation window; _bootstrapped flips once we've
+        # attempted (successfully or not) so we don't retry forever.
+        # _bootstrap_decls records (ts, w) at each storm declaration
+        # during bootstrap — the direct velocity observations (tick_w is
+        # sparse during storms because folds never reach the tick).
+        self._bootstrap_until: float = self._now() + BOOTSTRAP_WINDOW_S
+        self._bootstrapped: bool = False
+        self._bootstrap_decls: list = []
+        # C1/R15: true distinct-velocity sampling during bootstrap.
+        # Declaration w values are always ~threshold (we declare as soon
+        # as w >= threshold), so they don't reveal the true velocity.
+        # Instead, track distinct fingerprints per 60s directly — even
+        # folded alerts count (they're ingested before the storm check).
+        self._bootstrap_fps: set = set()
+        self._bootstrap_vels: list = []  # distinct/60s samples
+        self._bootstrap_last_reset: float = self._now()
         self._last_declared_ts: float | None = None
         # C1/Vault V3 — daily B samples for the anti-poisoning growth guard.
         self._baseline_daily: deque = deque()  # (day_epoch, B)
@@ -469,6 +493,21 @@ class Correlator:
         fp = fingerprint_of(alert)
         now = self._now()
         with self._lock:
+            # C1/R15: cold-start bootstrap sampling — track distinct
+            # velocity directly (before any storm folding).
+            if not self._bootstrapped:
+                if now - self._bootstrap_last_reset >= 60.0:
+                    if self._bootstrap_fps:
+                        self._bootstrap_vels.append(
+                            len(self._bootstrap_fps))
+                    self._bootstrap_fps = set()
+                    self._bootstrap_last_reset = now
+                self._bootstrap_fps.add(fp)
+            # C1/R15: cold-start bootstrap check — runs on EVERY ingest
+            # (not just ticks), because sustained storms bypass the tick.
+            if not self._bootstrapped and now >= self._bootstrap_until:
+                self._bootstrapped = True
+                self._maybe_bootstrap_baseline(now)
             self._prune(now)
             # D7: the ONE history read for this ingest, under the single
             # clock. Computed BEFORE recording this alert — novelty is about
@@ -648,6 +687,11 @@ class Correlator:
             # Declare the storm: snapshot counts by service, open the window.
             self._storm_active_until = now + self.storm_window_s
             self._last_declared_ts = now
+            # C1/R15: record declaration velocity during bootstrap (the
+            # tick is sparse during storms; declarations are the direct
+            # observations).
+            if not self._bootstrapped and now < self._bootstrap_until:
+                self._bootstrap_decls.append((now, w))
             counts: dict[str, int] = {}
             for f in distinct:
                 svc = self._fp_service.get(f, "unknown")
@@ -759,6 +803,68 @@ class Correlator:
                               / STORM_BASELINE_HALF_LIFE_S)
         self._storm_baseline += alpha * (w - self._storm_baseline)
         self._sample_baseline_daily(now)
+
+    def _maybe_bootstrap_baseline(self, now: float) -> None:
+        """R15: cold-start baseline bootstrap (caller holds the lock).
+
+        After BOOTSTRAP_WINDOW_S with B still ~0, learn B from the true
+        distinct velocity observed during bootstrap — a sustained high
+        velocity means the baseline is too low (the C2 cliff on a fresh
+        correlator). Loudly logged (this is a trust decision).
+
+        Discrimination (busy estate vs incident) via window thirds:
+        - Velocity high throughout all thirds → busy estate → bootstrap
+          to median velocity.
+        - Velocity low in early thirds, high late → new spike (incident)
+          → refuse; manual rebase via attestation.
+        - Few samples (< 5) → not enough signal; leave B=0.
+        - Median velocity < floor F → quiet estate; B=0 is correct.
+        """
+        if self._storm_baseline > 0.01:
+            return  # already learned or attested; nothing to do
+        vels = self._bootstrap_vels
+        if len(vels) < 5:
+            logger.warning("storm baseline bootstrap: only %d velocity "
+                           "samples in window; B stays 0", len(vels))
+            return
+        window_start = self._bootstrap_until - BOOTSTRAP_WINDOW_S
+        # Assign samples to thirds by their sample time. Samples are
+        # recorded every 60s; reconstruct times from the end backwards.
+        third = BOOTSTRAP_WINDOW_S / 3
+        n = len(vels)
+        # vels[0] is oldest. Map index to time: oldest ≈ window_start.
+        thirds = [[], [], []]
+        for i, v in enumerate(vels):
+            # Approximate: spread evenly across the window.
+            ts = window_start + (i + 0.5) * (BOOTSTRAP_WINDOW_S / n)
+            idx = min(2, int((ts - window_start) / third))
+            thirds[idx].append(v)
+        # Busy estate: velocity present in early thirds.
+        early = sorted(thirds[0] + thirds[1])
+        late = sorted(thirds[2])
+        if not early or not late:
+            logger.warning("storm baseline bootstrap: insufficient third "
+                           "coverage; B stays 0")
+            return
+        early_med = early[len(early) // 2]
+        late_med = late[len(late) // 2]
+        if early_med < float(self.storm_fingerprints) and \
+                late_med >= float(self.storm_fingerprints):
+            logger.warning(
+                "storm baseline bootstrap REFUSED: velocity low early "
+                "(median %.0f) then high late (median %.0f) — likely "
+                "incident in progress; manual rebase via attestation "
+                "required", early_med, late_med)
+            return
+        median = sorted(vels)[len(vels) // 2]
+        if median < float(self.storm_fingerprints):
+            return  # quiet; B=0 (threshold=F) is correct
+        self._storm_baseline = float(median)
+        self._sample_baseline_daily(now)
+        logger.warning(
+            "storm baseline BOOTSTRAPPED to %.0f from %d velocity samples "
+            "(cold start; V3 guard now watches 3x growth from here)",
+            median, len(vels))
 
     def _sample_baseline_daily(self, now: float) -> None:
         """One B sample per UTC day for the V3 anti-poisoning guard."""

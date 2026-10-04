@@ -184,6 +184,13 @@ class FailopenConfig:
     # the panel majority's bet, falsifiable by K5) or "chronological"
     # (Tripwire's D-1 position; the K5 revert path is this one flip).
     digest_ordering: str = "zscore"
+    # R15 F3: the digest is bounded (oldest-first eviction at the cap).
+    # Step 2 pages criticals only — on an estate with no critical labels
+    # the page rate is structurally 0, so the step-2→3 trigger ALSO fires
+    # on digest backlog (>= pressure_backlog entries held): a full digest
+    # is pressure even when nothing pages.
+    digest_max_entries: int = 10000
+    digest_pressure_backlog: int = 1000
     # Step-3 budget split: criticals may claim the whole page budget;
     # non-criticals are capped at this share of it. This is what makes
     # "critical-first" real under immediate per-alert decisions (no
@@ -192,6 +199,15 @@ class FailopenConfig:
     # + the ranked digest the operator triages, see _decide_step3).
     non_critical_share: float = 0.5
     runbook_url: str | None = None  # None renders honestly as "not configured"
+    # C1/R15: canary probes while degraded. The health monitor is fed
+    # only by vendor outcomes ("answered"/"timer_win"/"unhealthy_error"),
+    # which never occur while the ladder is stepped down (no Jev calls) —
+    # so step-1 recovery was impossible (the sensor was downstream of the
+    # actuator). Every canary_every_n-th alert while degraded also runs a
+    # lightweight vendor probe; its outcome feeds health ONLY (the stepped
+    # disposition stands). This re-establishes the recovery signal.
+    canary_every_n: int = 20
+    canary_timeout_ms: float = 2000.0
     # Digest emission cadence (emission-channel payload for the console).
     digest_emit_every_held: int = 50
     digest_emit_every_s: float = 300.0
@@ -481,6 +497,7 @@ class FailopenController:
         self._degraded_since: float | None = None  # set on 0 -> N, cleared on recovery
         self._current_cause = "initial"
         self._step_history: list[dict] = []
+        self._canary_count = 0  # R15: canary cadence while degraded
         self._since: dict[str, float] = {}  # sustained-condition tracking
         self._paged_fps: dict[str, float] = {}  # fp -> last paged ts (dedup)
         self._paged_tokens: deque = deque()  # step-3 (ts, is_critical), 60s cap
@@ -506,6 +523,19 @@ class FailopenController:
     @property
     def step_history(self) -> list[dict]:
         return list(self._step_history)
+
+    def should_canary(self) -> bool:
+        """R15: True every canary_every_n-th observation while degraded.
+
+        The gate calls this in _on_failopen_step; when True, it runs a
+        lightweight vendor probe whose outcome feeds the health monitor
+        ONLY (the stepped disposition stands). This is the recovery
+        signal — without it, step-1 exit is impossible.
+        """
+        if self._step == 0:
+            return False
+        self._canary_count += 1
+        return self._canary_count % self.config.canary_every_n == 0
 
     def _detector_health(self) -> dict | None:
         if self._detector_health_fn is None:
@@ -597,11 +627,20 @@ class FailopenController:
                 return self._recover(now)
         elif step == 2:
             if dwell_ok and self._held(
-                    "esc23", prate > budget, cfg.pressure_window_s, now):
+                    "esc23", prate > budget
+                    # R15 F3: step 2 pages criticals only — on an estate
+                    # with no critical labels prate is structurally 0.
+                    # A filling digest is pressure too: escalate on backlog.
+                    or len(self._digest)
+                    >= self.config.digest_pressure_backlog,
+                    cfg.pressure_window_s, now):
                 return self._enter(
                     3, now,
-                    f"step-2 page rate {prate:.1f}/min still > page budget "
-                    f"{budget:.0f}/min for >{cfg.pressure_window_s / 60:.0f}min")
+                    f"step-2 pressure: page rate {prate:.1f}/min > budget "
+                    f"{budget:.0f}/min or digest backlog "
+                    f"{len(self._digest)} >= "
+                    f"{self.config.digest_pressure_backlog} for "
+                    f">{cfg.pressure_window_s / 60:.0f}min")
             if (dwell_ok and self.policy.is_fresh(now)
                     and self._held("deesc21", prate <= budget,
                                    cfg.exit_hold_s, now)):
@@ -803,6 +842,14 @@ class FailopenController:
     def _hold(self, alert, now: float) -> _DigestEntry:
         entry = self._digest.get(alert.fingerprint)
         if entry is None:
+            # R15 F3: bounded digest — evict the oldest-held entry at cap.
+            # The evicted entry's count is preserved in _held_total; the
+            # digest is a triage view, not the audit trail (every hold is
+            # event-logged at hold time).
+            if len(self._digest) >= self.config.digest_max_entries:
+                oldest = min(self._digest.values(),
+                             key=lambda e: e.first_held_ts)
+                del self._digest[oldest.fingerprint]
             entry = _DigestEntry(
                 fingerprint=alert.fingerprint, service=alert.service,
                 check=alert.check, severity_in=alert.severity_in or "",

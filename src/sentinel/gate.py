@@ -983,10 +983,18 @@ class Gate:
         # the vendor path is the thing that's degraded). S1 structural bars
         # and the D6 firewall above still run first. The suppress
         # conjunction (policy kernel → D8 → D5) is never consulted on the
-        # stepped path — a degraded step cannot suppress by construction
-        # (the step decide() methods only emit page_now /
+        # stepped path — the step decide() methods only emit page_now /
         # page_business_hours / passthrough / folded, and FailoverPolicy
-        # refuses suppress-capable severity maps).
+        # refuses suppress-capable severity maps.
+        #
+        # R15 F4 (honest): S1 dedup above CAN emit suppress while degraded
+        # — inheriting a legitimate pre-degradation prior (same fingerprint,
+        # same evidence, decided by the full conjunction at step 0). That
+        # is not a new suppression hole: the suppress was earned before
+        # the ladder stepped down, and the row carries reason="dedup" (not
+        # a step mode). The "cannot suppress" guarantee is about the
+        # stepped path itself, which never consults the suppress
+        # conjunction and never emits suppress.
         step = self._failopen.current_step
         if step > 0:
             return self._on_failopen_step(alert, in_sha, state, step,
@@ -1010,6 +1018,11 @@ class Gate:
         thing that's degraded. Every row carries its step mode in-band
         (``mode: failopen_stepN``) for the console's violet banner. Never
         raises: the company-ending bug is dropping the page.
+
+        R15: canary probes — every canary_every_n-th alert while degraded
+        also runs a lightweight vendor probe. The probe's outcome feeds
+        the health monitor ONLY (the stepped disposition below stands);
+        it is the recovery signal that makes step-1 exit possible.
         """
         now = self._epoch_now()
         if step == 1 and not self._failopen.policy.is_fresh(now):
@@ -1022,6 +1035,10 @@ class Gate:
                        f"(C5)", now):
                 self._emit(payload)
             step = 2
+        # Canary before the stepped disposition: the probe's latency is
+        # bounded by canary_timeout_ms and it never affects the outcome.
+        if self._failopen.should_canary():
+            self._canary_probe(alert, state, now)
         disp = self._failopen.decide(alert, step, now)
         payload = decision_made_payload(
             alert=alert, input_sha256=in_sha,
@@ -1033,6 +1050,26 @@ class Gate:
         self._emit(payload)
         self._note("failopen", disp.action, now)
         return disp, _empty_answers()
+
+    def _canary_probe(self, alert, state, now):
+        """R15: lightweight vendor health probe while degraded.
+
+        Runs ONE Jev call (no race, no timer competition); the outcome
+        feeds the health monitor ONLY via _note — the stepped disposition
+        is unaffected. Never raises: a failed probe is itself a health
+        signal (unhealthy_error), not a gate error.
+        """
+        try:
+            questions = build_questions(None)
+            outcome = self._runner.probe_vendor(
+                state, questions,
+                timeout_ms=self._failopen.config.canary_timeout_ms)
+            # "canary" is not a page action — _pages ignores it; only the
+            # vendor health monitor records the sample.
+            self._note(outcome, "canary", now)
+        except Exception as exc:
+            print(f"[sentinel] canary probe failed ({exc})",
+                  file=sys.stderr)
 
     def _on_answered(self, alert, in_sha, outcome, budget_ms, context):
         """Inference won the race: run S3–S6 through the shared kernel."""
