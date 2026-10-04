@@ -1,5 +1,12 @@
 # Sentinel — hosted demo deployment (deploy lane)
 
+> **SUPERSEDED (2026-10-04, Aditya's directive):** GitHub Pages replaces Vercel.
+> No Vercel project was ever created; nothing was ever deployed here. The two
+> environments now live on GitHub Pages: `/staging/` (fully simulated showcase)
+> and `/` (production console, DATA_MODE=live). Built by
+> `deploy/gh-pages/build-static.py`. This directory is kept for reference only —
+> do not build from it.
+
 Live URL for the platform tier (read-only API, frozen contract v1.0.0) +
 Prism UI. Vercel free tier, ₹0.
 
