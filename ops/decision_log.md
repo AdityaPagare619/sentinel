@@ -215,3 +215,21 @@ Latest decisions on top.
   updated ("Green CI required" → "Local test suite green required"). The
   ghost-record platform bug (ops/ci-repair.md) is now moot for the gate but
   retained as history. (Aditya's order.)
+- 2026-10-04 ~19:45 IST — **RATIFIED (with process correction): `cryptography` as the single named
+  exception to the stdlib-only frozen decision.** What happened: PR #65 (attestor identity, merged
+  in the 72h wave) imports `cryptography` for Ed25519 at module level via
+  gate.py → corroboration.py → attestor.py. The PR body noted the dependency in a parenthetical
+  ("add to requirements when the wave assembles deps") and merged without an ADR or a decision
+  to amend the frozen 2026-10-02 stdlib-only rule. Consequence found by Petu: in any clean
+  environment the ENTIRE engine is unimportable (`import sentinel.gate` → ModuleNotFoundError),
+  no requirements.txt existed, and the local-suite gate was silently environment-dependent.
+  Ruling (Petu, founder-deputy): the NEED is legitimate — the attestor-identity ADR (panel
+  cross-item note 2) requires public-key attestation; stdlib has no Ed25519; pure-Python
+  Ed25519 is worse than the dependency; `cryptography` is the maintained, audited standard.
+  Reverting would gut a load-bearing trust component. But the PROCESS was wrong: a frozen
+  decision was bypassed without deliberation. Correction applied: (1) this entry ratifies the
+  exception explicitly, with rationale recorded; (2) `requirements.txt` now pins
+  `cryptography==44.0.3`; (3) stdlib-only remains the default — any further dependency needs
+  its own decision entry, not a parenthetical. What would reverse it: a stdlib Ed25519
+  implementation, or a decision that attestor identity no longer needs public-key crypto.
+  (Petu's ruling; wave coordinator's merge process flagged for the retro.)

@@ -1,0 +1,7 @@
+# Sentinel runtime dependencies.
+#
+# Policy: stdlib-only by default (frozen decision, 2026-10-02). The single
+# named exception below is ratified in ops/decision_log.md (2026-10-04):
+# Ed25519 attestor identity has no stdlib implementation, and pure-Python
+# Ed25519 is a security risk. `cryptography` is the audited standard.
+cryptography==44.0.3
