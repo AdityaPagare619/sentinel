@@ -41,13 +41,14 @@ export async function renderRiver(root, params, ctx) {
   let rows = [], flips = {}, calBins = null, newestIso = null, apiDown = false, apiMsg = '';
   let pinned = false, pendingNew = 0, selIdx = -1;
   let pins = loadPins(), pinsOff = false;
+  let dataSource = 'unknown'; /* R7 B1: row badges derive from envelope evidence, never hardcoded */
 
   /* The fixed typed decision contract is the renderer’s authority (contract.js).
    * A row the contract cannot describe renders as drift — never as a decision. */
   function rowHtml(d, i) {
     const v = validateDecisionSummary(d);
     if (!v.ok) return driftRow(d, v.errors);
-    return decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS, pins, pinsOff });
+    return decisionRow(d, { flips, density: f.density, selected: i === selIdx, thresholds: DEFAULT_THRESHOLDS, pins, pinsOff, dataSource });
   }
 
   root.innerHTML = `
@@ -211,6 +212,7 @@ export async function renderRiver(root, params, ctx) {
         Data.getFlips('7d').catch(() => null),
       ]);
       rows = env.data || [];
+      dataSource = env.meta?.data_source || 'unknown';
       newestIso = rows.length ? rows[0].time : null;
       lastEventAt = newestIso ? new Date(newestIso).getTime() : null;
       apiDown = false;

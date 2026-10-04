@@ -151,3 +151,29 @@ test('R1: the river builds its filter params without consulting pins (static sca
   const apiParamsBody = s.slice(s.indexOf('const apiParams'), s.indexOf('function renderTokens'));
   assert.ok(!/pins/i.test(apiParamsBody), 'filter params must never reference pins');
 });
+
+/* ---------- Invariant 6 (R7 B1): row source badges derive from envelope
+ * evidence — never hardcoded. A badge claiming a source the payload does
+ * not evidence is a P3 honesty violation. ---------- */
+test('INV-6: decisionRow badge derives from the dataSource option, never hardcoded', () => {
+  const htmlSyn = decisionRow(D, { dataSource: 'synthetic' });
+  assert.match(htmlSyn, /data-src="synthetic"/, 'badge reflects synthetic evidence');
+  assert.doesNotMatch(htmlSyn, /data-src="shadow"/, 'badge must not claim shadow on synthetic data');
+  const htmlLive = decisionRow(D, { dataSource: 'live' });
+  assert.match(htmlLive, /data-src="live"/, 'badge reflects live evidence');
+  const htmlDefault = decisionRow(D, {});
+  assert.match(htmlDefault, /data-src="unknown"/, 'no evidence → unknown, never a guessed source');
+});
+
+test('INV-6: no hardcoded srcBadge source in the row component (static scan)', () => {
+  const c = src('components.js');
+  assert.doesNotMatch(c, /srcBadge\('shadow'\)/, 'the shadow hardcode must not return');
+  assert.doesNotMatch(c, /row-denom/, 'the unevidenced confidence denominator must not return');
+});
+
+test('INV-6: callers thread envelope evidence into decisionRow (static scan)', () => {
+  assert.ok(src('views-river.js').includes("env.meta?.data_source"),
+    'river threads the envelope data_source');
+  assert.ok(src('views-audit.js').includes("Data.lastMeta?.data_source"),
+    'audit threads the last envelope data_source');
+});

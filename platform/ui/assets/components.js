@@ -258,7 +258,7 @@ export function relDiagram(el, { bins, threshold, thresholdLabel = 'gate' }) {
  * The row renders the CLOSED contract vocabulary only (contract.js). Vendor
  * payload never enters row chrome. Field pins append as display-only cells —
  * they are never filter operands (synthesis §3). */
-export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null, pins = [], pinsOff = false, freshness = null } = {}) {
+export function decisionRow(d, { flips = {}, density = 'compact', selected = false, thresholds = null, pins = [], pinsOff = false, freshness = null, dataSource = 'unknown' } = {}) {
   const flip = flips[d.input_sha256];
   const flipBadge = flip && flip.flipped
     ? `<span class="flip-badge mono" title="the machine changed its mind — see flip timeline">${esc(DISP_LABEL[d.disposition] || d.disposition)} →(flip ${fmtTime(flip.last_seen)})→ ${esc(DISP_LABEL[flip.decisions[flip.decisions.length - 1].disposition] || '')}</span>`
@@ -269,11 +269,11 @@ export function decisionRow(d, { flips = {}, density = 'compact', selected = fal
     <span class="row-time mono" title="${esc(fmtTimeBoth(d.time))} · ${esc(ageStr(d.time))}">${esc(fmtTimeDual(d.time))}</span>
     ${sevChip(d.severity)}
     ${dispChip(d.disposition, d.reason)}
-    <span class="row-conf"><span class="mono">${fmtConf(d.confidence)}</span> <span class="mono row-denom">(shadow)</span></span>
+    <span class="row-conf"><span class="mono">${fmtConf(d.confidence)}</span></span>
     <button class="row-team mono" data-team="${esc(d.team)}" title="filter to team">${esc(d.team)}</button>
     ${fprLink(d.fingerprint)}
     ${flipBadge}
-    ${srcBadge('shadow')}
+    ${srcBadge(dataSource)}
     ${freshness ? freshnessBadge(freshness) : ''}
     ${receipt ? `<span class="row-receipt mono">${esc(receipt)} ${derivedMark('derived', 'recomputed from gate defaults — the read API does not expose live thresholds')}</span>` : ''}
     ${pinsOff ? '' : pinCellsHtml(d, pins)}

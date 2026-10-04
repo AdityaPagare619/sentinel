@@ -112,7 +112,7 @@ export async function renderAudit(root, params, ctx) {
         `No decisions match ${desc}. Check the fingerprint — or this alert never reached the gate (see receiver health).`,
         'hint: widen last=, or clear facets');
     } else {
-      results.innerHTML = rows.map(d => decisionRow(d, { flips, density: 'compact', thresholds: DEFAULT_THRESHOLDS })).join('');
+      results.innerHTML = rows.map(d => decisionRow(d, { flips, density: 'compact', thresholds: DEFAULT_THRESHOLDS, dataSource: Data.lastMeta?.data_source || 'unknown' })).join('');
       results.querySelectorAll('.row[data-id]').forEach(r => {
         r.addEventListener('click', (e) => {
           if (e.target.closest('a,button')) return;
