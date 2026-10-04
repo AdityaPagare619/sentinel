@@ -524,7 +524,10 @@ def alert_from_vendor_event(ev: VendorEvent) -> Alert:
                               "severity_raw": ev.severity_raw}},
     )
     alert.fingerprint = fingerprint_for(alert.service, alert.check,
-                                        alert.severity_in, region)
+                                        alert.severity_in, region,
+                                        env="", cluster="")
+    # Vendor events carry no env/cluster labels: the empty namespace is
+    # explicit here (a real "unknown" namespace, not a wildcard).
     return alert
 
 

@@ -257,6 +257,7 @@ class HealthMonitor:
                 labels={},
             )
             alert.fingerprint = fingerprint_of(alert)
+            # Self-test alert carries no labels: explicit empty env/cluster.
             # A dedicated correlator: the self-test must not see (or pollute)
             # live dedup/storm state, and must exercise the "new" Jev path.
             corr = Correlator().ingest(alert)

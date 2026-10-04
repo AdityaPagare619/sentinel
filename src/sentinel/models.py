@@ -11,7 +11,7 @@ from .client import Answer
 class Alert:
     alert_id: str
     received_at: str  # ISO-8601
-    fingerprint: str  # hash(service, check, severity_in, region)
+    fingerprint: str  # scheme-v2 hash(service, check, severity_in, region, env, cluster)
     service: str
     check: str
     severity_in: str  # source severity label

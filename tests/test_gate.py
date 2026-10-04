@@ -426,7 +426,8 @@ class TestAuditAlwaysWritten(GateTestBase):
         ]
         # D1: the suppress case needs a fresh report; the other cases page
         # regardless of freshness.
-        fps = [fingerprint_for(f"svc{i}", "http_5xx", "critical", "us-east")
+        fps = [fingerprint_for(f"svc{i}", "http_5xx", "critical", "us-east",
+                               env="", cluster="")
                for i in range(len(cases))]
         monitor = fresh_monitor_for(fps)
         for i, resp in enumerate(cases):

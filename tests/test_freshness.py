@@ -267,10 +267,12 @@ class TestAllowlistEntryFreshness(unittest.TestCase):
         self.assertIn("major-version rewrite", lf.reason)
 
     def test_security_category_ban(self):
-        lf = allowlist_entry_freshness(
-            self._entry(fp("a"), security_category_ban=True), BASE_EPOCH)
-        self.assertFalse(lf.fresh)
-        self.assertIn("banned", lf.reason)
+        # ADR-017/D4: the ban is DERIVED at admission. A stored
+        # security_category_ban=True that disagrees with the derived
+        # taxonomy (check=cache_evictions is unbanned) is itself a
+        # rejection — fail closed on disputed ban state.
+        with self.assertRaises(ProofFormatError):
+            self._entry(fp("a"), security_category_ban=True)
 
 
 class _BundleCase(unittest.TestCase):

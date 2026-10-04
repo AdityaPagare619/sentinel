@@ -112,7 +112,9 @@ def make_allowlist_entry(fingerprint: str, *, env: str = "prod",
                          attested_by=("op-alice", "op-bob"),
                          incident_linkage: str = "zero",
                          occurrences: int = 340,
-                         security_category_ban: bool = False) -> dict:
+                         security_category_ban: bool = False,
+                         check: str = "cache_evictions",
+                         team: str = "platform") -> dict:
     return {
         "fingerprint": fingerprint,
         "attested_by": list(attested_by),
@@ -125,6 +127,9 @@ def make_allowlist_entry(fingerprint: str, *, env: str = "prod",
         },
         "ttl_days": ttl_days,
         "env": env,
+        # ADR-017/D4: taxonomy metadata the security ban is DERIVED from.
+        "check": check,
+        "team": team,
         "security_category_ban": security_category_ban,
     }
 

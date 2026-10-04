@@ -46,12 +46,14 @@ Invariants:
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import re
 import sys
 import time
 
 from . import race
 from .client import JevError
+from .correlator import legacy_fingerprint_of
 from .freshness import (LOCK1_CALIBRATION, lock1_fallback_offered,
                         suppress_precondition)
 from .models import Alert, DecisionRecord, Disposition, Thresholds
@@ -63,6 +65,8 @@ from .race_payloads import (decision_made_payload, drift_lock_evaluation,
 from .state import input_sha256
 from .storm_digest import (storm_digest_disposition, storm_root_cause_payload,
                            storm_root_cause_questions)
+
+logger = logging.getLogger("sentinel.gate")
 
 # Frozen contract: evaluate(self, alert, state, history, context).
 # `correlation` is an optional extension (defaults None) carrying the
@@ -109,6 +113,23 @@ class PolicyVerdict:
         self.q2_team = q2_team
         self.q3_confidence = q3_confidence
         self.q3_disposition = q3_disposition
+
+
+def _mark_legacy_resolution(verdict) -> None:
+    """Name a legacy v1 fingerprint resolution in the audit trail.
+
+    The disposition ``reason`` taxonomy is deliberately unchanged
+    (``"allowlist"`` — asserted by tests); the truth lives in the lock
+    detail and in the LOUD ``LEGACY-FINGERPRINT-RESOLVED`` warning log.
+    """
+    try:
+        leg = verdict.lock_evaluation.get("allowlist")
+    except AttributeError:
+        return
+    if isinstance(leg, dict):
+        leg["detail"] = (str(leg.get("detail", ""))
+                         + " [LEGACY v1 fingerprint resolved during the "
+                           "ADR-017 migration window — re-attest]")
 
 
 def evaluate_policy(alert, *, jev_model, q_severity, q_team, q_disposition,
@@ -253,7 +274,9 @@ class Gate:
                  clock=None,
                  policy_gate=None,
                  policy_id: str = "suppression",
-                 freshness_monitor=None):
+                 freshness_monitor=None,
+                 legacy_allowlist: dict[str, str] | None = None,
+                 legacy_window_ends_at: str | None = None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
@@ -316,11 +339,89 @@ class Gate:
         self.clock = clock  # () -> aware datetime; tests inject a fixed now
         self.policy_gate = policy_gate
         self.policy_id = policy_id
+        # ADR-017/D4 — dual-write migration window. legacy_allowlist maps
+        # scheme-v1 fingerprints -> their scheme-v2 successors (written by
+        # scripts/migrate_fingerprints_v1_v2.py). While the window is open,
+        # an alert whose v2 fingerprint misses the allowlist may still
+        # resolve via its v1 fingerprint — loudly logged. Absent/expired =>
+        # no legacy resolution (fail closed). Never merged into
+        # self.allowlist: the two schemes stay distinguishable so the loud
+        # log and the window bound mean something.
+        self._legacy_map = dict(legacy_allowlist or {})
+        self._legacy_window_ends_at = legacy_window_ends_at
+        self.legacy_resolutions = 0  # loud-log counter, ops-visible
         # ADR-014 (D1): the V1/V2 FreshnessMonitor whose cached report the
         # kernel reads per-alert (two-point discipline — O(1), no
         # validation on the hot path). None ⇒ the freshness legs fail
         # closed and suppress is unreachable.
         self.freshness_monitor = freshness_monitor
+
+    # --------------------------------- ADR-017/D4 legacy-fingerprint window
+
+    def _legacy_window_open(self, now: _dt.datetime) -> bool:
+        """True iff a legacy map is configured and its window has not lapsed.
+
+        Unparseable window end => fail closed (no legacy resolution).
+        """
+        if not self._legacy_map or not self._legacy_window_ends_at:
+            return False
+        try:
+            ends_at = _dt.datetime.fromisoformat(
+                str(self._legacy_window_ends_at).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if ends_at.tzinfo is None:
+            ends_at = ends_at.replace(tzinfo=_dt.timezone.utc)
+        return now < ends_at
+
+    def _gate_now(self) -> _dt.datetime:
+        if self.clock:
+            return self.clock()
+        return _dt.datetime.now(_dt.timezone.utc)
+
+    def _effective_allowlist(self, alert: Alert) -> tuple[set[str], bool]:
+        """The fingerprint set for the policy kernel + whether legacy fired.
+
+        Normal path: the v2 allowlist, unchanged. Migration-window path: the
+        alert's v1 fingerprint hits the legacy map AND the alert's v2 equals
+        the map's attested successor => the successor v2 is unioned into the
+        kernel's set (so the pure kernel sees one set, as before) and a LOUD
+        warning is logged. A different env's alert collides on the env-blind
+        v1 but its v2 won't match the successor — it is NOT unioned and
+        pages. The caller post-fixes the lock detail so the audit trail names
+        the legacy resolution; the disposition ``reason`` taxonomy is unchanged.
+        """
+        if (alert.fingerprint not in self.allowlist and self._legacy_map
+                and self._legacy_window_open(self._gate_now())):
+            v1 = legacy_fingerprint_of(alert)
+            v2 = self._legacy_map.get(v1)
+            # The alert must BE the attested successor: its v2 must equal the
+            # map's v2. A different env's alert collides on the env-blind v1,
+            # but its v2 won't match the attested successor — it pages. This
+            # is the staging→prod collision ADR-017 was built to kill
+            # (Tripwire-2: unioning the alert's own v2 re-opened it).
+            if v2 is not None and alert.fingerprint == v2:
+                self.legacy_resolutions += 1
+                logger.warning(
+                    "LEGACY-FINGERPRINT-RESOLVED scheme=v1 fingerprint=%s "
+                    "successor=%s alert=%s service=%s check=%s "
+                    "window_ends_at=%s "
+                    "(ADR-017 migration window: re-attest this entry; "
+                    "legacy resolution stops at window end)",
+                    v1, v2, alert.alert_id, alert.service, alert.check,
+                    self._legacy_window_ends_at)
+                return set(self.allowlist) | {v2}, True
+        return self.allowlist, False
+
+    def _legacy_entry_for(self, alert: Alert):
+        """The AllowlistEntry backing a legacy-resolved alert (for the
+        quantized leg-1 dual-attestation interim path), else None."""
+        if not self._legacy_map or not self._legacy_window_open(self._gate_now()):
+            return None
+        v2 = self._legacy_map.get(legacy_fingerprint_of(alert))
+        if v2 is None:
+            return None
+        return self.allowlist_entries.get(v2)
 
     def close(self) -> None:
         """Shut down the race scheduler/pool/watchdog threads."""
@@ -533,6 +634,11 @@ class Gate:
         now = self.clock() if self.clock else _dt.datetime.now(_dt.timezone.utc)
         org = (context or {}).get("org") or self.org
         entry = self.allowlist_entries.get(alert.fingerprint)
+        if entry is None:
+            # ADR-017/D4: during the migration window a legacy-resolved
+            # alert's quantized leg reads the mapped v2 entry's
+            # dual-attestation evidence.
+            entry = self._legacy_entry_for(alert)
         try:
             ok, _detail = leg1_prob_lock(
                 reported_p1, org=org, now=now,
@@ -627,14 +733,19 @@ class Gate:
             # evidence carried on the decision context.
             _probs = (q_sev.probabilities or {}) if q_sev else {}
             _lock = self._leg1_prob_lock(_probs.get("p1_critical"), alert, {})
+            # ADR-017/D4: the kernel always sees one set; legacy v1
+            # resolution (migration window) is folded in here, loudly logged.
+            allowlist_for_kernel, via_legacy = self._effective_allowlist(alert)
             verdict = evaluate_policy(
                 alert, jev_model=getattr(resp, "model", None),
                 q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
-                thresholds=self.thresholds, allowlist=self.allowlist,
+                thresholds=self.thresholds, allowlist=allowlist_for_kernel,
                 latency_ms=res.latency_ms, prob_lock_pass=_lock,
                 freshness_report=self._freshness_report(),
                 lock1_dual_attested=bool(
                     (context or {}).get("lock1_dual_attested", False)))
+            if via_legacy:
+                _mark_legacy_resolution(verdict)
         except JevError as exc:
             # S3 — malformed/untrustworthy answer: uncertainty pages.
             disp = Disposition(action="passthrough",
@@ -757,13 +868,18 @@ class Gate:
                 # attestation in play — passing False is the honest input.
                 _probs2 = (q_sev.probabilities or {}) if q_sev else {}
                 _lock2 = self._leg1_prob_lock(_probs2.get("p1_critical"), alert, {})
+                # Same effective allowlist as the live path: the
+                # counterfactual answers what the gate *would* have decided.
+                allowlist_for_kernel2, via_legacy2 = self._effective_allowlist(alert)
                 verdict = evaluate_policy(
                     alert, jev_model=jev_model,
                     q_severity=q_sev, q_team=q_team, q_disposition=q_disp,
-                    thresholds=self.thresholds, allowlist=self.allowlist,
+                    thresholds=self.thresholds, allowlist=allowlist_for_kernel2,
                     latency_ms=late.latency_ms, prob_lock_pass=_lock2,
                     freshness_report=self._freshness_report(),
                     lock1_dual_attested=False)
+                if via_legacy2:
+                    _mark_legacy_resolution(verdict)
             except JevError:
                 # Malformed late answer: still vendor evidence — q-fields
                 # null, error_class set; never acts.
