@@ -11,7 +11,9 @@ EMISSION CONTRACT — for the gate/dispatcher layer and the event-log lane:
     * ``links.decision_made_seq`` on shadow_decision,
     * ``outbox_id`` for page dispositions,
     * ``freshness`` proofs (ADR-014 — the freshness lane owns them),
-    * ``threshold_counterfactual`` (ADR-023 — evaluated at event-write time).
+    * ``threshold_counterfactual`` (ADR-023/D9 — the gate computes the
+      counterfactual receipt at event-write time, on the live suppress
+      path only, before the payload is emitted).
 
     Required body keys (per the event-log lane's validation) are always
     present: decision_made carries disposition, budget_outcome,
@@ -101,7 +103,8 @@ def decision_made_payload(*, alert, input_sha256: str,
                           timer_fired_at_ms: float | None = None,
                           lock_evaluation: dict | None = None,
                           backstop_claimed: bool = False,
-                          corroboration: dict | None = None) -> dict:
+                          corroboration: dict | None = None,
+                          threshold_counterfactual: dict | None = None) -> dict:
     """Build the ``decision_made`` payload the gate emits per decision.
 
     ``latency_ms`` is the Jev call latency — set ONLY for
@@ -112,6 +115,11 @@ def decision_made_payload(*, alert, input_sha256: str,
     ``corroboration.CorroborationVerdict.to_dict``) — null unless a suppress
     verdict reached the leg. Extra body keys are permitted by the
     event-log validator.
+
+    ``threshold_counterfactual`` (ADR-023/D9): the counterfactual receipt
+    the gate computed at event-write time — set ONLY on the live suppress
+    path (null on page/passthrough: the field stays null rather than
+    pretending every decision needs contrast).
     """
     env = _envelope("decision_made", alert, episode_id)
     env["body"] = {
@@ -142,9 +150,10 @@ def decision_made_payload(*, alert, input_sha256: str,
             "threshold_attested_as_of": None,
             "allowlist_attested_as_of": None,
         },
-        # ADR-023 — evaluated deterministically at event-write time by the
-        # event-log lane; the gate carries zero hot-path cost here.
-        "threshold_counterfactual": None,
+        # ADR-023/D9 — the counterfactual receipt, computed by the gate at
+        # event-write time on the live suppress path only. Null on every
+        # other path (zero hot-path cost on page/passthrough).
+        "threshold_counterfactual": threshold_counterfactual,
         "outbox_id": None,  # dispatcher fills for page dispositions
         "links": {
             # dispatcher fills once decision_requested is sequenced

@@ -28,6 +28,7 @@ import re
 import sys
 import time
 
+from .counterfactual import PresetError, validate_counterfactual_presets
 from .models import Thresholds
 
 CONFIG_VERSION = 1
@@ -41,6 +42,9 @@ _THRESHOLD_FIELDS = (
     "uncertain_conf_max",
     "queue_conf_min",
 )
+# D9/ADR-023: optional non-threshold keys in thresholds.json. Unknown keys
+# are still rejected (typo guard); these are validated by their own schema.
+_OPTIONAL_THRESHOLD_KEYS = ("counterfactual_presets",)
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
 
 
@@ -78,7 +82,13 @@ class PolicyConfig:
             "version": CONFIG_VERSION,
             "generation": self.generation,
             "loaded_at": self.loaded_at,
-            "thresholds": {f: getattr(t, f) for f in _THRESHOLD_FIELDS},
+            "thresholds": {
+                **{f: getattr(t, f) for f in _THRESHOLD_FIELDS},
+                # D9/ADR-023: presets round-trip through the last-good
+                # chain like every other validated policy field.
+                "counterfactual_presets": [
+                    dict(p) for p in t.counterfactual_presets],
+            },
             "allowlist": sorted(self.allowlist),
             "source_sha256": self.source_sha256,
         }
@@ -278,8 +288,13 @@ class ConfigLoader:
                 with open(os.path.join(self._gen_dir, name),
                           encoding="utf-8") as fh:
                     data = json.load(fh)
-                t = Thresholds(**{f: data["thresholds"][f]
-                                  for f in _THRESHOLD_FIELDS})
+                t = Thresholds(
+                    **{f: data["thresholds"][f] for f in _THRESHOLD_FIELDS},
+                    # D9/ADR-023: presets restore through the last-good
+                    # chain; a corrupt entry fails this generation (the
+                    # except below moves to the next older one).
+                    counterfactual_presets=validate_counterfactual_presets(
+                        data["thresholds"].get("counterfactual_presets")))
                 _semantic_check(t)  # last-good must still satisfy governance
                 return PolicyConfig(
                     thresholds=t,
@@ -316,11 +331,13 @@ def _validate_thresholds(data, path: str) -> Thresholds:
         raise ConfigRejected(
             f"{path}: top-level JSON must be an object, got "
             f"{type(data).__name__}")
-    unknown = sorted(set(data) - set(_THRESHOLD_FIELDS))
+    unknown = sorted(set(data) - set(_THRESHOLD_FIELDS)
+                     - set(_OPTIONAL_THRESHOLD_KEYS))
     if unknown:
         raise ConfigRejected(
             f"{path}: unknown keys {unknown} (typo guard: only "
-            f"{list(_THRESHOLD_FIELDS)} are allowed)")
+            f"{list(_THRESHOLD_FIELDS) + list(_OPTIONAL_THRESHOLD_KEYS)} "
+            "are allowed)")
     defaults = Thresholds()
     vals: dict[str, float] = {}
     for field_name in _THRESHOLD_FIELDS:
@@ -330,6 +347,15 @@ def _validate_thresholds(data, path: str) -> Thresholds:
                 f"{path}: {field_name} must be a number, got "
                 f"{type(value).__name__}")
         vals[field_name] = float(value)
+    # D9/ADR-023: operator what-if presets for the counterfactual receipt.
+    # Invalid presets fail the load (ConfigRejected) — the live generation
+    # is untouched.
+    try:
+        presets = validate_counterfactual_presets(
+            data.get("counterfactual_presets"))
+    except PresetError as exc:
+        raise ConfigRejected(
+            f"{path}: counterfactual_presets invalid: {exc}") from exc
     _in_range(path, "suppress_p1_max", vals["suppress_p1_max"], 0.0, 1.0,
               exclusive=True)
     _in_range(path, "suppress_conf_min", vals["suppress_conf_min"],
@@ -340,7 +366,7 @@ def _validate_thresholds(data, path: str) -> Thresholds:
               exclusive=True)
     _in_range(path, "queue_conf_min", vals["queue_conf_min"], 0.0, 1.0,
               exclusive=True)
-    return Thresholds(**vals)
+    return Thresholds(**vals, counterfactual_presets=presets)
 
 
 def _in_range(path: str, name: str, value: float, lo: float, hi: float,

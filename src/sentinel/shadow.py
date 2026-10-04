@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .correlator import Correlator, fingerprint_for
+from .counterfactual import normalize_counterfactual_preset
+from .gate import evaluate_policy
 from .models import Alert, DecisionRecord, Disposition, Thresholds
 from .state import build_state, input_sha256
 from .storm_digest import storm_digest_disposition
@@ -531,50 +533,45 @@ def alert_from_vendor_event(ev: VendorEvent) -> Alert:
     return alert
 
 
-# ---------------------------------------------------------------- policy mirror
+# ------------------------------------------------- DR-26: no policy mirror
 
-def policy_action(p1: float, p2: float, p3: float, p4: float,
-                  conf3: float | None, q3_choice: str | None,
-                  in_allowlist: bool, thresholds: Thresholds,
-                  suppress_conf_min: float | None = None) -> str:
-    """Pure mirror of Gate._decide's policy table (§4) for counterfactuals.
+def threshold_counterfactual(alert, q_severity, q_team, q_disposition,
+                             thresholds: Thresholds, presets,
+                             *, jev_model=None, prob_lock_pass=False,
+                             in_allowlist=False,
+                             freshness_report=None) -> dict[str, str]:
+    """Per-preset disposition through the REAL policy kernel (DR-26, D9).
 
-    Source of truth is gate.py; TestPolicyMirror asserts agreement with
-    the real gate on a scripted set, so drift fails loudly.
+    The old ``policy_action`` mirror ("Pure mirror of Gate._decide's policy
+    table for counterfactuals") is DELETED: it reimplemented the pre-ADR-013
+    table and had already drifted. One kernel, evaluated N+1 times — the
+    same ``evaluate_policy`` the live gate calls, so the next policy-table
+    change moves every consumer together.
+
+    Each preset is a confidence-floor override: bare numbers keep the
+    historic ``(0.85, 0.90, 0.95, 0.99)`` config shape; dicts take
+    ``suppress_conf_min``. Normalized + validated by
+    ``counterfactual.normalize_counterfactual_preset`` — invalid presets
+    raise loudly (a silent default here was the old quiet lie).
     """
-    t = thresholds
-    scm = t.suppress_conf_min if suppress_conf_min is None else suppress_conf_min
-    if q3_choice == "cannot_determine":
-        return "passthrough"
-    if (p1 < t.suppress_p1_max and conf3 is not None and conf3 >= scm
-            and in_allowlist):
-        return "suppress"
-    if ((p1 + p2) > t.page_p1p2_min or conf3 is None
-            or conf3 < t.uncertain_conf_max):
-        return "page_now"
-    if (p3 + p4) >= 0.50 and conf3 is not None and conf3 >= t.queue_conf_min:
-        return "page_business_hours"
-    return "passthrough"
-
-
-def threshold_counterfactual(probs: dict, conf3: float | None,
-                             q3_choice: str | None, in_allowlist: bool,
-                             thresholds: Thresholds,
-                             presets: tuple) -> dict[str, str]:
-    """The disposition at each configured confidence preset (ADR-023).
-
-    Answers the operator's 3 AM question: "how close was this call?"
-    """
-    p1 = float(probs.get("p1_critical", 0.0))
-    p2 = float(probs.get("p2_high", 0.0))
-    p3 = float(probs.get("p3_medium", 0.0))
-    p4 = float(probs.get("p4_low", 0.0))
-    return {
-        f"conf>={p:.2f}": policy_action(p1, p2, p3, p4, conf3, q3_choice,
-                                        in_allowlist, thresholds,
-                                        suppress_conf_min=p)
-        for p in presets
-    }
+    out: dict[str, str] = {}
+    for raw in presets or ():
+        preset = normalize_counterfactual_preset(raw)
+        scm = preset.get("suppress_conf_min")
+        if scm is None:
+            raise ValueError(
+                f"shadow counterfactual preset {preset['name']!r}: the "
+                "shadow tap only supports the suppress_conf_min axis")
+        verdict = evaluate_policy(
+            alert, jev_model=jev_model,
+            q_severity=q_severity, q_team=q_team, q_disposition=q_disposition,
+            thresholds=thresholds,
+            allowlist={alert.fingerprint} if in_allowlist else set(),
+            latency_ms=0.0, prob_lock_pass=prob_lock_pass,
+            freshness_report=freshness_report,
+            suppress_conf_min_override=scm)
+        out[preset["name"]] = verdict.action
+    return out
 
 
 # ---------------------------------------------------------------- F1 check
@@ -768,9 +765,8 @@ class ShadowPipeline:
                 "correlation_kind": getattr(self._last_corr, "kind", None),
                 "incident_url": ev.incident_url,
             },
-            threshold_counterfactual=threshold_counterfactual(
-                probs, conf3, q3_choice, in_allowlist,
-                self.gate.thresholds, self.config.counterfactual_presets),
+            threshold_counterfactual=self._shadow_counterfactual(
+                ev, rec, in_allowlist),
         )
         self.store.record(obs)
         self._emit_shadow_decision(ep, ev, obs)
@@ -803,7 +799,13 @@ class ShadowPipeline:
         if not is_dup:
             probs, conf3, q3_choice = _answers_of(rec)
             self._eval_cache[alert.fingerprint] = {
-                "probs": probs, "conf3": conf3, "q3_choice": q3_choice}
+                "probs": probs, "conf3": conf3, "q3_choice": q3_choice,
+                # DR-26: the real kernel's inputs for the counterfactual —
+                # duplicates reuse the ORIGINAL evaluation's inputs, so the
+                # what-if answers from the first evaluation, not a
+                # re-derivation.
+                "alert": alert, "q_severity": rec.q_severity,
+                "q_team": rec.q_team, "q_disposition": rec.q_disposition}
             detail = {"probs": probs, "conf3": conf3, "q3_choice": q3_choice,
                       "from_cache": False}
         else:
@@ -813,6 +815,34 @@ class ShadowPipeline:
                       "q3_choice": cached.get("q3_choice"),
                       "from_cache": True}
         return disp, rec, detail
+
+    def _shadow_counterfactual(self, ev: VendorEvent, rec,
+                               in_allowlist: bool) -> dict:
+        """The tap's counterfactual through the REAL kernel (DR-26).
+
+        Reuses the ORIGINAL evaluation's kernel inputs from the eval cache
+        (duplicates answer from the first evaluation, not a re-derivation).
+        Empty when the path consulted no Jev answers (storm digest,
+        unknown event types) — honest, never invented.
+
+        ``prob_lock_pass`` is recomputed through the gate's own
+        ``_leg1_prob_lock`` with the same inputs the shadow evaluation
+        used (same alert, same reported p1) — the same function, not a
+        second implementation.
+        """
+        cached = self._eval_cache.get(self._fingerprint_of(ev), {})
+        alert = cached.get("alert")
+        q_sev = cached.get("q_severity")
+        if alert is None or q_sev is None:
+            return {}
+        p1 = float((cached.get("probs") or {}).get("p1_critical", 0.0))
+        return threshold_counterfactual(
+            alert, q_sev, cached.get("q_team"), cached.get("q_disposition"),
+            self.gate.thresholds, self.config.counterfactual_presets,
+            jev_model=rec.jev_model,
+            prob_lock_pass=self.gate._leg1_prob_lock(p1, alert, {}),
+            in_allowlist=in_allowlist,
+            freshness_report=self.gate._freshness_report())
 
     def _evaluate_storm_digest(self, alert: Alert, state: dict, corr):
         """Shadow mirror of the live digest path (D3, Tripwire probe).
