@@ -168,12 +168,22 @@ export async function renderSim(root, params, ctx) {
   }
 
   function paintProv() {
+    /* M1 honesty: computed_at is stripped from pre-rendered JSON for build
+     * determinism, so "evaluated <ts>" would render "undefined" — and
+     * "replayed with your thresholds" is false for baked scenario presets
+     * (they ran with the scenario's fixed thresholds, not your sliders).
+     * Three accurate states: live tuner run, pre-computed preset,
+     * mock-mode local recompute (sliders repriced client-side). */
+    const pre = !!prov.precomputed;
     provEl.innerHTML = `projection math<br>` +
       `&nbsp;&nbsp;dataset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ds:${esc(prov.dataset_version)} (${fmtInt(prov.n_alerts)} decisions · 7d window)<br>` +
       `&nbsp;&nbsp;tuner&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${esc(prov.tuner_rev)}<br>` +
       `&nbsp;&nbsp;policy&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${esc(prov.policy_version)} · sha ${esc(String(prov.dataset_sha256).slice(0, 12))}…<br>` +
-      `&nbsp;&nbsp;evaluated&nbsp;&nbsp;&nbsp; ${esc(prov.computed_at)} — replayed with your thresholds<br>` +
-      `&nbsp;&nbsp;reproduce&nbsp;&nbsp;&nbsp; POST /api/simulate with this payload → identical projection<br>` +
+      (pre
+        ? `&nbsp;&nbsp;evaluated&nbsp;&nbsp;&nbsp; pre-computed at build time — not a live tuner run${prov.scenario ? ` · scenario "${esc(prov.scenario)}"` : ''}<br>` +
+          `&nbsp;&nbsp;note&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${esc(prov.note || 'scenario thresholds are baked in; sliders reprice locally from the baked dataset')}<br>`
+        : `&nbsp;&nbsp;evaluated&nbsp;&nbsp;&nbsp; ${esc(prov.computed_at || 'live')} — replayed with your thresholds<br>` +
+          `&nbsp;&nbsp;reproduce&nbsp;&nbsp;&nbsp; POST /api/simulate with this payload → identical projection<br>`) +
       `&nbsp;&nbsp;<button class="btn" id="sim-copy">copy payload</button>`;
     root.querySelector('#sim-copy').addEventListener('click', () => {
       const payload = JSON.stringify({ thresholds: t, cost_model: cost, dataset_version: datasetVersion }, null, 2);

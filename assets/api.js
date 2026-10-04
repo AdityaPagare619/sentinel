@@ -179,7 +179,8 @@ export const Data = {
       return this._touchMeta({
         data: {
           projection: { ...proj, pages_per_night_avoided: null },
-          provenance: { ...sim.data.provenance, tuner_rev: sim.data.provenance.tuner_rev + ' (mock-mode local recompute — NOT tuner math)' },
+          provenance: { ...sim.data.provenance, precomputed: false,
+            tuner_rev: sim.data.provenance.tuner_rev + ' (mock-mode local recompute — NOT tuner math)' },
         },
         meta: { ...env.meta, data_source: 'synthetic' },
       });

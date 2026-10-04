@@ -11,6 +11,21 @@ import { startPlan, jevStateFromParams, stripStart, routeHref, fmtInt,
 const STEP_IDS = ['contract', 'key', 'source', 'storm', 'why', 'tune'];
 
 export async function renderStart(root, params, ctx) {
+  /* F2 honesty: this tour is a demo script (recorded storm, synthetic
+   * labels, "this is a demonstration" contract). On the live prod console
+   * that framing is false — real backend, real paging. Gate it: live mode
+   * gets a live contract card and goes straight to the river. */
+  if (Data.dataMode === 'live') {
+    ctx.setScreenCode('START');
+    root.innerHTML = `
+      <div class="contract-card">
+        <h2>This console is connected to your Sentinel backend.</h2>
+        <p>Everything here is <b>your real system</b> — live decisions, live paging. Nothing is simulated, nothing is synthetic.</p>
+        <p class="mono" style="color:var(--tx-2)">live data — the KEYS screen can page real humans. handle with care.</p>
+        <div class="start-nav"><a class="btn primary" href="${routeHref('river')}">open the decision river →</a></div>
+      </div>`;
+    return;
+  }
   const jevState = jevStateFromParams(params);
   const plan = startPlan(jevState);
   let step = localStorage.getItem('sentinel.start.step') || 'contract';
