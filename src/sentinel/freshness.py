@@ -47,6 +47,70 @@ SCHEMA_VERSION = 1
 
 FIT_VALIDITY_WINDOW_DAYS_DEFAULT = 90      # lock 1: calibration fit TTL
 ALLOWLIST_TTL_DAYS_DEFAULT = 180           # lock 3: per-entry attestation TTL
+
+
+# ---------------------------------------------------------------------------
+# ADR-017/D4 — security-category ban taxonomy (versioned, Type 1).
+#
+# A security-category check must NEVER enter the allowlist: silencing a
+# security alert is the one suppression failure that is catastrophic rather
+# than merely noisy. The ban is DERIVED at admission from the check-name /
+# team taxonomy below — never from a self-asserted boolean on the entry.
+#
+# Matching: re.search, case-insensitive, on token boundaries ([_.:/-] or
+# string edges). The boundary anchoring is load-bearing: "auth_service_cpu"
+# must NOT match the "auth_fail" rule (false positives page forever; false
+# negatives silence security alerts — the table errs toward recall on
+# unambiguous security tokens and documents its borderline calls).
+#
+# Borderline calls (documented, deliberate):
+# - tls_cert_expiry is banned: an expired cert is a security incident, and a
+#   suppressed cert alert fails toward breach, not noise.
+# - "soc" matches only as a standalone token (team "soc"); "social" does not.
+# Changes to this table require an ADR (Type 1: the ban is a safety
+# invariant, and silent table edits would be unreviewed policy changes).
+# ---------------------------------------------------------------------------
+
+SECURITY_BAN_TAXONOMY_VERSION = "secban-v1"
+
+# Each rule: (field, regex, rationale). field is "check" or "team".
+SECURITY_BAN_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    # Detection & response platform telemetry — silencing these blinds the SOC.
+    ("check", r"(^|[_.:/-])(waf|ids|ips|siem|xdr|edr|hids|nids|soar|honeypot)([_.:/-]|$)",
+     "security detection/response platform check"),
+    # Authentication attack surface.
+    ("check", r"(^|[_.:/-])(bruteforce|brute_force|credential_stuffing|password_spray|auth_fail|login_fail|mfa_fail|token_leak|apikey_leak|api_key_leak|secret_leak|jwt_abuse|oauth_abuse|session_hijack)([_.:/-]|$)",
+     "authentication attack-surface check"),
+    # Malware / intrusion / exfiltration.
+    ("check", r"(^|[_.:/-])(malware|ransomware|phishing|intrusion|exfiltration|exfil|breach|ddos|botnet|backdoor|rootkit|c2_beacon|exploit_attempt)([_.:/-]|$)",
+     "malware/intrusion/exfiltration check"),
+    # Vulnerability management.
+    ("check", r"(^|[_.:/-])(vuln|cve)([_.:/-]|$)",
+     "vulnerability-management check"),
+    # Certificate security posture (borderline call — documented above).
+    ("check", r"(^|[_.:/-])tls_cert([_.:/-]|$)",
+     "TLS certificate security-posture check"),
+    # Security owning teams — a check owned by the security org is
+    # security-category regardless of its name.
+    ("team", r"(^|[_.:/-])(security|infosec|appsec|soc|csirt|redteam|red_team|blueteam|blue_team|threatintel|threat_intel|vulnmgmt|vuln_mgmt|secteam|secops|sec_ops)([_.:/-]|$)",
+     "security owning team"),
+)
+
+
+def derive_security_ban(check: str, team: str) -> tuple[bool, str | None]:
+    """Derive the ADR-017 security-category ban from taxonomy patterns.
+
+    Returns (True, reason) on the first matching rule, else (False, None).
+    The reason names the taxonomy version, field, and rule so the admission
+    rejection is auditable. Pure function — no I/O, no clocks.
+    """
+    for field, pattern, rationale in SECURITY_BAN_PATTERNS:
+        value = check if field == "check" else team
+        if value and re.search(pattern, value, re.IGNORECASE):
+            return True, (
+                f"security-category ban ({SECURITY_BAN_TAXONOMY_VERSION}): "
+                f"{field}={value!r} matched {rationale}")
+    return False, None
 REVALIDATION_DAYS_DEFAULT = 30            # lock 2: governance re-validation clock (Type 1)
 CONF_FLOOR = 0.85                          # lock 2: attestations below this are invalid (Type 1)
 HEARTBEAT_SECONDS_DEFAULT = 15 * 60        # V2 revalidation cadence
@@ -257,19 +321,58 @@ class AllowlistEvidence:
 class AllowlistAttestation:
     """Lock 3 — per-entry. Rot vectors: silent staleness (TTL), incident
     linkage (poisoned fingerprint), owning-service rewrite (drift)."""
-    fingerprint: str       # env:cluster:check_name:signature (ADR-017 namespace, never env-blind)
+    fingerprint: str       # scheme-v2 fingerprint (ADR-017; never env-blind)
     attested_by: tuple     # two distinct identities, permanently
     attested_at: str       # RFC3339 UTC
     on_evidence: AllowlistEvidence
     ttl_days: int = ALLOWLIST_TTL_DAYS_DEFAULT
     env: str = ""
-    security_category_ban: bool = False  # must be False; asserted at validation
+    # ADR-017/D4: taxonomy metadata the security ban is DERIVED from.
+    # check/team are required at admission (from_dict raises when both are
+    # empty): the ban cannot be derived from a bare fingerprint, and an
+    # entry that hides its taxonomy is rejected, not trusted.
+    check: str = ""
+    team: str = ""
+    # ADR-017/D4: the ban is DERIVED in from_dict from (check, team) via
+    # derive_security_ban — never self-asserted by the entry's author.
+    # Stored here for the defense-in-depth assertion in
+    # allowlist_entry_freshness.
+    security_category_ban: bool = False
+    # ADR-017/D4 migration: "pending" while a mechanically re-derived v2
+    # fingerprint awaits human re-attestation. Pending entries resolve only
+    # inside the migration window (fail closed after it lapses).
+    re_attestation: str = ""
+    # ADR-017/D4 migration: True on carried-over scheme-v1 attestations
+    # (inert history — nothing resolves against them at runtime).
+    legacy_v1: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "AllowlistAttestation":
         by = _req(d, "attested_by", "AllowlistAttestation")
         if not isinstance(by, (list, tuple)) or len(by) != 2:
             raise ProofFormatError("AllowlistAttestation: attested_by must be exactly 2 identities")
+        check = str(d.get("check", ""))
+        team = str(d.get("team", ""))
+        if not check and not team:
+            raise ProofFormatError(
+                "AllowlistAttestation: check/team taxonomy metadata is required "
+                "at admission (ADR-017) — the security-category ban is derived "
+                "from it and cannot be evaluated on a bare fingerprint")
+        banned, ban_reason = derive_security_ban(check, team)
+        stored_ban = bool(d.get("security_category_ban", False))
+        if banned:
+            # A banned check CANNOT enter the allowlist — no matter what the
+            # entry asserts. This is the admission gate.
+            raise ProofFormatError(
+                f"AllowlistAttestation: admission REJECTED — {ban_reason}")
+        if stored_ban:
+            # The stored boolean disagrees with the derived taxonomy:
+            # someone is asserting a ban the taxonomy does not support (or
+            # vice versa) — fail closed on the disagreement itself.
+            raise ProofFormatError(
+                "AllowlistAttestation: stored security_category_ban=True "
+                "disagrees with the derived taxonomy (not banned) — "
+                "refusing to admit an entry whose ban state is disputed")
         return cls(fingerprint=str(_req(d, "fingerprint", "AllowlistAttestation")),
                    attested_by=(str(by[0]), str(by[1])),
                    attested_at=str(_req(d, "attested_at", "AllowlistAttestation")),
@@ -277,13 +380,20 @@ class AllowlistAttestation:
                                                                  "AllowlistAttestation")),
                    ttl_days=int(d.get("ttl_days", ALLOWLIST_TTL_DAYS_DEFAULT)),
                    env=str(d.get("env", "")),
-                   security_category_ban=bool(d.get("security_category_ban", False)))
+                   check=check,
+                   team=team,
+                   security_category_ban=banned,
+                   re_attestation=str(d.get("re_attestation", "")),
+                   legacy_v1=bool(d.get("legacy_v1", False)))
 
     def to_dict(self) -> dict:
         return {"fingerprint": self.fingerprint, "attested_by": list(self.attested_by),
                 "attested_at": self.attested_at, "on_evidence": self.on_evidence.to_dict(),
                 "ttl_days": self.ttl_days, "env": self.env,
-                "security_category_ban": self.security_category_ban}
+                "check": self.check, "team": self.team,
+                "security_category_ban": self.security_category_ban,
+                "re_attestation": self.re_attestation,
+                "legacy_v1": self.legacy_v1}
 
 
 # ---------------------------------------------------------------------------
@@ -464,20 +574,65 @@ def threshold_freshness(att: ThresholdAttestation, now_epoch: float,
                          pid)
 
 
+def _migration_window_open(window_ends_at: str | None,
+                           now_epoch: float) -> bool:
+    """True iff the ADR-017 migration window is configured and unexpired.
+
+    Absent or unparseable window end => fail closed (False): pending
+    re-attestations do not resolve without a live, legible window.
+    """
+    if not window_ends_at:
+        return False
+    try:
+        ends_at = datetime.fromisoformat(
+            str(window_ends_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    return now_epoch < ends_at.timestamp()
+
+
 def allowlist_entry_freshness(entry: AllowlistAttestation, now_epoch: float,
-                              drift_state: dict | None = None) -> LockFreshness:
+                              drift_state: dict | None = None,
+                              migration_window_ends_at: str | None = None
+                              ) -> LockFreshness:
     """Lock 3 per-entry predicate: TTL not expired AND no incident linkage
     AND no owning-service major rewrite AND security-category ban holds.
     Attestation freshness is necessary but not sufficient — the drift check
     dominates (a fingerprint that appeared in a real SEV1/2 is poisoned even
-    inside its TTL)."""
+    inside its TTL).
+
+    ADR-017/D4: ``migration_window_ends_at`` (RFC3339, from the bundle's
+    legacy_v1 section) bounds the re-attestation grace period. A
+    ``re_attestation="pending"`` entry — a mechanically re-derived v2
+    fingerprint whose humans have not re-attested yet — resolves only while
+    the window is open; after it lapses the entry goes stale (fail closed:
+    the re-attestation is enforced, not theater).
+    """
     fp = entry.fingerprint or "<missing-fingerprint>"
     if entry.security_category_ban:
+        # Defense in depth: the ban is DERIVED at admission (from_dict) —
+        # this branch is unreachable for admitted entries, and exists so a
+        # programmatically constructed (non-admitted) entry can never slip
+        # through validation.
         return LockFreshness(
             "stale",
-            f"lock3_stale: entry {fp} rejected at validation — "
-            f"security-category fingerprints are banned in code (ADR-017)",
+            f"lock3_stale: entry {fp} rejected — "
+            f"security-category fingerprints are banned (ADR-017, "
+            f"{SECURITY_BAN_TAXONOMY_VERSION})",
             fp)
+    if entry.re_attestation == "pending":
+        window_open = _migration_window_open(migration_window_ends_at,
+                                             now_epoch)
+        if not window_open:
+            return LockFreshness(
+                "stale",
+                f"lock3_stale: entry {fp} re-attestation pending but the "
+                f"ADR-017 migration window has lapsed (ended "
+                f"{migration_window_ends_at}) — the two humans must "
+                f"re-attest the v2 fingerprint before it can suppress",
+                fp)
     if len(set(entry.attested_by)) != 2 or not all(entry.attested_by):
         return LockFreshness(
             "stale",
@@ -728,6 +883,10 @@ class FreshnessValidator:
             return LockFreshness("stale",
                                  "lock3_stale: allowlist.json 'envs' not a mapping",
                                  "<unparsed>")
+        # ADR-017/D4: the migration window bounds pending re-attestations.
+        legacy_v1 = allowlist_obj.get("legacy_v1", {}) or {}
+        migration_window_ends_at = (legacy_v1.get("window_ends_at")
+                                    if isinstance(legacy_v1, dict) else None)
         for env, ns in envs.items():
             fps = (ns or {}).get("entries", [])
             if isinstance(fps, dict):  # tolerate {fp: {...}} shape too
@@ -751,8 +910,9 @@ class FreshnessValidator:
                                 f"namespace mismatch",
                                 fp)
                         else:
-                            verdict = allowlist_entry_freshness(entry, now_epoch,
-                                                                drift_state)
+                            verdict = allowlist_entry_freshness(
+                                entry, now_epoch, drift_state,
+                                migration_window_ends_at=migration_window_ends_at)
                     except ProofFormatError as exc:
                         verdict = LockFreshness(
                             "stale",
