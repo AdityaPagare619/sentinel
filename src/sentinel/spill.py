@@ -13,8 +13,17 @@ the record goes to stderr first, the file second.
 Spill record schema (JSON):
     ts, kind, alert_id, fingerprint, episode_id, dedup_key,
     payload_sha256, routing_key_ref, reason,
-    pd_outcome ("accepted"|"retryable"|"terminal"|"send_error"),
-    pd_status, error
+    pd_outcome ("accepted"|"retryable"|"terminal"|"send_error"|"simulated"),
+    pd_status, error, latency_ms, simulated (bool, only on simulated absorbs)
+
+Honesty invariant (P6 — the named simulated-spill audit lie,
+``forwarder-byok.md`` §2.5): a spill record whose page was ABSORBED by
+simulated paging (``simulated: true`` / ``pd_outcome == "simulated"``) was
+never attempted on the wire, so it is NEVER replayed as ``forward_failed``.
+``replay_spills`` maps it to ``forward_confirmed`` with
+``simulated: true`` in the body (C6: ``simulated:true`` ⇒ outcome
+"accepted", ``error_class`` forbidden) — a confirmation of absorption,
+never a failure.
 """
 
 from __future__ import annotations
@@ -92,20 +101,53 @@ def replay_spills(log, spill_dir: str | None) -> list[dict]:
     Each spill becomes a forward_confirmed/forward_failed event with
     channel="direct-degraded" and outbox_id=None (no outbox row exists —
     that is the whole point of the spill). Returns the replayed summaries.
+
+    P6 honesty rule (the simulated-spill audit lie, forwarder-byok.md §2.5):
+    a simulated absorption (simulated: true / pd_outcome == "simulated") is
+    NOT a failure — the page never touched the wire. It replays as
+    forward_confirmed with simulated: true in the body and no error_class
+    (C6 ForwardReceipt §2.2: simulated:true ⇒ outcome "accepted",
+    error_class forbidden). Any code path that emits forward_failed for a
+    page never attempted on the wire falsifies this contract.
     """
     replayed: list[dict] = []
     for path, rec in iter_spills(spill_dir):
-        accepted = rec.get("pd_outcome") == "accepted"
-        event_type = "forward_confirmed" if accepted else "forward_failed"
-        body = {
-            "outbox_id": None,
-            "channel": "direct-degraded",
-            "attempt_no": 1,
-            "vendor_status": rec.get("pd_status"),
-            "latency_ms": rec.get("latency_ms", 0.0),
-        }
-        if not accepted:
-            body["error_class"] = rec.get("error_class") or "degraded_send_failed"
+        # Detect by the flag FIRST (the pd_outcome is belt-and-braces for
+        # records written before the flag was always present).
+        simulated = rec.get("simulated") is True or \
+            rec.get("pd_outcome") == "simulated"
+        if simulated:
+            # Confirmation of absorption — never a failure. No error_class:
+            # a page that was never attempted cannot carry a wire error.
+            event_type = "forward_confirmed"
+            body = {
+                "outbox_id": None,
+                "channel": "direct-degraded",
+                "attempt_no": 1,
+                "vendor_status": None,
+                "latency_ms": rec.get("latency_ms", 0.0),
+                "simulated": True,
+                "reason": rec.get("reason"),
+            }
+        else:
+            accepted = rec.get("pd_outcome") == "accepted"
+            event_type = "forward_confirmed" if accepted else "forward_failed"
+            body = {
+                "outbox_id": None,
+                "channel": "direct-degraded",
+                "attempt_no": 1,
+                "vendor_status": rec.get("pd_status"),
+                "latency_ms": rec.get("latency_ms", 0.0),
+            }
+            if not accepted:
+                body["error_class"] = rec.get("error_class") or \
+                    "degraded_send_failed"
+        # Structural guarantee, belt-and-braces: a simulated absorption is
+        # never recorded as a failure, however the branches above evolve.
+        if simulated and event_type == "forward_failed":
+            raise AssertionError(
+                "P6 honesty invariant violated: a simulated page "
+                f"(spill {path}) must never replay as forward_failed")
         try:
             seq = log.append_event(
                 event_type, actor="forwarder",
@@ -118,6 +160,9 @@ def replay_spills(log, spill_dir: str | None) -> list[dict]:
                   file=sys.stderr)
             continue
         archive_spill(path)
-        replayed.append({"seq": seq, "event": event_type,
-                         "dedup_key": rec.get("dedup_key")})
+        summary = {"seq": seq, "event": event_type,
+                   "dedup_key": rec.get("dedup_key")}
+        if simulated:
+            summary["simulated"] = True
+        replayed.append(summary)
     return replayed
