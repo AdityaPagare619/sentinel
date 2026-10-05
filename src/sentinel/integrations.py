@@ -216,6 +216,27 @@ def resolve_paging_key(store: IntegrationStore | None = None) -> tuple[str | Non
     return None, "unconfigured"
 
 
+def paging_key_source(store: IntegrationStore | None = None) -> str:
+    """Which paging key SOURCE applies — without resolving the value.
+
+    Mirrors :func:`resolve_paging_key`'s precedence (user store → env →
+    unconfigured) but never returns the secret value: use it wherever a log
+    line or honest-label needs the source. A simulated page needs no key at
+    all (that is the point of the showcase), so simulated paths must never
+    resolve one — this helper is how the code keeps the C6 contract's
+    "never resolves a routing key" claim mechanically true.
+    """
+    store = store or IntegrationStore()
+    try:
+        if store.get(PD_KEY_NAME):
+            return "user"
+    except Exception:
+        pass  # a broken store must not break source reporting either
+    if os.environ.get(ENV_PD_ROUTING_KEY):
+        return "env"
+    return "unconfigured"
+
+
 def resolve_jev_key(store: IntegrationStore | None = None) -> tuple[str | None, str]:
     store = store or IntegrationStore()
     try:
