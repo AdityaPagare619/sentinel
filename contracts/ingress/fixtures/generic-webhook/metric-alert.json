@@ -1,0 +1,1 @@
+{"alert_id":"am-checkout-5xx-20261005-01","check":"http_5xx","labels":{"cluster":"prod-eu","env":"prod","region":"eu-west","team":"checkout"},"metric":{"breach_duration_s":300,"threshold":0.01,"value":0.043},"service":"checkout","severity":"error","title":"checkout 5xx rate 4.3% over 5m"}
