@@ -1,0 +1,727 @@
+openapi: 3.0.3
+info:
+  title: Sentinel Platform Read API
+  version: 1.0.0
+  x-contract-id: C7
+  x-contract-version: '0.1'
+  x-contract-status: draft
+  description: |
+    C7 — L6 OBSERVE → L7 SERVE read contract, v0.1 (prep draft, NOT frozen).
+    All read paths live under /api/v1. The old unversioned /api/* paths are
+    deprecated aliases: byte-identical payloads, plus RFC 9745 Deprecation and
+    RFC 8594 Sunset response headers (see the x-deprecation block on each
+    alias). New surface in v1: GET /api/v1/audit/chain (platform-sealed
+    event chain — event-log-audit.md P5); DecisionSummary gains trace_id,
+    freshness fields, and policy_version (prism-ui.md P2/A6).
+    Additive inside v1; a new version only for true breaks
+    (Google/Azure/Stripe consensus — see contracts/serve/README.md).
+    Consumer-owners: Prism UI + platform API consumers.
+  contact:
+    name: Ledger (C5 event-log side) / Prism+Forge (platform/UI)
+    url: https://github.com/AdityaPagare619/sentinel
+servers:
+  - url: http://localhost:8080
+    description: Platform tier (demo default)
+tags:
+  - {name: river, description: Live decision river}
+  - {name: explorer, description: Audit explorer}
+  - {name: calibration, description: Calibration dashboards}
+  - {name: simulator, description: Threshold simulator}
+  - {name: analytics, description: Alert-noise and flip analytics}
+  - {name: stream, description: Server-Sent Events tail}
+  - {name: audit, description: Platform-sealed audit chain}
+  - {name: write, description: 'Write surface (first documented here; not a read path)'}
+
+paths:
+  /api/v1/decisions:
+    get:
+      tags: [river, explorer]
+      summary: Decision feed (river) or audit search — v1
+      description: |
+        Without filters: the decision river, newest first. With filters
+        (fingerprint/team/action/from/to/trace_id): the audit explorer search.
+        Filters combine with AND. `trace_id` is the C5 one-lookup pivot:
+        one ID from any log line returns the full decision + its stage
+        latencies. Pagination is cursor-based via meta.pagination.next_cursor.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: Opaque cursor from meta.pagination.next_cursor (zero data-model leakage — never a rowid)
+        - name: fingerprint
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{16}$'}
+        - name: team
+          in: query
+          schema: {$ref: '#/components/schemas/Team'}
+        - name: action
+          in: query
+          schema: {$ref: '#/components/schemas/DispositionAction'}
+        - name: trace_id
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+          description: C5 trace ID — the one-lookup pivot from log line to decision
+        - name: from
+          in: query
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Decision rows, newest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: {$ref: '#/components/schemas/DecisionSummary'}
+
+  /api/v1/decision/{id}:
+    get:
+      tags: [explorer]
+      summary: Full decision record — v1
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Decision detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/DecisionDetail'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/v1/calibration:
+    get:
+      tags: [calibration]
+      summary: Reliability bins, ECE, coverage@tau, flip rate — v1
+      parameters:
+        - name: team
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Calibration report
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/CalibrationReport'}
+
+  /api/v1/simulate:
+    post:
+      tags: [simulator]
+      summary: Threshold projection (pure recompute) — v1
+      description: |
+        Pure recompute over stored probabilities and the versioned labeled
+        dataset — same code path as the tuner, not a copy. Never writes,
+        never pages, never calls Jev.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SimulateRequest'}
+      responses:
+        '200':
+          description: Projection with provenance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/SimulateResponse'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+
+  /api/v1/analytics/noise:
+    get:
+      tags: [analytics]
+      summary: Top checks, team load, suppression breakdown — v1
+      parameters:
+        - name: window
+          in: query
+          schema: {type: string, pattern: '^\d+[smhd]$', default: 24h}
+      responses:
+        '200':
+          description: Noise report
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/NoiseReport'}
+
+  /api/v1/analytics/flips:
+    get:
+      tags: [analytics]
+      summary: Flip-audit records — v1
+      parameters:
+        - name: window
+          in: query
+          schema: {type: string, pattern: '^\d+[smhd]$', default: 7d}
+      responses:
+        '200':
+          description: Flip report
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/FlipReport'}
+
+  /api/v1/stream:
+    get:
+      tags: [stream]
+      summary: SSE tail of new decisions — v1
+      description: |
+        text/event-stream. Each `decision` event's data is a DecisionSummary
+        (v1 shape, incl. trace_id) and its `id:` is the decision id. Resume
+        with Last-Event-ID or ?since_id=. A `: heartbeat` comment every 25s.
+        `event: gap` when the cursor predates retention; backfill via
+        GET /api/v1/decisions?since_id=.
+      parameters:
+        - name: since_id
+          in: query
+          schema: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: Endless event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/v1/audit/chain:
+    get:
+      tags: [audit]
+      summary: Platform-sealed event chain — NEW in v1
+      description: |
+        Serves the hash-chained event log the way the platform sealed it —
+        events with their row_hash/prev_hash plus the checkpoint HMACs
+        (event-log-audit.md P5). The console verifies the platform's
+        signatures instead of deriving links: the panel label flips from
+        "derived" to "platform-sealed". Read-only, mode=ro like the rest of
+        the store. Cursors are opaque (zero data-model leakage — never a
+        SQLite rowid); use event cursors for resume, not seq arithmetic.
+      parameters:
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: Opaque cursor from a previous response; omit for the chain head
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+        - name: segment_id
+          in: query
+          schema: {type: string}
+          description: Chain segment (chain-of-segments); omit for the current segment
+        - name: event_type
+          in: query
+          schema: {type: string}
+          description: Filter to one event type (e.g. decision_made)
+      responses:
+        '200':
+          description: Sealed chain window
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/ChainResponse'}
+
+  /api/v1/integrations/test-page:
+    post:
+      tags: [write]
+      summary: Test page (write surface — documented, first time)
+      description: |
+        WRITE surface, documented here for the first time per C7. Fires a
+        test page through the configured paging path. Requires
+        Idempotency-Key (PIPELINE-REVISION §2.2 cross-cutting rule); retries
+        with the same key process exactly once. Audit-logged.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1}
+          description: Client-generated idempotency key; safe to retry
+      responses:
+        '200':
+          description: Test page accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          accepted: {type: boolean}
+                          trace_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+
+  # ---- Deprecated aliases: the old unversioned paths. Byte-identical
+  # payloads to v1.0.0; every response carries Deprecation + Sunset + Link.
+  # Calendar dates are set at freeze (x-sunset-date: TBD below).
+  /api/decisions:
+    get:
+      deprecated: true
+      tags: [river, explorer]
+      summary: '[DEPRECATED] Use GET /api/v1/decisions'
+      description: |
+        Deprecated alias of GET /api/v1/decisions. Payload is byte-identical
+        to contract v1.0.0 (no trace_id, no freshness/policy fields).
+        Every response carries:
+          Deprecation: @<unix-seconds>   (RFC 9745 — date this alias was deprecated)
+          Sunset: <HTTP-date>            (RFC 8594 — date this alias stops responding; never earlier than Deprecation)
+          Link: </api/v1/decisions>; rel="successor-version", <migration-doc>; rel="deprecation"
+      x-deprecation-date: TBD (set at freeze; example value @1798761600)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Decision rows (v1.0.0 shape)
+          headers:
+            Deprecation:
+              schema: {type: string, pattern: '^@\d+$'}
+              description: RFC 9745 — structured-field date of deprecation
+            Sunset:
+              schema: {type: string}
+              description: RFC 8594 — HTTP-date after which this alias may 410
+            Link:
+              schema: {type: string}
+              description: rel=successor-version → /api/v1/decisions; rel=deprecation → migration doc
+          content:
+            application/json:
+              schema: {type: object}
+
+  /api/decision/{id}:
+    get:
+      deprecated: true
+      tags: [explorer]
+      summary: '[DEPRECATED] Use GET /api/v1/decision/{id}'
+      x-successor: /api/v1/decision/{id}
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+      responses:
+        '200':
+          description: Decision detail (v1.0.0 shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/decision/{id}}
+          content:
+            application/json:
+              schema: {type: object}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/calibration:
+    get:
+      deprecated: true
+      tags: [calibration]
+      summary: '[DEPRECATED] Use GET /api/v1/calibration'
+      x-successor: /api/v1/calibration
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Calibration report (v1.0.0 shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/calibration}
+          content:
+            application/json:
+              schema: {type: object}
+
+  /api/simulate:
+    post:
+      deprecated: true
+      tags: [simulator]
+      summary: '[DEPRECATED] Use POST /api/v1/simulate'
+      x-successor: /api/v1/simulate
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Projection (v1.0.0 shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/simulate}
+          content:
+            application/json:
+              schema: {type: object}
+
+  /api/analytics/noise:
+    get:
+      deprecated: true
+      tags: [analytics]
+      summary: '[DEPRECATED] Use GET /api/v1/analytics/noise'
+      x-successor: /api/v1/analytics/noise
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Noise report (v1.0.0 shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/analytics/noise}
+          content:
+            application/json:
+              schema: {type: object}
+
+  /api/analytics/flips:
+    get:
+      deprecated: true
+      tags: [analytics]
+      summary: '[DEPRECATED] Use GET /api/v1/analytics/flips'
+      x-successor: /api/v1/analytics/flips
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Flip report (v1.0.0 shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/analytics/flips}
+          content:
+            application/json:
+              schema: {type: object}
+
+  /api/stream:
+    get:
+      deprecated: true
+      tags: [stream]
+      summary: '[DEPRECATED] Use GET /api/v1/stream'
+      x-successor: /api/v1/stream
+      x-deprecation-date: TBD (set at freeze)
+      x-sunset-date: TBD (set at freeze; >= deprecation date per RFC 8594)
+      responses:
+        '200':
+          description: Endless event stream (v1.0.0 DecisionSummary shape)
+          headers:
+            Deprecation: {schema: {type: string, pattern: '^@\d+$'}, description: RFC 9745}
+            Sunset: {schema: {type: string}, description: RFC 8594 — HTTP-date}
+            Link: {schema: {type: string}, description: rel=successor-version → /api/v1/stream}
+          content:
+            text/event-stream:
+              schema: {type: string}
+
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 500, default: 50}
+
+  schemas:
+    DataSource:
+      type: string
+      enum: [synthetic, shadow, production]
+    Team:
+      type: string
+    Severity:
+      type: string
+      enum: [sev1, sev2, sev3, sev4]
+    DispositionAction:
+      type: string
+      enum: [passthrough, page_now, page_business_hours, suppress, folded]
+    AnswerTriple:
+      type: object
+      properties:
+        a1: {type: number}
+        a2: {type: number}
+        a3: {type: number}
+    ProbMap:
+      type: object
+      additionalProperties: {type: number}
+
+    DecisionSummary:
+      type: object
+      required: [id, time, title, service, severity, team, disposition,
+                 confidence, reason, prob_map, fingerprint, input_sha256,
+                 jev_model, latency_ms, trace_id, freshness_state,
+                 freshness_reason, policy_version]
+      properties:
+        id: {type: integer, description: Monotonic decision id}
+        alert_id: {type: string}
+        time: {type: string, format: date-time, description: received_at}
+        title: {type: string}
+        service: {type: string}
+        severity: {$ref: '#/components/schemas/Severity'}
+        team: {$ref: '#/components/schemas/Team'}
+        disposition: {$ref: '#/components/schemas/DispositionAction'}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        reason: {type: string, description: Machine-readable reason code}
+        prob_map: {$ref: '#/components/schemas/ProbMap'}
+        fingerprint: {type: string, pattern: '^[0-9a-f]{16}$'}
+        input_sha256: {type: string, pattern: '^[0-9a-f]{64}$', description: Canonical input hash; flip-audit join key}
+        jev_model: {type: string, nullable: true, description: Pinned Jev model version; null on deterministic paths}
+        latency_ms: {type: number, nullable: true, description: Jev round-trip; null on deterministic paths}
+        shadow: {type: boolean, description: True when recorded in shadow mode}
+        trace_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+          description: C5 trace ID (W3C trace-id) — the one-lookup pivot from any log line to this decision
+        freshness_state:
+          type: string
+          enum: [fresh, stale, degraded, unknown]
+          description: Freshness legs at decide time (ADR-014/D1) — the R1 field the UI previously labeled as absent
+        freshness_reason:
+          type: string
+          description: Machine-readable freshness reason (e.g. 'fresh', 'freshness:lock1')
+        freshness_as_of:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the freshness legs were evaluated
+        policy_version:
+          type: string
+          description: The policy version that decided — the R6 field the UI previously labeled as absent (INV-3 companion)
+
+    DecisionDetail:
+      allOf:
+        - $ref: '#/components/schemas/DecisionSummary'
+        - type: object
+          required: [alert, audit]
+          properties:
+            alert:
+              type: object
+              description: Alert context as received
+              properties:
+                check: {type: string}
+                severity_in: {type: string}
+                region: {type: string}
+                labels: {type: object, additionalProperties: {type: string}}
+                metric_value: {type: number}
+                metric_threshold: {type: number}
+                breach_seconds: {type: integer}
+            outcome:
+              type: object
+              nullable: true
+              description: Joined outcomes row; null when unlabeled
+            audit:
+              type: object
+              properties:
+                received_at: {type: string, format: date-time}
+                created_at: {type: string, format: date-time}
+                trace_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+                stage_latencies:
+                  type: object
+                  description: C5 per-stage latency attribution (normalize/correlate/gate_race/decide, ms)
+                  properties:
+                    normalize_ms: {type: number, minimum: 0}
+                    correlate_ms: {type: number, minimum: 0}
+                    gate_race_ms: {type: number, minimum: 0}
+                    decide_ms: {type: number, minimum: 0}
+
+    ChainEvent:
+      type: object
+      required: [cursor, event_id, ts, actor, type, alert_id, fingerprint,
+                 episode_id, outbox_id, trace_id, body, prev_hash, row_hash]
+      properties:
+        cursor:
+          type: string
+          description: Opaque pagination cursor for this event (base64 of segment:seq; never a raw rowid)
+        event_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        ts: {type: string, format: date-time}
+        actor: {type: string}
+        type: {type: string, description: Frozen event vocabulary (eventlog.py EVENT_TYPES)}
+        alert_id: {type: string}
+        fingerprint: {type: string, pattern: '^[0-9a-f]{16}$'}
+        episode_id: {type: string}
+        outbox_id: {type: string, nullable: true}
+        trace_id: {type: string, pattern: '^[0-9a-f]{32}$', description: C5 trace ID on the sealed row}
+        body: {type: object, description: The event body as sealed (hash covers it)}
+        prev_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        row_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+
+    CheckpointSeal:
+      type: object
+      required: [head_seq, head_hash, event_count, window_start_ts,
+                 window_end_ts, hmac_hex, sink_uri, sink_push_ok]
+      properties:
+        head_seq: {type: integer, minimum: 0}
+        head_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        event_count: {type: integer, minimum: 0}
+        window_start_ts: {type: string, format: date-time}
+        window_end_ts: {type: string, format: date-time}
+        hmac_hex: {type: string}
+        prev_checkpoint_hmac:
+          type: string
+          nullable: true
+          description: P6 chaining field — null until checkpoint-to-checkpoint chaining lands; additive
+        sink_uri: {type: string}
+        sink_push_ok: {type: boolean}
+
+    ChainResponse:
+      type: object
+      required: [segment_id, events, checkpoints, head]
+      properties:
+        segment_id: {type: string, description: The chain segment served}
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/ChainEvent'}
+        checkpoints:
+          type: array
+          items: {$ref: '#/components/schemas/CheckpointSeal'}
+          description: Checkpoint seals covering this window (console verifies these HMACs)
+        head:
+          type: object
+          required: [event_id, row_hash]
+          properties:
+            event_id: {type: string}
+            row_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+
+    CalibrationBin:
+      type: object
+      required: [bin, predicted_lo, predicted_hi, n, observed_rate]
+      properties:
+        bin: {type: integer}
+        predicted_lo: {type: number}
+        predicted_hi: {type: number}
+        n: {type: integer}
+        observed_rate: {type: number}
+        ci95_lo: {type: number}
+        ci95_hi: {type: number}
+    CalibrationReport:
+      type: object
+      required: [team, window, dataset_version, n_decisions, n_labeled, bins, ece, coverage]
+      properties:
+        team: {type: string}
+        window: {type: string}
+        dataset_version: {type: string}
+        n_decisions: {type: integer}
+        n_labeled: {type: integer}
+        bins: {type: array, items: {$ref: '#/components/schemas/CalibrationBin'}}
+        ece: {type: number}
+        coverage: {type: number}
+    ThresholdSet:
+      type: object
+      properties:
+        page: {type: number}
+        suppress: {type: number}
+    CostModel:
+      type: object
+      properties:
+        c_fp: {type: number}
+        c_fn: {type: number}
+    SimulateRequest:
+      type: object
+      required: [thresholds]
+      properties:
+        thresholds: {$ref: '#/components/schemas/ThresholdSet'}
+        cost_model: {$ref: '#/components/schemas/CostModel'}
+        dataset_version: {type: string}
+    Projection:
+      type: object
+      properties:
+        pages: {type: integer}
+        suppressions: {type: integer}
+        expected_cost: {type: number}
+    Provenance:
+      type: object
+      required: [dataset_version, dataset_sha256, n_alerts, tuner_rev, policy_version]
+      properties:
+        dataset_version: {type: string}
+        dataset_sha256: {type: string}
+        n_alerts: {type: integer}
+        tuner_rev: {type: string}
+        policy_version: {type: string}
+    SimulateResponse:
+      type: object
+      required: [projection, provenance]
+      properties:
+        projection: {$ref: '#/components/schemas/Projection'}
+        provenance: {$ref: '#/components/schemas/Provenance'}
+    NoiseReport:
+      type: object
+      properties:
+        window: {type: string}
+        top_checks: {type: array, items: {type: object}}
+        team_load: {type: array, items: {type: object}}
+        suppression_breakdown: {type: object}
+    FlipRecord:
+      type: object
+      properties:
+        input_sha256: {type: string}
+        first_value: {type: string}
+        second_value: {type: string}
+        differing_field: {type: string}
+    FlipReport:
+      type: object
+      properties:
+        window: {type: string}
+        flips: {type: array, items: {$ref: '#/components/schemas/FlipRecord'}}
+
+    Meta:
+      type: object
+      required: [contract_version, data_source, generated_at]
+      properties:
+        contract_version: {type: string, example: '1.0.0'}
+        data_source: {$ref: '#/components/schemas/DataSource'}
+        generated_at: {type: string, format: date-time}
+    Pagination:
+      type: object
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for the next page; null at the end
+    Envelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {description: Endpoint payload}
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/Meta'
+            - type: object
+              properties:
+                pagination: {$ref: '#/components/schemas/Pagination'}
+        error:
+          type: object
+          nullable: true
+          properties:
+            code: {type: string}
+            message: {type: string}
+            retryable: {type: boolean}
+
+  responses:
+    NotFound:
+      description: Unknown id
+      content:
+        application/json:
+          schema: {type: object}
+    Unprocessable:
+      description: Simulate body invalid
+      content:
+        application/json:
+          schema: {type: object}
