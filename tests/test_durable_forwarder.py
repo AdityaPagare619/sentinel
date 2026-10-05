@@ -635,6 +635,93 @@ class TestStandbyAndSpill(ForwarderTestBase):
 
 
 # ===========================================================================
+# P6 — simulated-spill honesty (forwarder-byok.md §2.5, C6 §2.2)
+#
+# The named incident: simulated pages replaying as forward_failed. The
+# standing falsifier: any code path that emits forward_failed for a page
+# never attempted on the wire falsifies the fix. These tests ARE the
+# proof — simulated send ⇒ receipt with simulated: true, and no
+# forward_failed entry for a non-failure.
+
+
+class TestSimulatedSpillHonesty(ForwarderTestBase):
+    def test_simulated_send_replays_as_confirmed_with_flag(self):
+        # End to end: simulated paging ON → send_direct absorbs (nothing
+        # on the wire) → spill → replay ⇒ forward_confirmed + simulated:
+        # true, and ZERO forward_failed entries.
+        os.environ["SENTINEL_SIMULATED_PAGING"] = "1"
+        fw = DurableForwarder(self.log, self._config())
+        try:
+            outcome = fw.send_direct(
+                {"kind": "test-page", "summary": "simulated page",
+                 "alert_id": "sim9"}, reason="test")
+        finally:
+            fw._conn.close()
+        self.assertEqual(outcome["pd_outcome"], "simulated")
+        self.assertTrue(outcome.get("simulated"))
+        self.assertIsNotNone(outcome["spill"])
+        self.assertEqual(len(self.pd.requests), 0,
+                         "simulated page must never touch the wire")
+
+        replayed = replay_spills(self.log, self.spill_dir)
+        self.assertEqual(len(replayed), 1)
+        self.assertTrue(replayed[0].get("simulated"))
+
+        # The falsifier, in one line: no forward_failed for a non-failure.
+        self.assertEqual(self._receipts("forward_failed"), [],
+                         "a simulated absorption is not a failure")
+        confirmed = [b for b in self._receipts("forward_confirmed")
+                     if b["channel"] == "direct-degraded"]
+        self.assertEqual(len(confirmed), 1)
+        body = confirmed[0]
+        self.assertTrue(body.get("simulated"),
+                        "simulated: true must propagate into the receipt")
+        self.assertNotIn("error_class", body,
+                         "an absorbed page carries no wire error")
+
+    def test_detection_covers_flag_and_outcome_record_forms(self):
+        # Belt-and-braces: detection works on the `simulated` flag AND on
+        # pd_outcome == "simulated" alone (records written before the flag
+        # was always present).
+        import time as _time
+        for alert_id, extra in (("sim-flag", {"simulated": True}),
+                                ("sim-outcome", {})):
+            write_spill(self.spill_dir, {
+                "kind": "x", "alert_id": alert_id,
+                "fingerprint": "fp", "episode_id": "ep",
+                "dedup_key": f"dk-{alert_id}", "reason": "test",
+                "pd_outcome": "simulated", **extra})
+            # write_spill names files by (ms, pid): two spills in the same
+            # millisecond from one process would collide and overwrite —
+            # sleep so each record lands in its own file.
+            _time.sleep(0.005)
+        replayed = replay_spills(self.log, self.spill_dir)
+        self.assertEqual(len(replayed), 2)
+        self.assertTrue(all(r.get("simulated") for r in replayed))
+        self.assertEqual(self._receipts("forward_failed"), [],
+                         "neither simulated record form may become a failure")
+        confirmed = self._receipts("forward_confirmed")
+        self.assertEqual(len(confirmed), 2)
+        self.assertTrue(all(b.get("simulated") for b in confirmed))
+
+    def test_real_failure_still_replays_as_failed(self):
+        # Surgical check: the fix does not swallow REAL failures — a
+        # genuinely failed degraded send still replays as forward_failed.
+        write_spill(self.spill_dir, {
+            "kind": "x", "alert_id": "real9",
+            "fingerprint": "fp", "episode_id": "ep",
+            "dedup_key": "dk-real9", "reason": "test",
+            "pd_outcome": "send_error", "error": "ConnectionError",
+            "error_class": "degraded_send_failed"})
+        self.assertEqual(len(replay_spills(self.log, self.spill_dir)), 1)
+        failed = self._receipts("forward_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["error_class"], "degraded_send_failed")
+        self.assertFalse(failed[0].get("simulated"))
+        self.assertEqual(self._receipts("forward_confirmed"), [])
+
+
+# ===========================================================================
 # secondary channel (design §5.2) + the pre-mortem rule
 
 
