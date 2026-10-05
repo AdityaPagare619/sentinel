@@ -202,7 +202,12 @@ def main() -> int:
     for dirname, (schema_file, checker) in CONTRACTS.items():
         cdir = ROOT / dirname
         schema = load(cdir / schema_file)
-        fdir = cdir / "fixtures"
+        # Per-schema subdirectory (fixtures/<schema-name>/): a contract dir may
+        # hold several contracts (e.g. observe/ holds C5 + C6); the flat glob
+        # would validate C5 fixtures against the C6 schema. Matches the
+        # validate_contracts.py convention.
+        schema_name = schema_file.split(".v")[0]
+        fdir = cdir / "fixtures" / schema_name
         for fx_path in sorted(fdir.glob("*.json")):
             fx = load(fx_path)
             negative = fx_path.name.startswith("negative_")
