@@ -140,7 +140,7 @@ def check_forward_receipt(schema: dict, fx: dict, name: str) -> list[str]:
         if k not in fx:
             e.append(err(ctx, f"missing required field {k!r}"))
     for k in fx:
-        if k not in props and not k.startswith("_") and k != "detail_note":
+        if k not in props and not k.startswith("_"):
             e.append(err(ctx, f"unknown field {k!r} (additionalProperties: false)"))
     an = fx.get("attempt_no")
     if not isinstance(an, int) or isinstance(an, bool) or an < 1:
