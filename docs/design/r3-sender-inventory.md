@@ -62,7 +62,6 @@ flag day.
 | S4 | **Operator/custom senders** — scripts, curl, runbooks, internal tooling posting PD Events v2 payloads | deployment practice (deploy-production.md, runbook-cutover.md curl patterns); any host with TCP reach per receiver.md M-1 | **NONE** | **LOW** — they control the code; the signing scheme is documented (SECURITY.md §2.1, receiver.py :52–78) and a reference signer ships with the migration build |
 | S5 | **Signed resolve/ack claim integrations** — POST `event_action: resolve/acknowledge` with `X-Sentinel-Signature` to close episodes (`verified_resolve`) | receiver.py :267–284, :302–355; tests/test_resolve_wiring.py | **HMAC already, fail-closed in every mode** (onboarding does NOT apply to the silence direction — receiver.py D10 wiring) | **NONE** — already authenticated; the migration must not regress this path |
 | S6 | **Test harness / CI** — tests/helpers.py, test_receiver.py, test_liveness.py, test_resolve_wiring.py post unsigned | grep hits on `/v2/enqueue` in tests/ | **NONE (unsigned)** | **MEDIUM (internal)** — the Phase 1 build must update the suite to the signed matrix (PIPELINE-REVISION R-3 verifies); no production impact |
-| S7 | **Staging/prod console "fire test alert"** — the gh-pages console supports a backend-URL config (views-settings.js references the receiver) | assets/views-settings.js (sentinel-pages worktree) | **UNVERIFIED** | **RED** — not confirmed whether the prod console POSTs to `/v2/enqueue`. Must be verified by the Phase 1 build before enforcement; if it does, it signs like S4 |
 
 ### Critical attribution finding
 
@@ -104,6 +103,7 @@ Consequences for the migration:
 | forwarder.py / pd_sender.py | outbound only — they post *to* PagerDuty, never to the local receiver | pd_sender.py:44 `PD_ENDPOINT` |
 | scripts/ops/heartbeat-check.py | reads the event-log SQLite directly by design ("the verdict must not traverse the thing it watches") — never an HTTP sender | heartbeat-check.py :1–8 docstring |
 | `/webhook/generic` senders | separate route, already HMAC fail-closed (ADR-005); covered by its own auth matrix, not this inventory | receiver.py :654–655 |
+| S7 — console "fire test alert" (ex-console sender, verified non-sender 2026-10-05) | the console's `testPage()` (gh-pages `assets/api.js:302`, live mode) POSTs to `/api/v1/integrations/test-page` (api.js:318) → backend `_int_test_page` (`platform/server/app.py:197–198, :421`) → `_pd_enqueue()` (app.py:477, defined :621) → **`https://events.pagerduty.com/v2/enqueue`** (PD's own Events API endpoint). It posts to PagerDuty directly — it never touches the local receiver's `POST /v2/enqueue`. In static/mock console modes nothing leaves the tab at all (api.js:302–315) | assets/api.js:302,318; platform/server/app.py:197–198,421,477,621 |
 
 ## 6. Rejected alternatives (inventory-scope decisions)
 
@@ -131,10 +131,10 @@ this product must never have. The mitigation is not a better document; it
 is the migration's Phase A measurement window, which must run long enough
 (7 days, covering a full weekly alert cycle) and must be gated on an
 explicit "unsigned fraction ≈ 0 for known routing_keys" bar before anyone
-flips enforcement. The second risk is scope creep: S7 (the console test
-sender) is unverified, and "probably not a sender" is not an inventory —
-the Phase 1 build must resolve it or carry it as a red item into the Vault
-review.
+flips enforcement. The second risk is scope creep: S7 (the console "fire test alert") was the
+unverified item at inventory v0 — **resolved 2026-10-05** (see §5 exclusions:
+it posts to PagerDuty's own endpoint, never the receiver's `/v2/enqueue`), so
+it is no longer a red item and does not enter the Phase 1 build's verify list.
 
 ## Binding skill clauses
 

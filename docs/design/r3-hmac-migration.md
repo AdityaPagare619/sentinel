@@ -146,7 +146,7 @@ support ticket.
 | S4 operator/custom senders | Add two headers per the documented scheme; reference signer snippet ships in the onboarding doc | ~20 lines per sender; self-serve | Sender owner |
 | S6 test harness / CI | Update suite to the signed matrix (mirrors `test_signature_auth.py` for `/v2/enqueue`); onboarding-mode acceptance test | One PR, mechanical | Phase 1 build lane |
 | S5 resolve-claim integrations | None — already signed; regression-test only | 0 | Phase 1 build lane (test) |
-| S7 console test sender | Verify whether it posts to `/v2/enqueue`; if yes, sign like S4 | Unknown until verified — red item | Phase 1 build lane (verify first) |
+| S7 console test sender | **RESOLVED 2026-10-05 — non-sender** (moved to inventory §5 exclusions; evidence: posts to `https://events.pagerduty.com/v2/enqueue`, never the receiver). No cutover action | 0 | — |
 | S1 Alertmanager | **Signing relay/sidecar** per estate (receives unsigned from Alertmanager on loopback, signs, forwards) — OR logged risk acceptance | Relay: new component, deploy + config per estate (~days); acceptance: Aditya's written word, logged per SECURITY.md Opsgenie-note precedent | Operator + (relay = new build scope, flagged, not in this design) |
 | S2 Datadog | Same relay-or-acceptance choice | Same | Operator |
 | S3 Grafana | Same relay-or-acceptance choice; research spike first on whether `X-Grafana-Alerting-Signature` covers the PD contact point | Spike: hours; relay: same as S1 | Operator |
