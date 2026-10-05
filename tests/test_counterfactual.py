@@ -30,7 +30,7 @@ from sentinel.gate import Gate, evaluate_policy
 from sentinel.models import Thresholds
 from sentinel.state import build_state, input_sha256
 
-from tests.helpers import make_alert
+from tests.helpers import make_alert, write_flags_json
 from tests.test_corroboration import NOW, _attested_entry
 from tests.test_gate import canned, fresh_monitor_for
 
@@ -392,6 +392,8 @@ class TestPresetConfig(CounterfactualGateBase):
     def _load(self, thresholds_data):
         d = tempfile.mkdtemp(prefix="sentinel-cf-cfg-")
         _write_thresholds(d, thresholds_data)
+        # R-10: the loader requires flags.json (fail-closed).
+        write_flags_json(d)
         loader = ConfigLoader(config_dir=d,
                               state_dir=tempfile.mkdtemp(
                                   prefix="sentinel-cf-state-"))
@@ -492,6 +494,8 @@ class TestPresetConfig(CounterfactualGateBase):
         d = tempfile.mkdtemp(prefix="sentinel-cf-cfg-")
         state_d = tempfile.mkdtemp(prefix="sentinel-cf-state-")
         _write_thresholds(d, {"counterfactual_presets": [0.95]})
+        # R-10: the loader requires flags.json (fail-closed).
+        write_flags_json(d)
         loader = ConfigLoader(config_dir=d, state_dir=state_d)
         first = loader.load_startup()
         # Persisted generation round-trips through to_dict / from_dict.

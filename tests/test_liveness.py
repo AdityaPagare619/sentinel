@@ -37,7 +37,7 @@ from sentinel.gate import Gate
 from sentinel.models import Thresholds
 from sentinel.receiver import Pipeline, ReceiverConfig, make_server
 
-from tests.helpers import CaptureServer
+from tests.helpers import CaptureServer, write_flags_json
 from tests.test_gate import canned
 from tests.test_receiver import FixedClient, _pd_event
 
@@ -53,6 +53,8 @@ class LivenessTestBase(unittest.TestCase):
                 json.dump(thresholds or {}, fh)
         with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
             json.dump(sorted(allowlist or []), fh)
+        # R-10: the loader requires flags.json (fail-closed).
+        write_flags_json(cfgdir)
 
     def _start(self, jev_client, thresholds=None, allowlist=None,
                max_inflight=None, raw_thresholds=None):
@@ -287,6 +289,8 @@ class TestConfigValidation(unittest.TestCase):
                 json.dump(thresholds or {}, fh)
         with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
             json.dump(sorted(allowlist or []), fh)
+        # R-10: the loader requires flags.json (fail-closed).
+        write_flags_json(cfgdir)
         return ConfigLoader(config_dir=cfgdir,
                             state_dir=os.path.join(tmp.name, "state"))
 

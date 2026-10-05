@@ -29,6 +29,7 @@ from sentinel.receiver import (build_pipeline_from_env,
 
 from tests.test_receiver import ReceiverTestBase, FixedClient
 from tests.test_gate import canned
+from tests.helpers import write_flags_json
 
 SECRET = "test-webhook-secret-32-chars-min"
 
@@ -60,6 +61,8 @@ def _policy(tmpdir):
         json.dump({}, fh)
     with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
         json.dump([], fh)
+    # R-10: the loader requires flags.json (fail-closed).
+    write_flags_json(cfgdir)
     statedir = os.path.join(tmpdir, "state")
     loader = ConfigLoader(config_dir=cfgdir, state_dir=statedir)
     return loader.load_startup(), statedir

@@ -1,6 +1,8 @@
 """Shared fixtures for the Sentinel unit tests (stdlib unittest)."""
 
 import hashlib
+import json
+import os
 import unittest
 
 from sentinel.correlator import fingerprint_of
@@ -39,6 +41,40 @@ class FakeClock:
 
     def advance(self, s):
         self.t += s
+
+
+# ---------------------------------------------------------------------------
+# R-10: flags.json test fixture. The loader requires flags.json
+# (fail-closed), so every test that builds a config dir must write one.
+# Overrides are flag-name -> value, e.g. write_flags_json(d,
+# global_kill_switch=True).
+
+DEFAULT_FLAG_VALUES = {
+    "global_kill_switch": False,
+    "suppress_enabled": True,
+    "shadow_mode": False,
+    "canary_severity_bands": [],
+    "canary_services": [],
+}
+
+
+def write_flags_json(cfgdir, raw=None, **overrides):
+    """Write a valid flags.json into cfgdir. `raw` writes bytes verbatim
+    (for invalid-fixture tests); otherwise `overrides` set flag values."""
+    os.makedirs(cfgdir, exist_ok=True)
+    path = os.path.join(cfgdir, "flags.json")
+    if raw is not None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        return path
+    values = dict(DEFAULT_FLAG_VALUES)
+    values.update(overrides)
+    data = {"version": 1,
+            "flags": {name: {"value": value}
+                      for name, value in values.items()}}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    return path
 
 
 # ---------------------------------------------------------------------------

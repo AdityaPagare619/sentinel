@@ -32,7 +32,7 @@ from sentinel.receiver import Pipeline, ReceiverConfig, make_server
 from datetime import datetime, timedelta, timezone
 from tests.test_gate import fresh_monitor_for
 
-from tests.helpers import CaptureServer
+from tests.helpers import CaptureServer, write_flags_json
 from tests.test_gate import ExplodingClient, canned
 from sentinel.client import JevOverloaded
 
@@ -76,6 +76,8 @@ class ReceiverTestBase(unittest.TestCase):
         fp_strings = [a for a in (allowlist or []) if isinstance(a, str)]
         with open(os.path.join(cfgdir, "allowlist.json"), "w") as fh:
             json.dump(sorted(fp_strings), fh)
+        # R-10: the loader requires flags.json (fail-closed).
+        write_flags_json(cfgdir)
         statedir = os.path.join(self._tmp.name, "state")
         loader = ConfigLoader(config_dir=cfgdir, state_dir=statedir)
         policy = loader.load_startup()
