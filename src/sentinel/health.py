@@ -129,6 +129,11 @@ class HealthMonitor:
         webhook_fail_open = bool(
             getattr(getattr(self._pipeline, "config", None),
                     "webhook_onboarding", False))
+        # R-10: the live flags generation, surfaced so the kill-switch
+        # drill's confirmation step is checkable, not believed.
+        live_flags = dict(
+            getattr(getattr(self._pipeline, "policy", None), "flags", None)
+            or {})
         if failed:
             return 503, {
                 "ok": False,
@@ -136,6 +141,7 @@ class HealthMonitor:
                 "degraded": degraded,
                 "degraded_reason": degraded_reason,
                 "webhook_auth_fail_open": webhook_fail_open,
+                "flags": live_flags,
                 "checks": results,
             }
         return 200, {
@@ -143,6 +149,7 @@ class HealthMonitor:
             "degraded": degraded,
             "degraded_reason": degraded_reason,
             "webhook_auth_fail_open": webhook_fail_open,
+            "flags": live_flags,
             "config_generation": results["config_current"].get(
                 "config_generation"),
             "gate_selftest_age_s": results["gate_constructed"].get(
