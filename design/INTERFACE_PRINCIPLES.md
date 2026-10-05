@@ -1,13 +1,13 @@
 # Sentinel Interface Principles
 
-**Version:** 1.0 — 2026-10-04
+**Version:** 1.2 — 2026-10-05
 **Status:** LAW, not advice. Every interface lane builds against this file the way the engine lanes build against `ARCHITECTURE.md`.
 **Authority:** Aditya's order 2026-10-03 — after the design showcase failed his visual judgment, this document replaces taste-based direction. Disagreements go through the RFC process in §10; until changed, this file wins arguments.
 **Derived from:** `principal-systems` (the five laws, the constitutions), `principal-governance` (design systems, predictable hydration, parallel teams), `execution-doctrine` (pain first, manual first, validate → shadow → canary), `principal-mindset` (proxy traps, restatement test).
 
 **How to read the labels:** every decision carries a **Type**. Type 1 = irreversible or expensive to reverse (stack choice, public contract, token architecture) — changing it needs an RFC with written alternatives. Type 2 = reversible — decide fast, measure, roll back if wrong. Unlabeled decisions default to Type 2 process, which is how Type 1 disasters happen — so everything structural is labeled.
 
-**What this document is not:** it contains no theme recommendations, no "inspired by" references, no mood boards, no "make it feel premium." Taste is not a system. This file specifies contracts, budgets, states, and falsifiable gates. If a sentence in here cannot be checked by a test, a linter, or a timed operator exercise, it does not belong — and it isn't here.
+**What this document is not:** it contains no theme recommendations, no mood boards, no "make it feel premium." Taste is not a system. It *does* contain professional lineage (§12) — but lineage is not inspiration: every named pattern arrives with its mechanism, its refused failure mode, and its test. A citation without a test is decoration. This file specifies contracts, budgets, states, and falsifiable gates. If a sentence in here cannot be checked by a test, a linter, or a timed operator exercise, it does not belong — and it isn't here.
 
 ---
 
@@ -286,6 +286,8 @@ Accessibility bugs are filed at the same severity as functional bugs — because
 - No screen renders a raw error or blank state for a handled failure mode (the five states, §4.3).
 - Console network traffic contains zero model-evaluation calls on read paths (P5) — asserted against a request log in CI.
 
+The anti-fatigue invariants in §14 (A1–A12) are Type-1 gates of equal standing with the honesty invariants above — adopted from the B4 design-expansion RFC. Fatigue is an honesty failure: a console the operator cannot face at 3 AM is a console that lies about being usable.
+
 ### 9.3 Visual regression
 Screenshot diffing on the five primary surfaces, in all four freshness states and the five component states where applicable. Diffs are reviewed by a human — the gate catches accidental restyles of the severity and freshness languages, which are safety-critical visual contracts.
 
@@ -369,6 +371,126 @@ The principles above are laws for the interface lanes. Laws need supplies. This 
 
 ---
 
+## §12 — Professional lineage: what the industry's software teaches
+
+**L0. Study the workflow, never the look.**
+This file names professional incident software — PagerDuty, Opsgenie, Grafana OnCall, Datadog, incident.io, Linear, Superhuman — as *lineage*, not as inspiration. The distinction is mechanical: lineage means a pattern was extracted, its mechanism understood, its requirement stated with an acceptance check, and its test written. Inspiration means it looked right. The logo-removal test (§8-1) already forbids the second. Aditya's bar is higher than "inspired by": the console must fill the same *needs* those products fill, with the same professional discipline — and it must refuse their failure modes on the record. Every adopted pattern below states what is stolen, what is refused, and the test that keeps the theft honest. A pattern that cannot be expressed as a requirement with an acceptance check is decoration, and decoration is banned (§8). *(Pattern sources: `docs/planning/DESIGN-EXPANSION.md` §1, P-LIB-1–P-LIB-10.)*
+
+**L1. PagerDuty — the incident table with alert accordion (P-LIB-1).**
+Steal the two-level hierarchy: the primary list is the *decision* (incident), the *evidence* (alerts) is one deliberate interaction deeper — progressive disclosure done right. Steal the closed status lifecycle (triggered / acknowledged / resolved): a vocabulary that survives a postmortem. Refuse the volume-as-signal: every incident is a row, and urgency color-coding mitigates but does not fix a 500-row list. PagerDuty's own AIOps upsell ("reduces incident noise by up to 98%") is the vendor's admission that the base UI is a volume display. The console's river is decisions, never raw alerts (§14-A1).
+
+**L2. PagerDuty AIOps — zero-config triage context (P-LIB-2).**
+Steal the three questions every decision must answer at a glance: is this novel (outlier?), is there precedent (has this happened before — who responded, what remediation worked?), is it related (other active decisions sharing a cause?). These are the highest-value context an operator can get — minutes of archaeology collapsed into one glance. Refuse the opaque model: grouping the operator cannot interrogate is a verdict without evidence. Every Sentinel grouping shows its grouping key and lets the operator split the cluster in one action — a group is a hypothesis, never a verdict (§14-A9).
+
+**L3. Opsgenie — the lifecycle activity log (P-LIB-3).**
+Steal "who did what, when" rendered inline on the item — the lifecycle timeline as *the* trust artifact, not buried in an audit tab. Steal the one-screen accountability view: who is on-call, what escalates next, and when. Refuse the alert-first framing: when the fundamental unit is the alert, operator attention scales with alert volume — the exact frustration this console exists to kill. "Analytics about the firehose" is not design.
+
+**L4. Grafana OnCall — declared grouping keys + rule preview (P-LIB-4).**
+Steal the declared grouping-ID template — the cleanest articulation of "cluster heads with declared keys" in the industry: the grouping key is visible, inspectable, and testable. Steal the rule-preview pattern ("test the rule against a sample before it touches production") and generalize it: every Sentinel rule change (threshold, mute, grouping) previews against recent decisions before committing. Refuse config-as-interface: Jinja templates and DSL knobs make every flexible knob a page in someone else's runbook. Sentinel keeps the power and renders plain-language receipts, not templates.
+
+**L5. Datadog — the case view (P-LIB-5).**
+Steal the *case* as the unit of work: one page carrying the decision, the evidence, the context, and the history — enriched at ingestion so every surface downstream inherits service/team/severity/dependency context. Refuse dashboard sprawl: the "single pane of glass" that is in practice a pane per product. The closed five-surface set (§3) is the defense; the dashboard builder is banned on the record (§14-A11).
+
+**L6. incident.io — the newcomer summary (P-LIB-6).**
+Steal the auto-composed "what's happening and what do I do" brief: the verdict and the recommended action rendered first, refreshed as the incident evolves — the concrete form of the §5.1 hierarchy law (severity → action → evidence). Steal the auto-timeline: Sentinel's audit chain assembles itself; the operator never hand-writes incident narrative. Refuse the dependency: a core triage loop hostage to a third-party client. Sentinel's alert-to-decision-to-action path works with zero integrations.
+
+**L7. Linear — the triage queue contract (P-LIB-7).**
+Steal the triage queue as an *attention contract*: "these items need a human decision; everything else is handled" — which is precisely the suppression story: the river is the queue of *decisions needing review*, not the river of everything that fired. Steal keyboard-first triage and the command palette (the console already ships `Ctrl/⌘K`; its grammar extends to actions, not just filters). Refuse the finite-backlog model: alert decisions are an infinite stream; "inbox zero" is unreachable and promising it is dishonest. The queue is framed as "everything important is handled," never "queue is empty" (§14-A10).
+
+**L8. Superhuman / Gmail — auto-advance + undo (P-LIB-8).**
+Steal auto-advance and undo *as a pair*: auto-advance makes triage fast; undo makes fast triage safe. Act on a decision and the next undecided one is already selected; every destructive action reverses cleanly within its window. Steal bundles: suppressed decisions are natural bundles — bulk-actionable by reason. Refuse the snooze model: an operator-"snoozed" paging decision is a paging-path decision made in the console. Suppression-affecting hides are explicit, audited mutes with TTL — never a UI-only hide (P5).
+
+**L9. Calm technology — the center/periphery architecture (P-LIB-9).**
+Steal the split as architecture: the river is the center; everything else (suppression counts, system health, calibration drift) lives in the periphery — a quiet ambient strip that changes state without demanding attention. Only critical severity may seize the center uninvited: the smoke-alarm test. Refuse the engagement-metric drift: a console optimizing for "time in app" will drift toward interruption. The console's success metric is *time from page to correct action, trending down* — measure the operator's time saved, never the operator's attention captured (§14-A12).
+
+**L10. The lineage test.**
+A new pattern enters this file only with: the source, the mechanism stolen, the failure mode refused, and the test. "PagerDuty does X" is not a requirement. "The console shows the grouping key and lets the operator split the cluster in one action; tested by the 15%-split-rate kill condition" is a requirement. Lineage without a test is inspiration wearing a citation. *(principal-governance: no major component starts from a feeling; principal-mindset: proxy-trap audit.)*
+
+<!-- PROFESSIONAL-TEARDOWN: the professional-teardown lane's functional workflows and testable UI requirements land here — per-source requirement tables with acceptance checks, deepening L1–L9. Do not restructure this section; append under the L-item it deepens. -->
+
+---
+
+## §13 — Critical surfaces: the safety machinery is the interface
+
+The engine's safety machinery (kill switch, policy governance, auth, the race, fail-open states) is not a backend concern the console "also shows." For the 3 AM operator, the machinery *is* the interface: every critical control must be visible, operable, and honest about its own condition. Each requirement below traces to its architecture finding (**R-1…R-20 in `docs/architecture-revision/PIPELINE-REVISION.md`** — not to be confused with §11's inbound R-items). A console that cannot show these surfaces cannot be trusted to sit in front of a paging path.
+
+**C1. The kill switch is a console surface (R-10).**
+The global kill switch renders on the console with its current state, its as-of time, and the measured round-trip from the latest drill record (`ops/drills/`): "kill switch ARMED — last drill 2026-10-05, synthetic alert round-tripped as passthrough in 2.1s." The drill record is one click away. The `<5s` claim renders only as the measured value from the latest drill — a claim without a drill record renders as "unmeasured," never as a number. Flipping the switch from the console is a destructive action under §5.2 (confirm with consequences stated). The kill switch is the F1 kill condition of the whole product; its console surface is not optional chrome.
+
+**C2. Policy governance is visible and bound (R-1).**
+The console renders the live policy version, its attestation status (LIVE / REVIEW_DUE / QUARANTINED), the review-due clock, and the threshold values the kernel is *actually running* — bound to the attested `PolicyVersion.content`, never to an unattested file. If the running numbers are not covered by a LIVE attested version, the console renders an explicit mismatch state (the R-1 governance-theater finding, made visible): "kernel running thresholds NOT covered by an attested policy version — suppressions held to paging." Policy changes from the console drive the attestation ceremony (draft → dual-attestor sign-off → live), never a bare JSON edit. The D8 fail-closed flip (missing policy ⇒ page, not suppress) renders as a named, visible gate state, not a silent default.
+
+**C3. Auth and key-resolution status are truth, not proxy (R-2, R-3, R-16).**
+The console renders the ingress auth matrix: which routes are HMAC-gated, which are in loud-onboarding, which are unauthenticated — with the reason stated. It renders key-resolution *truth per forward path*: what the durable path actually resolved (not what the Integrations UI claims), and it renders a loud mismatch when the UI says "configured" but the durable path cannot resolve (the R-2 finding: a proxy that rank-orders with nothing). The write endpoints' bearer-auth status renders with the same honesty. An auth surface that reports intent instead of resolution is the R-2 failure wearing a UI.
+
+**C4. The race is visible (R-6, R-7; race-to-page).**
+Every rendered decision states which rung decided: Jev, timer-win, degraded tier, or deterministic rule — with the evidence appropriate to each. A timer-win never presents as a model judgment: it renders "decided by race timer (Jev exceeded budget)" with the budget and the elapsed time. The circuit-breaker state (closed / open / half-open) and the failover pipe (primary / alternate / degraded) render on the ambient strip and in full on the evidence surface. Degraded-tier decisions render the `engine=degraded` label in-band and *never* carry a lone suppression — corroboration by a deterministic rule is shown, or the suppression does not render as a suppression. The exact-cache hit renders as a cache fact ("identical state seen 14:02:11 — decided from cache"), never as a fresh evaluation.
+
+**C5. Fail-open states are first-class facts (R-1, R-7; §7-1).**
+When suppression was withheld because the safety machinery said so — stale freshness proofs, unattested policy, vendor overload, breaker open, degraded tier uncorroborated, missing monitor — the decision renders *why it paged* as a first-class fact, with the same visual weight as a suppression's proof: "PAGED — freshness proofs stale (as-of 41m). Suppression requires fresh evidence." A page whose reason is "the machinery refused to suppress" must never look like a page whose reason is "the model was confident." The operator's postmortem depends on the distinction.
+
+**C6. The suppression proof ledger (D6, R-20).**
+A mode of the river (the surface set stays closed, §3): every suppressed decision in the window, each row carrying its proof inline — quantized confidence, policy version, the matching known-pattern name, the one-line reason. Pattern rows aggregate the track record from the audit log: "deploy-canary pattern · 23 suppressed this week · 0 appealed · 0 regretted." One click reaches the full evidence bundle from any row (A2). The honest empty state: "no suppressions in the last hour (window 02:14–03:14)" — never an empty table. This is the surface shown to the skeptic in the buying meeting and to the operator at 3 AM; it is where suppression earns its keep.
+
+**C7. The chain is shown as verified (R-4, R-18).**
+The audit explorer (S4) renders the chain's verification state, not just the chain: the latest sealed checkpoint with its seal time, the reaper's last sweep, the retention tier state — and the two verifiers' agreement on the genesis rule. A verifier disagreement renders as an explicit, loud state ("verifiers disagree on genesis — chain continuity unverified"), never as a silently green check. The hourly seal is the chain's only external anchor; the console shows when it was last anchored.
+
+**C8. Degraded mode is a designed surface.**
+When the platform is degraded, the console renders its degraded-mode surface (§4.1, §6 load-shedding order): what failed, what is shown instead (cached with as-of), what is unaffected, what to do. The river and evidence are the last surfaces to degrade; the simulator and shadow surfaces shed first, labeled as shed. A degraded console that looks identical to a healthy one is lying (P3).
+
+<!-- CRITICAL-SCREENS: the critical-screens lane's screen specifications land here — concrete layouts, component compositions, and interaction contracts per surface C1–C8. Do not restructure this section; append under the C-item it specifies. -->
+
+---
+
+## §14 — Anti-fatigue: the console reduces cognitive load or it fails
+
+Aditya's mandate for the interface program: the system exists to REDUCE manual load and the frustration of seeing millions of alerts — and the UI itself must not repeat that frustration. This section is the law that enforces it. Every rule below is testable; the tests are named. Where a rule restates a design-expansion invariant (INV-U1…INV-U8, adopted by the B4 session's RFC), the invariant ID is carried so the trace survives.
+
+**A1. Pages first, always (INV-U3).**
+The river's default ordering is decision severity, then recency. Arrival order is never the top-level sort. No surface renders a raw count ("1,204 alerts") as its headline figure — a naked count is the firehose wearing a KPI. *Test:* snapshot assertion on the river's sort comparator; an antislop-style scan rejects unqualified alert-count headlines.
+
+**A2. Suppression always shows its proof (INV-U2).**
+Every suppressed decision's evidence bundle is reachable in ≤ 1 interaction from any surface that names the decision — and the one-line proof (confidence, policy version, pattern name, reason) renders inline on the row itself. A suppression the operator cannot interrogate in one click is a suppression the operator will not trust, and a suppression the operator does not trust will be worked around. *Test:* static scan — every suppressed disposition carries a deep link to its evidence; click-depth asserted in the Playwright critical flow (§9.1).
+
+**A3. No unbounded volume lists (INV-U1).**
+Any decision list exceeding the storm threshold in its time window renders as cluster heads with declared grouping keys — never as raw rows. The storm threshold and the cluster budget are stated in the surface contract. *Test:* feed the river N > threshold decisions in T minutes; assert no more than K rows render uncollapsed.
+
+**A4. The center is earned, never assumed (INV-U5).**
+Only critical severity may seize center attention uninvited (modal-equivalent, sound, badge, motion). All other state changes stay in the periphery — the quiet ambient strip (D4 lineage, L9). There is no notification center, no badge counts, no auto-playing motion. *Test:* the center-seizure audit — enumerate every UI element that can demand attention; assert each is gated on critical severity or explicit operator request.
+
+**A5. Actions are reversible or explicitly consequential (INV-U4).**
+Every operator action is undoable within its window, or it confirms with the consequences stated in operator language. A control that cannot act does not render — the appeal-button law (R-20), generalized: a safety control that cannot act, or that acts without the full control plane behind it, is the most dangerous UI element in a paging product. *Test:* `antislop.py`'s phantom scan extended to rendered-but-inert controls; every destructive action has an inverse-action test.
+
+**A6. Replay never presents as live (INV-U6).**
+Mock replay, recorded replays, and simulated content render as `cached`/`simulated` with in-band labels at the point of display — never as `live`. Mock-fabricated payloads carry the reconstruction mark (§4.4). *Test:* the `honesty.test.mjs` mock-honesty invariants.
+
+**A7. Freshness is always visible (INV-U7).**
+Restates the §9.2 honesty invariant as the anti-fatigue twin: a silent stale river is how the operator learns to distrust the console — and a distrusted console is worked around, which recreates the manual load the product exists to kill. *Test:* the existing INV-1 suite.
+
+**A8. The triage loop is keyboard-complete (INV-U8).**
+Navigate, open, act (acknowledge / appeal / mute), advance, and undo are all keyboard-operable with visible focus; a frequent action that requires the mouse is a defect. Auto-advance moves selection to the next undecided decision after every action; undo is load-bearing so speed never trades against safety (L8). *Test:* the Playwright keyboard-only critical flow (§9.1-2), extended to the full loop.
+
+**A9. Storm mode is a designed state.**
+When the river crosses the storm threshold it folds into cluster heads (D2 lineage, L2): each head names the grouping key, the decision count, and the distinct-fingerprint count. The badge reads `STORM — collapsed by fingerprint`, never silently. Splitting a cluster is one action. The kill condition is constitutional: if the operator split-rate on clusters exceeds 15% over a week, the grouping key is wrong and the direction returns to design. *Test:* the storm-mode 3 AM test (§9.4) with a synthetic storm.
+
+**A10. The triage queue is "everything important is handled," never "inbox zero" (L7).**
+The river frames itself as the queue of decisions needing review — not the queue of everything that fired, and not a backlog to be worked to zero. The honest empty state for the queue: "no decisions need review (last 15 min)" — with the window stated. *Test:* the empty-state scan (§4.3-5) on the river.
+
+**A11. What is banned, on the record.**
+The B4 red team killed these; the kills are law here, not history:
+- No notification center with badge counts (K5) — badge counts manufacture ambient anxiety; the console's notification model is pull-based triage plus the periphery strip.
+- No custom dashboard builder (K4) — Datadog-sprawl in miniature; Field Pins remain the sanctioned customization mechanism (bounded, display-only, contract-checked).
+- No infinite-scroll live ticker (K2) — the firehose with better CSS; the D4 ambient strip is the ticker's honest form.
+- No AI copilot chat panel (K1) — the firehose with a typeface; uncalibrated prose where the constitution demands quantized, auditable verdicts.
+- No on-call response-time leaderboard (K3) — it measures the operator instead of reducing their load; system-level responsiveness may live in S5 as a system metric, never a personal rank.
+- No inline auto-remediation buttons (K6) — a Type-1 action from a Type-2 triage list; remediation may return only behind an RFC specifying the platform control plane, the confirmation contract, the audit events, and the undo semantics.
+A banned pattern returning requires a new RFC with a measurement plan — never a resurrection.
+
+**A12. The fatigue budget.**
+Cognitive load is budgeted like performance (§6): the 3 AM test (§9.4) is the measurement instrument. If the quarterly test shows time-to-correct-action rising, or the operator reports the console "feels like the old firehose," the next interface lane's first job is winning it back — scheduled, not backlogged. The success metric is *time from page to correct action, trending down*; the console never optimizes for attention captured (L9).
+
+---
+
 ## Appendix A — Component contracts (initial set)
 
 Each component documents: props, the five states (§4.3), accessibility notes. New shared components get a contract entry before code.
@@ -396,3 +518,4 @@ Each component documents: props, the five states (§4.3), accessibility notes. N
 
 - **2026-10-04 v1.0** — Initial ratification. Written after the design showcase failed Aditya's visual judgment; replaces taste-based direction with contracts, budgets, and gates.
 - **2026-10-04 v1.1** — Added §11: inbound requirements each team owes (R1–R25) — the supplies without which the laws can't execute.
+- **2026-10-05 v1.2** — Added §12 (professional lineage: steal/avoid discipline per source, L0–L10), §13 (critical surfaces C1–C8, each traced to its PIPELINE-REVISION finding), §14 (anti-fatigue A1–A12, adopting the B4 INV-U1–INV-U8 RFC as Type-1 gates); amended the preamble (lineage ≠ inspiration) and §9.2 (fatigue invariants of equal standing). TODO hooks left for the professional-teardown and critical-screens lanes. Type-1 change: this PR is the RFC vehicle per §10; merge constitutes ratification.
