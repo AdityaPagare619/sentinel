@@ -286,6 +286,19 @@ class TestOperatorResolve(ResolveWiringTestBase):
                                     headers=self._op_headers())
         self.assertEqual(code, 400)
 
+    def test_operator_resolve_deeply_nested_json_400(self):
+        # Same class of hole as R-8 (#93): RecursionError is not a
+        # ValueError subclass, so it escaped _handle_episode_resolve's
+        # except tuple and killed the connection instead of returning
+        # 400. Now: invalid JSON object, honestly reported.
+        raw = b"[" * 25000 + b"]" * 25000
+        with mock.patch.dict(os.environ,
+                             {"SENTINEL_HEALTH_TOKEN": OP_TOKEN}):
+            code, body = self._post("/episodes/resolve", raw,
+                                    headers=self._op_headers())
+        self.assertEqual(code, 400)
+        self.assertEqual(body["status"], "error")
+
     def test_operator_resolve_requires_token_configured(self):
         # Fail-closed when the token is unset: unlike /healthz (a read),
         # the silence-direction write is never open.

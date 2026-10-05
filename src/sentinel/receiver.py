@@ -743,7 +743,10 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 raise ValueError("top-level JSON is not an object")
             fingerprint = data.get("fingerprint")
             dedup_key = data.get("dedup_key")
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # Same class of hole as R-8 (#93): RecursionError is not a
+            # ValueError subclass, so deeply-nested JSON escaped this
+            # tuple and killed the connection instead of returning 400.
             self._send_json(400, {"status": "error",
                                   "message": "invalid JSON object"})
             return
