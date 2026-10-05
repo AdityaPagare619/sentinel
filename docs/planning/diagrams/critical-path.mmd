@@ -1,0 +1,95 @@
+%% scope: Critical path of the phased build plan, from ROADMAP.md section 9
+%%         (cross-phase dependency graph). Sequential phase chain + the load-bearing items that
+%%         downstream phases' falsifiers read + the human gates that must never be routed around.
+%% author-chief: Forge (architecture)
+%% reviewer-chief: Ledger (audit — dependency honesty)
+%% grounding: ROADMAP.md section 9 (dependency graph text, incl. "the two dependencies that bite hardest");
+%%            section 0 (session record: D1 emergency R-3 sequencing, D2 R-11 placement, D3 R-9 decision-now);
+%%            sections 1-6 (phase contents); section 7 (Type-1 gates Q1-Q8 fallbacks);
+%%            PIPELINE-REVISION.md section 8 (sequenced build plan Phases 0-5)
+%% date: 2026-10-05
+%% review-status: REVIEWED. 1 dispute resolved by disagree-and-commit (see README.md dispute D-8).
+
+flowchart TB
+    ENTRY(["ENTRY GATE<br/>Aditya approves PIPELINE-REVISION.md<br/>(program entry gate)"])
+
+    subgraph P0["PHASE 0 - Honesty triage (week 1)"]
+        direction TB
+        R10["R-10 wire-or-retract<br/>unblocks flag-dependent work<br/>(kill-switch drills, canary-by-flag)"]
+        R3D["R-3 migration design (D1)<br/>auth matrix target, cutover plan,<br/>onboarding-mode window"]
+        R11H["R-11 honesty half<br/>PR template names the GHA startup_failure"]
+    end
+
+    subgraph P1["PHASE 1 - Trust boundaries (weeks 2-3)"]
+        direction TB
+        C17["C1-C7 contracts written<br/>reviewed artifacts that Phase 4<br/>contract-conformance tests run against;<br/>Phase 5 R-9 migration honors C4"]
+        R2["R-2 key contract<br/>Phase 5 key rotation + R-18<br/>key lifecycle build on it"]
+        R16["R-16 write-surface auth<br/>Phase 5 /api/v1/audit/chain<br/>is born authenticated"]
+        R9D["R-9 enum spec (D3: decision now)<br/>Phase 5 R-9 migration (code late)"]
+        Q23{"Q2 / Q3<br/>human gates"}
+    end
+
+    subgraph P2["PHASE 2 - Observability backbone (weeks 3-4)"]
+        direction TB
+        R12["R-12 /metrics + trace ID<br/>shared module, SINGLE OWNER<br/>LOAD-BEARING SPINE: three phases'<br/>falsifiers read it"]
+        R11M["R-11 runner (mechanical half)<br/>gates every later merge;<br/>first run retro-verifies<br/>SHAs since Oct 2 (D2)"]
+    end
+
+    subgraph P3["PHASE 3 - Resilience mechanisms (weeks 4-6)"]
+        direction TB
+        R578["R-5 / R-7 / R-8 experiments<br/>ALL falsifiers read R-12 metrics"]
+        R6["R-6 rung 1 (shadow only)<br/>promotion decision lives in Phase 4,<br/>gated on R-17 (D4)"]
+        R5C["checkpoint HMAC discipline (R-5)<br/>exercised by Phase 5 R-18 chaining"]
+    end
+
+    subgraph P4["PHASE 4 - Verification machinery (weeks 6-8)"]
+        direction TB
+        R17["R-17 golden set<br/>gates R-6 promotion (D4);<br/>DATED KILL: if not green by<br/>Phase 4 exit, rung 1 stays shadow"]
+        R13["R-13 drift harness (Q6)<br/>continuously verifies Phase 1<br/>vendor-facing schemas"]
+        R15["R-15 load gates<br/>read R-12 thresholds; the anti-theater<br/>leak reintroduction proves the soak<br/>is not decoration"]
+        Q7["fault-proxy chaos (Q7)<br/>trust earned here is the precondition<br/>for ever revisiting live-PD chaos"]
+    end
+
+    subgraph P5["PHASE 5 - Lifecycle & completion (weeks 8-10)"]
+        direction TB
+        R18["R-18 threat-model doc (Type-1)<br/>written FIRST; may constrain<br/>retention + key-lifecycle builds"]
+        R4["R-4 retention armed<br/>after dry-run review only"]
+        R20["R-20 UI (Q1 proceeds, Q8 gated)<br/>appeal wired OR removed -<br/>never both, never neither"]
+        R9M["R-9 enum migration<br/>caught by C4 contracts +<br/>Phase 4 harnesses if it regresses"]
+    end
+
+    EXIT(["EXIT<br/>explicit-layers checklist re-scored<br/>(target: no 'missing'); roadmap complete"])
+
+    ENTRY --> R10 --> C17
+    ENTRY --> R3D --> C17
+    ENTRY --> R11H --> R11M
+    C17 --> R12
+    R2 --> R12
+    R16 --> R12
+    R9D --> R9M
+    Q23 -.->|"R-3 / R-1 builds wait;<br/>fallbacks in section 7 are<br/>the default-by-choice"| R12
+    R12 --> R578
+    R12 --> R6
+    R12 --> R5C
+    R11M --> R578
+    R578 --> R17
+    R6 --> R17
+    R5C --> R18
+    R17 --> R18
+    R13 --> R18
+    R15 --> R18
+    Q7 --> R18
+    R18 --> R4 --> EXIT
+    R18 --> R20 --> EXIT
+    R9M --> EXIT
+
+    subgraph CRIT["CRITICAL CHAIN (longest dependency path)"]
+        direction LR
+        CC1(["approval"]) --> CC2(["R-10"]) --> CC3(["C1-C7"]) --> CC4(["R-12"]) --> CC5(["R-5/R-7/R-8"]) --> CC6(["R-17"]) --> CC7(["R-18"]) --> CC8(["re-score"])
+    end
+
+    subgraph RISK["The two dependencies that bite hardest (ROADMAP section 9)"]
+        direction TB
+        K1["1. R-12 is the load-bearing spine.<br/>If /metrics slips, Phase 3's experiments and Phase 4's gates<br/>have no instruments - the slip must be NAMED IN WRITING<br/>with a re-sequenced plan, NEVER absorbed silently."]
+        K2["2. Q2/Q3/Q6/Q8 are the human gates.<br/>Building must never route around them quietly.<br/>Section 7's fallback column is the complete list of what proceeds;<br/>anything else WAITS."]
+    end

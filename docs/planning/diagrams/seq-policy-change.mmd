@@ -1,0 +1,59 @@
+%% scope: Policy change + attestation ceremony. Shows BOTH the CURRENT theater gap
+%%         (the attested lifecycle governs an object the kernel never reads; thresholds.json is the live path)
+%%         and the REVISED path (P1, Q3-gated): canonical PolicyVersion.content.
+%% author-chief: Ledger (audit / lifecycle)
+%% reviewer-chief: Tripwire (red team — theater-gap hunter)
+%% grounding: deterministic-gate.md section 1.2 (Thresholds dataclass, models.py:52-58; ConfigLoader),
+%%            section 1.3 (D8 PolicyGate fresh-read per suppress verdict),
+%%            section 1.4 (B3 lifecycle: draft->shadow->canary->live->review-due->expired; attestor ADR),
+%%            section 2.1 (THE DAMNING FINDING: two parallel paths; D8 fail-open missing-file semantics),
+%%            section 3 P1 (unify the policy-change path, TYPE 1);
+%%            src/sentinel/models.py:52-58; src/sentinel/policy_lifecycle.py; src/sentinel/attestor.py
+%% date: 2026-10-05
+%% review-status: REVIEWED. 1 dispute resolved by disagree-and-commit (see README.md dispute D-6).
+
+sequenceDiagram
+    participant OP as Operator
+    participant CLI as Ceremony CLI
+    participant PS as PolicyStore<br/>(B3 lifecycle)
+    participant AR as Attestor registry<br/>(Ed25519, HMAC-sealed)
+    participant CL as ConfigLoader
+    participant K as Policy kernel<br/>evaluate_policy
+    participant D8 as PolicyGate (D8)
+    participant EL as EventLog
+
+    rect rgb(255, 235, 235)
+    Note over OP,EL: CURRENT - THE THEATER GAP (deterministic-gate.md section 2.1). Two parallel paths; the governed one is not the one that decides suppression.
+
+    Note over OP,CL: PATH B - THE LIVE PATH (actually used): NO attestation, NO state machine, NO expiry, NO two-person rule.
+    OP->>CL: edit thresholds.json (suppress_p1_max 0.002 -> 0.9, or any Thresholds field)
+    CL->>CL: schema validation + _semantic_check ONLY<br/>refuses to run on missing/unparseable files; last-good generation fallback
+    CL->>K: Thresholds{...} (models.py:52-58)<br/>The kernel obeys on the next load.
+    Note over OP,K: Concrete incident this enables (pre-mortem, past tense): an operator "temporarily"<br/>widened the suppress gate in thresholds.json on a noisy night. No attestation, no expiry,<br/>no review-due clock. It persisted silently for six weeks; a true SEV1 was suppressed.
+
+    Note over OP,EL: PATH A - THE GOVERNED PATH (unwired): impressive, and connected to nothing the decision path reads.
+    OP->>CLI: (no CLI exists - no non-test caller of create_draft/transition/unfreeze in src/ or scripts/)
+    CLI->>PS: create_draft(policy)
+    PS->>PS: draft -> shadow -> canary -> live -> review-due -> expired<br/>automatic clock transitions via tick(); content freeze on live; no expired->live;<br/>watchdog freeze/unfreeze (unfreeze needs 2 attestors)
+    AR->>PS: sign-off matrix: 2 DISTINCT attestors + preview hash for shadow->canary, canary->live;<br/>attestors distinct from the author. Ed25519 keypairs in HMAC-sealed registry<br/>(SENTINEL_ATTESTOR_ROOT_KEY). Signatures bind (policy_id, version, content_hash,<br/>from_state, to_state, decided_at); 7-day max age / 5-min future tolerance.<br/>Single-operator one-way-latch revocation; quarantine_revoked freeze-sweep.
+    PS->>EL: ceremony events (hash-chained ceremony log)
+    Note over PS,D8: PolicyStore is NEVER instantiated outside tests and the module itself.<br/>The attestation's content-hash binding - the replay-gap closure Tripwire identified -<br/>binds an object the decision path NEVER consults. The ONLY production touchpoint<br/>is D8's READ of the policy-state JSON FILE (provenance unwired).
+    D8->>D8: fresh-read policy-state JSON on EVERY suppress verdict (never a boot cache);<br/>frozen/expired/unreadable -> downgrade to passthrough ("policy_blocked:<why>" / "policy_state_unreadable")
+    Note over D8: CURRENT missing-file semantics: (True, "policy_gate_not_configured") - FAIL-OPEN.<br/>One stderr warning, then the triple lock stands alone and suppression is allowed.<br/>The "watchdog never set up" state is precisely the state a rushed first deployment ships in -<br/>and the state in which suppression is LEAST supervised.
+    end
+
+    rect rgb(235, 245, 235)
+    Note over OP,EL: REVISED - P1 (deterministic-gate.md section 3 P1, TYPE 1; BUILD GATED on Q3)<br/>Bind the kernel's numbers to the attested lifecycle. One of two honest options; the diagram shows (a).
+    OP->>CLI: sentinel policy create-draft --thresholds thresholds.json<br/>(the missing operator entry point - execution-doctrine: a 10-line ceremony beats the unbuilt one)
+    CLI->>PS: create_draft(content) -> attestations (2 distinct attestors) -> transitions -> LIVE
+    PS->>PS: PolicyVersion.content becomes the CANONICAL thresholds.json (+ allowlist generation)
+    CL->>PS: ConfigLoader checks: is this generation's content-hash covered<br/>by a LIVE/REVIEW_DUE attested version?
+    alt covered
+        CL->>K: Thresholds (suppress reachable - earned, attested)
+    else NOT covered (unattested edit)
+        Note over CL,K: mismatch fails TOWARD PAGING, never suppress.<br/>A test mutating thresholds.json without attestation => suppress unreachable (gate pages).
+        CL->>K: refuse generation -> gate pages
+    end
+    D8->>D8: missing-file semantics flipped to FAIL-CLOSED: (False, "policy_gate_not_configured")<br/>once the store is initializable - the "watchdog never set up" state must page, not suppress unsupervised.
+    Note over OP,EL: Fallback (b), if Aditya rejects (a): ADR stating thresholds.json changes require<br/>the same 2-attestor sign-off via PR (reviewer-side bar), with B3 expiry/freeze applying.
+    end

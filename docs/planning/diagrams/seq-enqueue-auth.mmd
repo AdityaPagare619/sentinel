@@ -1,0 +1,72 @@
+%% scope: /v2/enqueue HMAC auth. CURRENT: asymmetric trust - /webhook/generic is HMAC-gated (fail-closed),
+%%         /v2/enqueue TRIGGERS carry no auth check at all (M-1). REVISED (R-1, Q2-gated): /v2/enqueue gets
+%%         the same ADR-005 HMAC before handle_pd.
+%% author-chief: Vault (security)
+%% reviewer-chief: Oracle (testing — owns the auth matrix in tests/test_signature_auth.py)
+%% grounding: receiver.md sections 1.1 (ingress route table), 1.2 (ADR-005: receiver.py:52-78, :101-137;
+%%            _webhook_sig_failure_reason :121-162; startup gates :1176-1183), 1.3 (resolve-claim wiring :267-284),
+%%            sections 2 M-1 (no auth on /v2/enqueue triggers, :652 vs :655), M-7 (replay window :113-117),
+%%            section 3 R-1 (authenticate /v2/enqueue, TYPE 1), R-5 (seen-signature replay cache);
+%%            PIPELINE-REVISION.md section 2.2 C1 (post-revision /v2/enqueue carries the same HMAC scheme)
+%% date: 2026-10-05
+%% review-status: REVIEWED. 1 dispute resolved by disagree-and-commit (see README.md dispute D-7) -
+%%            the hardest-fought arrow of the session.
+
+sequenceDiagram
+    participant S as Sender
+    participant R as Receiver<br/>(SentinelHandler)
+
+    rect rgb(255, 235, 235)
+    Note over S,R: CURRENT - ASYMMETRIC TRUST (receiver.md M-1, SEVERE).<br/>The module docstring advertises the webhook-auth contract as if it covered ingress;<br/>it covers ONE of two alert routes.
+
+    Note over S,R: ROUTE 1: POST /webhook/generic - HMAC-gated, fail-closed [receiver.py:655, :803]
+    S->>R: POST /webhook/generic + X-Sentinel-Timestamp + X-Sentinel-Signature: sha256=<hex>
+    R->>R: _webhook_sig_failure_reason(secret, onboarding, headers, body) [receiver.py:121-162]<br/>hex = HMAC-SHA256(secret, "<timestamp>.<raw body>"); |now - ts| <= 300s; hmac.compare_digest<br/>refuses (403) on: empty secret, absent/malformed signature or timestamp,<br/>stale/future-skewed timestamp, bad MAC, legacy timestamp-less signatures.<br/>Startup refuses (SystemExit) on empty secret and on secrets < 16 chars [receiver.py:1176-1183].
+    alt check passes
+        R->>R: Pipeline.handle_generic -> triage -> page-or-suppress
+        R-->>S: 200
+    else check fails AND SENTINEL_WEBHOOK_ONBOARDING=1
+        Note over R: Onboarding mode fails open LOUDLY: CRITICAL boot warning, per-request WARNING,<br/>webhook_auth_bypassed metric, webhook_auth_fail_open=true on /healthz.
+        R->>R: accept, loudly
+        R-->>S: 200
+    else check fails (production)
+        R-->>S: 403 (fail-closed). Nothing forwarded.
+    end
+
+    Note over S,R: ROUTE 2: POST /v2/enqueue - TRIGGERS carry NO auth check [receiver.py:652]
+    S->>R: POST /v2/enqueue {trigger: critical, dedup_key, summary...} - UNSIGNED
+    Note over R: _handle_alert_post calls _signature_ok ONLY for /webhook/generic.<br/>The /v2/enqueue branch goes straight to handle_pd. Headers ride along SOLELY<br/>so resolve/ack CLAIMS can authenticate. There is NO auth gate on this arrow.<br/>Any host with TCP reachability can inject arbitrary triggers with arbitrary<br/>severity, dedup keys, summaries. The only defense is the default --bind 127.0.0.1 -<br/>a network-layer hope, not a trust boundary.
+    R->>R: Pipeline.handle_pd(body, headers) -> triage -> page-or-suppress
+    R-->>S: 200 (fail-open; unparseable -> forward raw bytes to PD, 200)
+
+    Note over S,R: ROUTE 2b: resolve/ack CLAIMS on /v2/enqueue - the silence direction is fail-closed in EVERY mode
+    S->>R: POST /v2/enqueue {event_action: resolve, dedup_key} + HMAC headers
+    R->>R: _webhook_sig_failure_reason(secret, False /* onboarding NEVER applies */, headers, body)<br/>[receiver.py:266-284, :302-355 - D10 wiring]
+    alt signed claim, known open episode
+        R->>R: resolve_episode(fp, reason="verified_resolve") - one of only two legal closes<br/>(operator_resolve; silence NEVER closes)
+        R->>R: relay claim to PD unchanged, untriaged
+        R-->>S: 200
+    else signed claim, unknown/already-closed
+        R->>R: idempotent no-op (resolve_noop)
+        R-->>S: 200
+    else unsigned / bad MAC
+        Note over R: An unsigned "resolve" is the false-silence attack (SECURITY.md T1):<br/>refused the close in every mode, including onboarding and secretless startup.<br/>The relay below still happens unchanged - the PD contract is untouched.
+        R-->>S: 200 (relay only; episode NOT closed; metric resolve_auth_refused)
+    end
+    end
+
+    rect rgb(235, 245, 235)
+    Note over S,R: REVISED - R-1 (receiver.md section 3 R-1, TYPE 1 for senders; BUILD GATED on Q2).<br/>Apply _webhook_sig_failure_reason in the /v2/enqueue branch BEFORE handle_pd -<br/>reusing the existing pure function, so both routes share ONE scheme.
+    S->>R: POST /v2/enqueue + X-Sentinel-Timestamp + X-Sentinel-Signature
+    alt valid signature
+        R->>R: Pipeline.handle_pd -> triage
+        R-->>S: 200
+    else bad/absent/stale signature
+        R-->>S: 403 (fail-closed). Nothing forwarded, nothing triaged.
+    else SENTINEL_WEBHOOK_ONBOARDING=1 (sender cutover window)
+        Note over R: Migration path: onboarding accepts unsigned LOUDLY during sender cutover;<br/>the resolve-claim path already proves senders can carry the headers.
+        R->>R: accept, loudly (metric + healthz flag + WARNING)
+        R-->>S: 200
+    end
+    Note over S,R: Residual (acknowledged, R-5 mitigates): 5-minute replay window without nonces<br/>(receiver.py:113-117 - "cannot tell a replay from a genuine resend inside the window").<br/>Bounded seen-signature cache (timestamp, signature) at ingress turns replays into 403/409s;<br/>nonces (jti) are the v1.1 contract option requiring sender cooperation.
+    end

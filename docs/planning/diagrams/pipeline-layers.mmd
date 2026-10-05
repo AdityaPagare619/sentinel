@@ -1,0 +1,52 @@
+%% scope: Revised pipeline layering L1..L7 and the C1-C7 inter-layer contracts
+%%         (what crosses each boundary, what NEVER crosses). From PIPELINE-REVISION.md section 2.
+%% author-chief: Forge (architecture)
+%% reviewer-chief: Pager (SRE — contract consumer on the paging path)
+%% grounding: PIPELINE-REVISION.md sections 2.1 (layers), 2.2 (C1-C7), 2.3 (ports), 2.4 (failure isolation);
+%%            correlator.md P8 (label contract); deterministic-gate.md P2/P4/P6;
+%%            forwarder-byok.md sections 1.1, 2.1, 2.5; event-log-audit.md P5; platform-api.md P0-2/P1-5
+%% date: 2026-10-05
+%% review-status: REVIEWED. 1 dispute resolved by disagree-and-commit (see README.md dispute D-1).
+
+flowchart TB
+    subgraph LAYERS["Revised pipeline: ingest -> normalize -> decide -> act -> observe (+ serve)"]
+        direction TB
+        L1["L1 INGEST<br/>accept vendor webhooks; authenticate; admission-control; assign the trace ID<br/><i>src/sentinel/receiver.py (routes, auth, semaphore)</i>"]
+        L2["L2 NORMALIZE<br/>anti-corruption: vendor payload -> canonical Alert<br/>raw bytes and vendor identity STOP here<br/><i>new as explicit stage; today folded into receiver.py _normalize_*</i>"]
+        L3["L3 DECIDE-1 correlator<br/>deterministic pre-Jev triage: fingerprint, dedup, episodes, storm<br/>'never pay Jev for deterministic work'<br/><i>src/sentinel/correlator.py</i>"]
+        L4["L4 DECIDE-2 gate<br/>policy kernel + instruction firewall + stepped fail-open ladder + Jev race<br/><i>src/sentinel/gate.py, race.py, failopen.py, firewall.py</i>"]
+        L5["L5 ACT<br/>durable delivery: outbox -> PagerDuty via BYOK keys, retries, secondary channel<br/><i>src/sentinel/forwarder.py, pd_sender.py, spill.py</i>"]
+        L6["L6 OBSERVE<br/>hash-chained event log, metrics, traces, shadow pipeline<br/>a stage, not an afterthought<br/><i>src/sentinel/eventlog.py, checkpoint.py, (new) metrics</i>"]
+        L7["L7 SERVE<br/>read-only platform API + Prism UI console (+ BYOK integrations surface)<br/><i>platform/server/, platform/ui/</i>"]
+    end
+
+    L1 -->|"C1: RawInbound{route, headers, body_bytes, received_at, request_id, auth_outcome}<br/>auth_outcome = ADR-005 pass/fail + reason code, attached here<br/>NEVER: unauthenticated bytes reach triage; bodies over the route cap (512 KiB on the PD-mirror route)"| L2
+    L2 -->|"C2: canonical Alert - and ONLY the canonical shape<br/>NEVER: Alert.raw (full vendor payload); Alert.source (vendor identity);<br/>vendor DTOs; unvalidated label fields<br/>(the edge translates; the decision core never sees foreign shapes)"| L3
+    L3 -->|"C3: TriageResult{kind, fingerprint, episode_ref, prior_disposition?}<br/>kind is a TYPED enum: new / duplicate / change_window / storm_fold / reopened<br/>(not a string; revision types the structural short-circuit)"| L4
+    L4 -->|"C4: Disposition{action: Action, reason: ReasonCode, evidence_refs}<br/>stringly-typed vocabulary (~150 bare literals) becomes a machine-checkable enum<br/>with explicit versioned wire serialization<br/>NEVER: policy re-interpretation - ACT executes the disposition, it does not re-decide it"| L5
+    L4 -->|"C5: DecisionRecord{trace_id, stage_latencies{normalize, correlate, gate_race, decide, forward}}<br/>one trace ID born at L1, carried through every hop, on every log line<br/>and in the hash-chained event body (unified telemetry)"| L6
+    L5 -->|"C6: ForwardReceipt{decision_id, attempt_no, wire_sha256, outcome}<br/>written IN THE SAME TRANSACTION as the outbox scheduler update (I2):<br/>the event log and the work queue can never disagree<br/>simulated:true propagates - a simulated page is NEVER recorded as failure"| L6
+    L6 -->|"C7: versioned read contract under /api/v1<br/>old unversioned paths = deprecated aliases with Deprecation (RFC 9745) + Sunset (RFC 8594) headers<br/>GET /api/v1/audit/chain serves the platform-sealed chain<br/>/api/v1/integrations/* write surface documented in openapi.yaml for the first time<br/>additive inside a version; new version only for true breaks"| L7
+
+    subgraph PORTS["Decision seams: ports, not imports (section 2.3)"]
+        P["gate's seams declared as protocols owned by the gate (ports.py):<br/>Corroborator | FreshnessMonitor | PolicyGate | JevClient<br/>constructor-injected; today's constructors stay as default adapters<br/>hexagonal test: run core logic with zero infrastructure"]
+    end
+    P -.-> L4
+
+    subgraph ISOLATION["Failure isolation between layers (Envoy transfer, section 2.4)"]
+        direction LR
+        B1["Jev circuit breaker (L4 -> judge):<br/>opens on N consecutive budget-busts or latency/error drift;<br/>while open: fail-open with ZERO vendor calls;<br/>half-open probing before close"]
+        B2["Per-sender bulkheads at L1:<br/>token-bucket per source IP / routing key<br/>ahead of the 64-slot semaphore"]
+        B3["Cost circuit breaker on the judge path:<br/>warn -> throttle -> stop on daily/weekly Jev spend"]
+        B4["Degraded-judge rung 1:<br/>exact-cache on input_sha256, tighter budget inside remaining 2700 ms<br/>never allowed to suppress uncorroborated"]
+    end
+    ISOLATION -.-> L1
+    ISOLATION -.-> L4
+
+    subgraph XRULES["Cross-cutting rules (apply at EVERY boundary)"]
+        direction LR
+        X1["Idempotency keys on mutating writes:<br/>PD dedup_key pinned per outbox row, never re-derived;<br/>Idempotency-Key on POST /api/v1/integrations/test-page"]
+        X2["Zero data-model leakage:<br/>opaque cursors replace SQLite rowids;<br/>filters stop reaching into engine JSON paths"]
+        X3["SSOT per entity:<br/>the event log owns decisions;<br/>platform tier stays read-only (mode=ro, grep-guarded);<br/>no layer reads another's database"]
+        X4["Postel at the edge:<br/>strict canonical form on emit,<br/>resilient parsing on ingest - with the liberality TESTED<br/>(unknown fields, Unicode, extra keys), not merely claimed"]
+    end
