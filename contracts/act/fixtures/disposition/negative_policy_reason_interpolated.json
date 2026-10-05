@@ -1,0 +1,1 @@
+{"contract":"disposition","contract_version":"v0.1","action":"suppress","reason_code":"policy_block","reason_detail":{"policy_reason":"error:TimeoutError|leg1|leg2"},"evidence_refs":[],"_note":"Tripwire B2 regression: interpolated data in policy_reason must be rejected"}

@@ -1,0 +1,1 @@
+{"_note":"NEGATIVE fixture: the old stringly-typed shape. MUST FAIL validation — reason_code carries interpolated data and is not in the enum. Kept as the Tripwire-bait regression: if this ever validates, the contract has silently widened.","action":"page_now","contract":"disposition","contract_version":"v0.1","evidence_refs":[],"reason_code":"error:TimeoutError"}

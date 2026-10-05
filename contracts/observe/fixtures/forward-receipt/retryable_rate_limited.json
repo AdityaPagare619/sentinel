@@ -1,0 +1,1 @@
+{"attempt_no":2,"channel":"outbox","contract":"forward-receipt","contract_version":"v0.1","decision_id":"413","error_class":"rate_limited","outcome":"retryable","simulated":false,"wire_sha256":"fcde2b2edba56bf408601fb721fe9b5c338d10bfc2d72619334d64a2425cc787"}

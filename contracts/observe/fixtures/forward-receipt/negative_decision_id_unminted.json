@@ -1,0 +1,1 @@
+{"contract":"forward-receipt","contract_version":"v0.1","decision_id":"dec-2026-10-05-7f3a91","attempt_no":3,"channel":"outbox","wire_sha256":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9","outcome":"accepted","simulated":false,"_note":"Tripwire B5 regression: unminted decision_id must be rejected (decimal event-log sequence only)"}

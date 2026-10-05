@@ -1,0 +1,1 @@
+{"contract":"forward-receipt","contract_version":"v0.1","decision_id":"415","attempt_no":1,"channel":"direct-degraded","wire_sha256":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9","outcome":"accepted","simulated":false,"_note":"Tripwire B3 regression: degraded receipt without spill_id must be rejected"}
