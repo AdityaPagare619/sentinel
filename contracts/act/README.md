@@ -90,6 +90,24 @@ Type-1 ruling).
    L5 must fail the receipt to dead-letter with `error_class:
    "unknown_reason_code"` rather than guess (fail-open ladder decides the
    paging posture, not silent acceptance).
+6. **Secret material** (Vault never-crosses rule, attested 2026-10-05 —
+   see `docs/decisions/2026-10-05-nevercrosses-c4-c6.md` for the
+   field-by-field audit). No Disposition field can carry key material: the
+   only key-adjacent shape is `routing_key_ref` — a vault-path reference
+   (`secret:pd/routing_key`, `secret:pd/control_routing_key`; eventlog.py,
+   forwarder.py) resolved env-side at send time, never the key value.
+   `reason_code`/`reason_detail`/`evidence_refs` carry snake_case codes,
+   detector names, truncated alert-field snippets (firewall.py evidence is
+   80-char truncations of screened alert fields — title/service/check/
+   labels — which never contain the routing key; ingress strips it at the
+   edge, receiver.py:485), hashes, and URIs — no field takes raw secret
+   material. *Mechanism:* (a) schema shape (closed enums, patterns, no
+   key-bearing field exists to fill); (b) producers MUST NOT emit raw keys
+   or tokens into free-text fields (`detail`, `evidence`, `evidence_refs`) —
+   failure channels run through `sanitize_error` (integrations.py:259);
+   (c) negative structural guard
+   `tests/test_nevercrosses_key_hygiene.py::test_no_c4_c6_fixture_carries_bare_routing_key`
+   fails the build if any C4/C6 fixture grows a bare `routing_key` field.
 
 ## 4. Version / compatibility
 

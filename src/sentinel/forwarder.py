@@ -60,7 +60,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .eventlog import EventLog, EventLogError, utcnow_iso
-from .integrations import resolve_paging_key, simulated_paging, sanitize_error
+from .integrations import (resolve_paging_key, paging_key_source,
+                           simulated_paging, sanitize_error)
 from .pd_sender import (
     DedupKeyInvalid,
     PagerDutyClient,
@@ -758,7 +759,10 @@ class DurableForwarder:
         # BYOK simulated mode: absorb even the standby path — a degraded
         # page must still be honestly labeled.
         if simulated_paging():
-            _k, _src = resolve_paging_key()
+            # Source only, never the value: the simulated path has no
+            # business resolving a key (C6 contract: "never resolves a
+            # routing key"; Vault never-crosses rule).
+            _src = paging_key_source()
             print(f"[sentinel] SIMULATED PAGE action=degraded-page "
                   f"dedup={dedup_key} key_source={_src} reason={reason} "
                   f"(simulated paging is ON — nothing was sent to PagerDuty)",
@@ -1039,7 +1043,9 @@ class Forwarder:
         The record carries key_source (safe) — never the key. Callers and
         the UI must render simulated pages as distinct from real ones.
         """
-        _key, key_source = self._resolve_key()
+        # Source only, never the value: the simulated path never resolves a
+        # key (C6 contract; Vault never-crosses rule).
+        key_source = paging_key_source()
         self.metrics["simulated"] = self.metrics.get("simulated", 0) + 1
         print(f"[sentinel] SIMULATED PAGE action={action} alert={alert_id} "
               f"dedup={dedup_key} key_source={key_source} "
