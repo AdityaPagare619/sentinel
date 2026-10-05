@@ -32,7 +32,10 @@ button { font: inherit; color: inherit; }
   position: sticky; top: 0; z-index: 50;
 }
 .brand { font-family: var(--font-mono); font-weight: 700; letter-spacing: 3px; font-size: var(--fs-3); }
-.nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; }
+.nav { display: flex; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+/* min-width:0 is the fix — flex items default to min-width:auto and refuse to
+ * shrink below content width, so at ~1280px the tabs overflowed into the kill
+ * pill instead of scrolling. topbar-right never shrinks. */
 .nav a {
   padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
   color: var(--tx-2); font-family: var(--font-mono); font-size: var(--fs-2);
@@ -40,7 +43,7 @@ button { font: inherit; color: inherit; }
 }
 .nav a:hover { background: var(--bg-2); color: var(--tx-1); text-decoration: none; }
 .nav a.on { background: var(--bg-3); color: var(--tx-1); font-weight: 700; }
-.topbar-right { display: flex; align-items: center; gap: var(--sp-2); }
+.topbar-right { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
 .kill-chip {
   font-family: var(--font-mono); font-size: var(--fs-2); font-weight: 700;
   padding: var(--sp-1) var(--sp-3); border-radius: 20px; cursor: pointer;
@@ -87,7 +90,10 @@ button { font: inherit; color: inherit; }
   padding: var(--sp-4); margin-bottom: var(--sp-3);
   border-left: 3px solid var(--line-2);
 }
-.page-card.sev-p1_critical { border-left-color: var(--sev-1); }
+.page-card.sev-p1_critical { border-left: 4px solid var(--sev-1); }
+/* A1–A12 anti-fatigue: the card body stays on the surface color. Red is the
+ * SEV chip + the left accent only — thirty full-bleed red cards is the
+ * fatigue vector. The "need a human" signal survives; the shouting doesn't. */
 .page-card.sev-p2_high { border-left-color: var(--sev-2); }
 .page-card.sev-p3_medium { border-left-color: var(--sev-3); }
 .page-card .p-top { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
@@ -106,10 +112,14 @@ button { font: inherit; color: inherit; }
   font-family: var(--font-mono); font-size: var(--fs-1); font-weight: 700;
   padding: 2px var(--sp-2); border-radius: var(--radius-sm); letter-spacing: 1px;
 }
-.sev-p1_critical { background: var(--st-page); color: var(--ink-on-dark); }
-.sev-p2_high { background: var(--sev2-bg); color: var(--sev-2); }
-.sev-p3_medium { background: var(--sev3-bg); color: var(--sev-3); }
-.sev-p4_low, .sev-known_noise, .sev-cannot_determine { background: var(--bg-3); color: var(--tx-2); }
+/* Severity chips: the .sev-* background rules are scoped to .sev-chip ONLY.
+ * They must never paint a whole card — page-card articles carry sev-* classes
+ * for the border-left accent above, and an unscoped rule turned every SEV1
+ * card into a full-bleed red block (fixed 2026-10-06). */
+.sev-chip.sev-p1_critical { background: var(--st-page); color: var(--ink-on-dark); }
+.sev-chip.sev-p2_high { background: var(--sev2-bg); color: var(--sev-2); }
+.sev-chip.sev-p3_medium { background: var(--sev3-bg); color: var(--sev-3); }
+.sev-chip.sev-p4_low, .sev-chip.sev-known_noise, .sev-chip.sev-cannot_determine { background: var(--bg-3); color: var(--tx-2); }
 
 .disp-chip {
   font-family: var(--font-mono); font-size: var(--fs-1); font-weight: 700;
@@ -117,6 +127,11 @@ button { font: inherit; color: inherit; }
 }
 .disp-page { background: var(--st-page-dim); color: var(--st-page); border: 1px solid var(--st-page); }
 .disp-suppress { background: var(--bg-3); color: var(--st-suppress); border: 1px solid var(--line-2); }
+
+/* MACHINE'S CALL line: badge + confidence read as one unit — inline-flex with
+ * nowrap keeps "conf 0.86" from dangling onto a second line at 1280px. */
+.mc-line { display: inline-flex; align-items: center; gap: var(--sp-2); white-space: nowrap; }
+.mc-conf { color: var(--tx-2); }
 
 .btn {
   display: inline-block; padding: var(--sp-2) var(--sp-4); border-radius: var(--radius-sm);
@@ -126,6 +141,11 @@ button { font: inherit; color: inherit; }
 .btn:hover { background: var(--bg-3); }
 .btn.primary { background: var(--st-page); border-color: var(--st-page); color: var(--ink-on-dark); }
 .btn.primary:hover { filter: brightness(1.1); }
+/* Token discipline (color = state only): on SEV2/SEV3 cards the acknowledge
+ * action takes the card's severity color — a red button on an amber card is
+ * a state clash. Dark text on amber = 6.95:1. */
+.page-card.sev-p2_high .btn.primary { background: var(--sev-2); border-color: var(--sev-2); color: var(--bg-0); }
+.page-card.sev-p3_medium .btn.primary { background: var(--sev-3); border-color: var(--sev-3); color: var(--bg-0); }
 .btn.quiet { background: none; border-color: transparent; color: var(--tx-2); }
 .btn.quiet:hover { color: var(--tx-1); background: var(--bg-2); }
 .btn.small { padding: var(--sp-1) var(--sp-2); font-size: var(--fs-2); }

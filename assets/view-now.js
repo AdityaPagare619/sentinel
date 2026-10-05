@@ -44,8 +44,8 @@ function pageCard(p, ctx) {
       <div class="ev-block"><div class="ev-label">BLAST RADIUS</div><div class="ev-body"><strong>${esc(p.service)}</strong> · owner ${esc(p.owner)}</div></div>
       <div class="ev-block"><div class="ev-label">WHAT CHANGED</div><div class="ev-body">${p.changedRecently.length ? p.changedRecently.map(esc).join('<br>') : 'no recent changes on record'}</div></div>
       <div class="ev-block"><div class="ev-label">MACHINE'S CALL</div><div class="ev-body">${latestDec
-        ? `${dispChip(latestDec.disposition, latestDec.reasonCode)} <span class="mono">${esc(latestDec.reasonCode)}</span> · conf ${latestDec.confidence}`
-        : 'no decision yet — racing now'}</div></div>
+        ? `<span class="mc-line">${dispChip(latestDec.disposition, latestDec.reasonCode)}<span class="mono mc-conf">conf ${latestDec.confidence}</span></span>`
+        : '<span class="note">racing — no decision yet; the timer pages on uncertainty</span>'}</div></div>
     </div>
   </article>`;
 }
@@ -69,7 +69,7 @@ export async function renderNow(root, params, ctx) {
       <div class="sub">What the machine is doing, what needs you, and what it handled on its own — right now.</div>
     </div>
     ${pipe.storm ? `<div class="storm-banner">▲ STORM — ${pipe.storm.size} signals folding into one problem · rule correlator.storm_fold · <a href="#/proofs">see what's suppressed</a></div>` : ''}
-    ${pipe.health !== 'live' ? `<div class="degraded-banner">PIPELINE ${pipe.health.toUpperCase()} — lag ${Math.round(pipe.lagMs / 1000)}s. Screens may be stale; the gate pages on uncertainty. <span class="note">Freshness is a safety law — stale evidence never authorizes suppression.</span></div>` : ''}
+    ${pipe.health !== 'live' ? `<div class="degraded-banner" data-health-banner>PIPELINE <span data-health-word>${pipe.health.toUpperCase()}</span> — lag <span data-lag>${Math.round(pipe.lagMs / 1000)}s</span>. Screens may be stale; the gate pages on uncertainty. <span class="note">Freshness is a safety law — stale evidence never authorizes suppression.</span></div>` : `<div class="degraded-banner" data-health-banner hidden>PIPELINE <span data-health-word></span> — lag <span data-lag></span>. Screens may be stale; the gate pages on uncertainty. <span class="note">Freshness is a safety law — stale evidence never authorizes suppression.</span></div>`}
 
     <div class="section-label">OPEN PAGES — NEED A HUMAN (${pages.length})</div>
     ${pages.length ? pages.map((p) => pageCard(p, ctx)).join('') : `

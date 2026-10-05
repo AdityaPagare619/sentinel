@@ -45,7 +45,7 @@ function renderKill(root) {
       <div class="safety-card">
         <h3>Propagation proof</h3>
         <div class="big-state ok">&lt;5s</div>
-        <div class="note">Drill-verified: kill switch to forwarder halt, measured 2026-10-05, 7/7 PASS.
+        <div class="note">Last drill record: 2026-10-05 — kill switch to forwarder halt, 7/7 PASS.
         The claim is measured, not asserted.</div>
         <div class="contract-box"><strong>Drill record.</strong> ops/drills/2026-10-05-r10-kill-switch-drill.md —
         re-run independently on a fresh lab. If this proof goes stale, this card renders UNVERIFIED.</div>
@@ -151,7 +151,7 @@ function renderRace(root) {
 function renderDegraded(root) {
   const pipe = Store.pipeline();
   root.innerHTML += `
-    ${pipe.health !== 'live' ? `<div class="degraded-banner">Pipeline is ${pipe.health.toUpperCase()} — lag ${Math.round(pipe.lagMs / 1000)}s. The ladder below is the current truth.</div>` : ''}
+    ${pipe.health !== 'live' ? `<div class="degraded-banner" data-health-banner>Pipeline is <span data-health-word>${pipe.health.toUpperCase()}</span> — lag <span data-lag>${Math.round(pipe.lagMs / 1000)}s</span>. The ladder below is the current truth.</div>` : `<div class="degraded-banner" data-health-banner hidden>Pipeline is <span data-health-word></span> — lag <span data-lag></span>. The ladder below is the current truth.</div>`}
     <div class="safety-grid">
       <div class="safety-card">
         <h3>The fail-open ladder</h3>

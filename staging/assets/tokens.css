@@ -59,7 +59,7 @@
   --live-bg: #0e1f16;
   --live-line: #1d4632;
   --ink-on-dark: #ffffff;
-  --sev2-bg: #5a3a1c;
+  --sev2-bg: #3a2410;   /* darkened 2026-10-06: amber #e08a3e on this bg = 5.47:1 (was 3.83:1 on #5a3a1c) */
   --sev3-bg: #4a441c;
   --undo-bg: #1d2b1d;
   --storm-bg: #2b1a1a;

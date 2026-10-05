@@ -35,7 +35,7 @@ export async function renderAudit(root, params, ctx) {
       ${ordered.map((d) => `
         <div class="l-row">
           <span class="l-t">${fmtTime(d.ts)}</span>
-          <span>${dispChip(d.disposition, d.reasonCode)} <span class="mono">${esc(d.reasonCode)}</span>
+          <span>${dispChip(d.disposition, d.reasonCode)}
             <span class="note">· ${esc(d.service || '')} · conf ${d.confidence}</span>
             <span class="note" style="margin-left:8px">engine</span></span>
         </div>

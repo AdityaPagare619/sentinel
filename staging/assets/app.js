@@ -120,11 +120,33 @@ function paintPipeline() {
     : p.health === 'degraded' ? `◌ degraded · lag ${Math.round((p.lagMs || 0) / 1000)}s`
     : `○ stale · lag ${Math.round((p.lagMs || 0) / 1000)}s`;
   hc.className = 'health-chip mono ' + (p.health === 'live' ? 'ok' : p.health === 'degraded' ? 'warn' : 'bad');
-  // kill chip
+  // kill chip — the label names what it controls (opens the kill console)
   const kc = el.killChip;
   const engaged = p.killSwitch === 'ENGAGED';
   kc.textContent = engaged ? '◼ KILL ENGAGED' : '◻ kill armed';
   kc.className = 'kill-chip ' + (engaged ? 'engaged' : 'armed');
+  kc.setAttribute('aria-label', engaged
+    ? 'Kill switch: ENGAGED — paging halted. Opens the kill console.'
+    : 'Kill switch: armed — the gate is paging normally. Opens the kill console.');
+}
+
+/* ---------- health banner sync ----------
+ * The in-view degraded banners (NOW, SAFETY) render at view time, but the sim
+ * ticks health every 2.5s — without this, the banner never appears during a
+ * tick-driven degraded window. Sync toggles any [data-health-banner] in the
+ * current view and refreshes its health word + lag readout. */
+function syncHealthBanner() {
+  const p = Store.pipeline();
+  const live = p.health === 'live';
+  el.view.querySelectorAll('[data-health-banner]').forEach((b) => {
+    b.hidden = live;
+    if (!live) {
+      const w = b.querySelector('[data-health-word]');
+      if (w) w.textContent = p.health.toUpperCase();
+      const l = b.querySelector('[data-lag]');
+      if (l) l.textContent = `${Math.round((p.lagMs || 0) / 1000)}s`;
+    }
+  });
 }
 
 /* ---------- drawer ---------- */
@@ -154,7 +176,6 @@ function openDrawer(id) {
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
       <span class="sev-chip sev-${esc(d.severity)}">${esc(SEV_LABEL[d.severity] || d.severity)}</span>
       ${dispChip(d.disposition, d.reasonCode)}
-      <span class="mono" style="color:var(--tx-2)">${esc(d.reasonCode)}</span>
     </div>
     <h4>PROOF</h4>
     <dl class="kv">
@@ -280,7 +301,7 @@ function boot() {
   paintPipeline();
   // the pipeline strip is alive: re-paint on every pipeline event
   Store.on('pipeline', paintPipeline);
-  Store.on('health', paintPipeline);
+  Store.on('health', () => { paintPipeline(); syncHealthBanner(); });
   Store.on('killswitch', paintPipeline);
 
   window.addEventListener('hashchange', route);
