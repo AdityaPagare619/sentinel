@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "boolFlag": {
+      "additionalProperties": true,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "type": {
+          "const": "bool"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "listFlag": {
+      "additionalProperties": true,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "type": {
+          "const": "list"
+        },
+        "value": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://sentinel.local/contracts/flags.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Release-control surface (ops/devops-foundation.md \u00a72.1). Type 1: changing this schema is a contract change. Non-contract metadata keys (e.g. _comment, changed_by) are permitted alongside the contractual ones.",
+  "properties": {
+    "flags": {
+      "additionalProperties": false,
+      "properties": {
+        "canary_services": {
+          "$ref": "#/$defs/listFlag",
+          "description": "Non-empty = candidate policy applies only to these services. REJECTED by the loader until the R-15 dual-policy canary mechanism exists (fail-closed)."
+        },
+        "canary_severity_bands": {
+          "$ref": "#/$defs/listFlag",
+          "description": "Non-empty = candidate policy applies only to these inbound severity bands. REJECTED by the loader until the R-15 dual-policy canary mechanism exists (fail-closed)."
+        },
+        "global_kill_switch": {
+          "$ref": "#/$defs/boolFlag",
+          "description": "ON = the gate returns passthrough for every alert (instant flag-off). Turning OFF requires two named humans."
+        },
+        "shadow_mode": {
+          "$ref": "#/$defs/boolFlag",
+          "description": "ON = log the would-be disposition, always return passthrough. Mirrors SENTINEL_SHADOW."
+        },
+        "suppress_enabled": {
+          "$ref": "#/$defs/boolFlag",
+          "description": "OFF = suppress dispositions become passthrough (never silently queued)."
+        }
+      },
+      "required": [
+        "global_kill_switch",
+        "suppress_enabled",
+        "shadow_mode",
+        "canary_severity_bands",
+        "canary_services"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1,
+      "description": "Contract version. The loader and flagctl both require 1."
+    }
+  },
+  "required": [
+    "version",
+    "flags"
+  ],
+  "title": "flags.json \u2014 Sentinel feature-flag contract",
+  "type": "object"
+}

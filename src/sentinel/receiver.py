@@ -230,6 +230,11 @@ class Pipeline:
         """Atomically swap the live policy (post-validation only)."""
         self.gate.thresholds = policy.thresholds
         self.gate.allowlist = set(policy.allowlist)
+        # R-10: the flags generation swaps with the policy — a confirmed
+        # generation bump means the new flags are live on the gate
+        # (this closes the "flip confirmed but behavior unchanged"
+        # rusted-shut mode).
+        self.gate.flags = dict(policy.flags)
         self.policy = policy
 
     # ------------------------------------------------------------ entry points
@@ -1137,7 +1142,12 @@ def build_pipeline_from_env(policy=None,
                 freshness_monitor=freshness_monitor,
                 pinned_model=pinned_model,
                 legacy_allowlist=legacy_map,
-                legacy_window_ends_at=legacy_window_ends_at)
+                legacy_window_ends_at=legacy_window_ends_at,
+                # R-10: the validated flags generation drives the live
+                # gate's release axis (kill switch / suppress_enabled /
+                # shadow_mode). Swapped atomically by apply_policy on
+                # every validated reload.
+                flags=policy.flags)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),

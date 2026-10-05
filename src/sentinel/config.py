@@ -35,6 +35,28 @@ CONFIG_VERSION = 1
 LAST_GOOD_KEEP = 5
 SUPPRESS_CONF_MIN_FLOOR = 0.85  # ADR-022 governance floor, encoded in schema
 
+# R-10 (devops-foundation.md §2.1): the flags.json contract. Type 1 —
+# this schema is the contract; changing it is a contract change. It
+# mirrors scripts/ops/flagctl.py's FLAG_DEFS exactly (the writer and the
+# reader must agree or the flip procedure lies).
+FLAGS_VERSION = 1
+_FLAG_DEFS = {
+    "global_kill_switch": "bool",
+    "suppress_enabled": "bool",
+    "shadow_mode": "bool",
+    "canary_severity_bands": "list",
+    "canary_services": "list",
+}
+# Effective values when no flags are supplied (e.g. a Gate built without
+# the loader in tests): the previous behavior is the safe default.
+FLAG_DEFAULTS = {
+    "global_kill_switch": False,
+    "suppress_enabled": True,
+    "shadow_mode": False,
+    "canary_severity_bands": [],
+    "canary_services": [],
+}
+
 _THRESHOLD_FIELDS = (
     "suppress_p1_max",
     "suppress_conf_min",
@@ -63,14 +85,17 @@ class ConfigMissing(ConfigRejected):
 class PolicyConfig:
     """One validated, immutable policy generation."""
 
-    __slots__ = ("thresholds", "allowlist", "generation", "loaded_at",
-                 "source_sha256", "file_mtimes")
+    __slots__ = ("thresholds", "allowlist", "flags", "generation",
+                 "loaded_at", "source_sha256", "file_mtimes")
 
     def __init__(self, thresholds: Thresholds, allowlist: set[str],
-                 generation: int, loaded_at: float, source_sha256: str,
-                 file_mtimes: dict[str, float]):
+                 flags: dict, generation: int, loaded_at: float,
+                 source_sha256: str, file_mtimes: dict[str, float]):
         self.thresholds = thresholds
         self.allowlist = set(allowlist)
+        # R-10: the validated flags generation (flag name -> value).
+        # Immutable by convention: readers copy, never mutate.
+        self.flags = dict(flags)
         self.generation = generation
         self.loaded_at = loaded_at
         self.source_sha256 = source_sha256
@@ -90,6 +115,17 @@ class PolicyConfig:
                     dict(p) for p in t.counterfactual_presets],
             },
             "allowlist": sorted(self.allowlist),
+            # R-10: flags round-trip through the last-good chain like
+            # every other validated policy field, persisted in the
+            # flags.json shape so restore reuses the same validator.
+            "flags": {
+                "version": FLAGS_VERSION,
+                "flags": {
+                    name: {"value": self.flags.get(name,
+                                                   FLAG_DEFAULTS[name])}
+                    for name in _FLAG_DEFS
+                },
+            },
             "source_sha256": self.source_sha256,
         }
 
@@ -197,12 +233,13 @@ class ConfigLoader:
 
     # --------------------------------------------------------------- internals
 
-    def _policy_paths(self) -> tuple[str, str]:
+    def _policy_paths(self) -> tuple[str, str, str]:
         return (os.path.join(self.config_dir, "thresholds.json"),
-                os.path.join(self.config_dir, "allowlist.json"))
+                os.path.join(self.config_dir, "allowlist.json"),
+                os.path.join(self.config_dir, "flags.json"))
 
     def _load_and_validate(self, generation: int) -> PolicyConfig:
-        thresholds_path, allowlist_path = self._policy_paths()
+        thresholds_path, allowlist_path, flags_path = self._policy_paths()
         # Stage 1: parse.
         try:
             with open(thresholds_path, "r", encoding="utf-8") as fh:
@@ -226,15 +263,18 @@ class ConfigLoader:
         # Stage 2: schema validation.
         thresholds = _validate_thresholds(t_data, thresholds_path)
         allowlist = _validate_allowlist(a_data, allowlist_path)
+        flags = _validate_flags(_read_flags_file(flags_path), flags_path)
         # Stage 3: semantic validation.
         _semantic_check(thresholds)
+        _flags_semantic_check(flags, flags_path)
         # Stage 4: build the generation (the swap itself is just assigning
         # self.current after persistence — readers never see a torn policy).
         sha = hashlib.sha256(
-            json.dumps({"t": t_data, "a": sorted(allowlist)},
+            json.dumps({"t": t_data, "a": sorted(allowlist),
+                        "f": {k: flags[k] for k in sorted(flags)}},
                        sort_keys=True).encode("utf-8")).hexdigest()
         mtimes = {}
-        for path in (thresholds_path, allowlist_path):
+        for path in (thresholds_path, allowlist_path, flags_path):
             try:
                 mtimes[path] = os.path.getmtime(path)
             except OSError:
@@ -242,6 +282,7 @@ class ConfigLoader:
         return PolicyConfig(
             thresholds=thresholds,
             allowlist=allowlist,
+            flags=flags,
             generation=generation,
             loaded_at=time.time(),
             source_sha256=sha,
@@ -296,9 +337,20 @@ class ConfigLoader:
                     counterfactual_presets=validate_counterfactual_presets(
                         data["thresholds"].get("counterfactual_presets")))
                 _semantic_check(t)  # last-good must still satisfy governance
+                # R-10: flags restore through the last-good chain.
+                # Generations written before flags existed get the safe
+                # defaults (previous behavior); a corrupt flags entry
+                # fails this generation (the except below moves on).
+                raw_flags = data.get("flags")
+                if raw_flags is None:
+                    flags = dict(FLAG_DEFAULTS)
+                else:
+                    flags = _validate_flags(raw_flags, name)
+                    _flags_semantic_check(flags, name)
                 return PolicyConfig(
                     thresholds=t,
                     allowlist=set(data.get("allowlist", [])),
+                    flags=flags,
                     generation=int(data["generation"]),
                     loaded_at=float(data.get("loaded_at", 0.0)),
                     source_sha256=str(data.get("source_sha256", "")),
@@ -394,6 +446,89 @@ def _semantic_check(t: Thresholds) -> None:
         raise ConfigRejected(
             f"uncertain_conf_max={t.uncertain_conf_max} must not exceed "
             f"suppress_conf_min={t.suppress_conf_min} (incoherent policy table)")
+
+
+def _read_flags_file(path: str):
+    """Read flags.json. Missing => ConfigMissing (fail-closed): a kill
+    switch that silently doesn't exist is the rusted-shut failure mode,
+    so the loader refuses to run without it — like thresholds.json."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        raise ConfigMissing(
+            f"{path}: not found; refusing to run without a validated "
+            "flags generation (run scripts/ops/env-bootstrap.sh)")
+    except (OSError, ValueError) as exc:
+        raise ConfigRejected(f"{path}: unparseable ({exc})") from exc
+
+
+def _validate_flags(data, path: str) -> dict:
+    """Schema validation for flags.json (R-10). Mirrors flagctl.py's
+    FLAG_DEFS exactly — the writer and the reader must agree. Returns
+    {flag_name: value}."""
+    if not isinstance(data, dict):
+        raise ConfigRejected(
+            f"{path}: top-level JSON must be an object, got "
+            f"{type(data).__name__}")
+    # flagctl writes metadata keys alongside the contract ("_comment",
+    # "changed_by", ...); only "version" and "flags" are contractual.
+    if data.get("version") != FLAGS_VERSION:
+        raise ConfigRejected(
+            f"{path}: version must be {FLAGS_VERSION}, got "
+            f"{data.get('version')!r}")
+    flags = data.get("flags")
+    if not isinstance(flags, dict):
+        raise ConfigRejected(
+            f"{path}: 'flags' must be an object, got "
+            f"{type(flags).__name__}")
+    unknown = sorted(set(flags) - set(_FLAG_DEFS))
+    if unknown:
+        raise ConfigRejected(
+            f"{path}: unknown flags {unknown} (typo guard: only "
+            f"{sorted(_FLAG_DEFS)} are allowed)")
+    missing = sorted(set(_FLAG_DEFS) - set(flags))
+    if missing:
+        raise ConfigRejected(
+            f"{path}: missing flags {missing} (all five flags are "
+            "required; flagctl.py writes them)")
+    values: dict = {}
+    for name, want in _FLAG_DEFS.items():
+        spec = flags[name]
+        if not isinstance(spec, dict) or "value" not in spec:
+            raise ConfigRejected(
+                f"{path}: flag {name!r} must be an object with a 'value'")
+        value = spec["value"]
+        if want == "bool" and not isinstance(value, bool):
+            raise ConfigRejected(
+                f"{path}: flag {name!r} must be a bool, got "
+                f"{type(value).__name__}")
+        if want == "list" and not isinstance(value, list):
+            raise ConfigRejected(
+                f"{path}: flag {name!r} must be a list, got "
+                f"{type(value).__name__}")
+        values[name] = value
+    return values
+
+
+def _flags_semantic_check(flags: dict, path: str) -> None:
+    """Governance checks the schema cannot express.
+
+    A non-empty canary list is rejected: no dual-policy ("candidate
+    policy") mechanism exists in the gate, so arming a canary the kernel
+    cannot honor would repeat the R-1 finding (a governed object the
+    kernel never reads). The rejection names the follow-up (R-15,
+    Phase 4) — fail-closed, loud, and honest instead of
+    validate-and-ignore theater.
+    """
+    for name in ("canary_severity_bands", "canary_services"):
+        if flags.get(name):
+            raise ConfigRejected(
+                f"{path}: flag {name!r} is non-empty "
+                f"({flags[name]!r}) but the gate has no dual-policy "
+                "canary mechanism yet (R-15, Phase 4) — refusing to arm "
+                "a canary the kernel cannot honor. Clear the list and "
+                "reload.")
 
 
 def _validate_allowlist(data, path: str) -> set[str]:

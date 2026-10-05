@@ -72,6 +72,7 @@ from . import firewall
 from . import corroboration
 from . import race
 from .client import JevError
+from .config import FLAG_DEFAULTS
 from .correlator import legacy_fingerprint_of
 from .counterfactual import (CounterfactualInputs,
                              build_counterfactual_receipt)
@@ -329,7 +330,15 @@ class Gate:
                  # compiled-in default severity routing.
                  failopen_config: FailopenConfig | None = None,
                  correlator=None,
-                 failover_policy: FailoverPolicy | None = None):
+                 failover_policy: FailoverPolicy | None = None,
+                 # R-10 (ops/devops-foundation.md §2.1): feature flags.
+                 # flags: {flag_name: value} from the validated flags.json
+                 # generation (PolicyConfig.flags). None => the safe
+                 # defaults (previous behavior: kill off, suppress on,
+                 # shadow off, canary empty). Replaced wholesale on every
+                 # validated reload (Pipeline.apply_policy) — readers never
+                 # see a torn flags generation.
+                 flags: dict | None = None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
@@ -440,6 +449,21 @@ class Gate:
             zscore_fn=(correlator.fingerprint_level_shift_zscore
                        if correlator is not None else None),
             failover_policy=failover_policy)
+        # R-10: the live flags generation. Plain attribute (not a
+        # property) so Pipeline.apply_policy can swap it atomically with
+        # the thresholds/allowlist on every validated reload.
+        self.flags: dict = dict(flags) if flags else {}
+
+    def _flag(self, name: str):
+        """Effective value of a feature flag (R-10).
+
+        The validated generation wins; the safe default (previous
+        behavior) covers Gates built without the loader. Never raises.
+        """
+        try:
+            return self.flags.get(name, FLAG_DEFAULTS[name])
+        except Exception:
+            return FLAG_DEFAULTS[name]
 
     # --------------------------------- ADR-017/D4 legacy-fingerprint window
 
@@ -555,7 +579,10 @@ class Gate:
                        "q_team": None, "q_disposition": None}
             self._note("unhealthy_error", "passthrough")
 
-        if self.shadow:
+        # R-10: shadow_mode flag mirrors Gate(shadow=True) — the would-be
+        # disposition is audited, passthrough is returned. The flag and
+        # the constructor kwarg OR together; either one shadows.
+        if self.shadow or self._flag("shadow_mode"):
             would_be = disp
             audit_disp = Disposition(
                 action=would_be.action, reason="shadow", team=would_be.team,
@@ -719,7 +746,12 @@ class Gate:
         kind = getattr(correlation, "kind", None)
         if kind == "duplicate" and correlation.prior is not None:
             prior = correlation.prior
-            return (Disposition(action=prior.action, reason="dedup",
+            action, reason = prior.action, "dedup"
+            # R-10: a dedup-inherited suppress is still a suppress
+            # disposition, so suppress_enabled=false covers it too.
+            if action == "suppress" and not self._flag("suppress_enabled"):
+                action, reason = "passthrough", "suppress_disabled"
+            return (Disposition(action=action, reason=reason,
                                 team=prior.team, confidence=prior.confidence,
                                 latency_ms=0.0),
                     _empty_answers())
@@ -912,28 +944,59 @@ class Gate:
         corro = None
         used_inputs = None
         if action == "suppress":
-            # ADR-022/D8 enforcement: a frozen or expired suppression
-            # policy cannot suppress, no matter what the triple lock says.
-            allowed, why = self._policy_allows_suppress()
-            if not allowed:
-                action, reason = "passthrough", f"policy_blocked:{why}"
+            # R-10: suppress_enabled=false turns the suppression feature
+            # off NOW — every suppress disposition becomes passthrough
+            # (never silently downgraded to a queue). Checked before the
+            # D8/corrobation legs: there is nothing to corroborate for a
+            # passthrough.
+            if not self._flag("suppress_enabled"):
+                action, reason = "passthrough", "suppress_disabled"
             else:
-                corro, used_inputs = self._corroboration_leg(
-                    alert, jev_model=jev_model, drop_evidence=drop_evidence,
-                    corro_inputs=corro_inputs)
-                verdict.lock_evaluation["corroboration"] = \
-                    corroboration.corroboration_leg_evaluation(corro)[
-                        "corroboration"]
-                if not corro.passed:
-                    # ADR-019/D5 — un-corroborated ⇒ page_now with the
-                    # explicit "uncorroborated" reason (Law 7: uncertainty
-                    # pages) — never silent suppress.
-                    action, reason = "page_now", "uncorroborated"
+                # ADR-022/D8 enforcement: a frozen or expired suppression
+                # policy cannot suppress, no matter what the triple lock says.
+                allowed, why = self._policy_allows_suppress()
+                if not allowed:
+                    action, reason = "passthrough", f"policy_blocked:{why}"
+                else:
+                    corro, used_inputs = self._corroboration_leg(
+                        alert, jev_model=jev_model, drop_evidence=drop_evidence,
+                        corro_inputs=corro_inputs)
+                    verdict.lock_evaluation["corroboration"] = \
+                        corroboration.corroboration_leg_evaluation(corro)[
+                            "corroboration"]
+                    if not corro.passed:
+                        # ADR-019/D5 — un-corroborated ⇒ page_now with the
+                        # explicit "uncorroborated" reason (Law 7: uncertainty
+                        # pages) — never silent suppress.
+                        action, reason = "page_now", "uncorroborated"
         return action, reason, verdict, corro, used_inputs
 
     def _decide(self, alert, state, history, context, correlation):
+        t_decide = time.perf_counter()
         in_sha = input_sha256(state)
         budget_ms = self._runner.config.budget_ms
+
+        # S0 — R-10 kill switch: the andon cord for the suppression
+        # feature. The FIRST branch — before S1, the D6 firewall, the
+        # fail-open ladder, and the S2 race. The operator chose fail-open,
+        # so every alert returns passthrough: no Jev call, no race armed,
+        # no suppression possible. The audit row is still written by
+        # evaluate() (the audit invariant is unconditional). digest_storm
+        # is intentionally NOT covered here: it cannot suppress by
+        # construction, and the kill switch defeats suppression.
+        if self._flag("global_kill_switch"):
+            disp = Disposition(
+                action="passthrough", reason="kill_switch",
+                team=None, confidence=None,
+                latency_ms=(time.perf_counter() - t_decide) * 1000.0)
+            self._note("structural", disp.action)
+            self._emit(decision_made_payload(
+                alert=alert, input_sha256=in_sha,
+                disposition=disp.action,
+                budget_outcome=race.STRUCTURAL_PASSTHROUGH,
+                budget_ms=budget_ms, latency_ms=disp.latency_ms,
+                lock_evaluation=empty_lock_evaluation()))
+            return disp, _empty_answers()
 
         # S1 — structural bars: deterministic, pre-race, never pay Jev for
         # a decision already made.
