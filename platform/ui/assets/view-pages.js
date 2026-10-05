@@ -51,7 +51,7 @@ export async function renderPages(root, params, ctx) {
           </div>
           <div class="p-evidence">
             <div class="ev-block"><div class="ev-label">COST OF INACTION</div><div class="ev-body">${esc(p.cost || '—')}</div></div>
-            <div class="ev-block"><div class="ev-label">MACHINE'S CALL</div><div class="ev-body">${latest ? `${dispChip(latest.disposition, latest.reasonCode)} <span class="mono">${esc(latest.reasonCode)}</span>` : 'racing…'}</div></div>
+            <div class="ev-block"><div class="ev-label">MACHINE'S CALL</div><div class="ev-body">${latest ? dispChip(latest.disposition, latest.reasonCode) : '<span class="note">racing — no decision yet; the timer pages on uncertainty</span>'}</div></div>
             <div class="ev-block"><div class="ev-label">DECISIONS</div><div class="ev-body mono">${decs.length} on this problem</div></div>
           </div>
           <div data-tl="${esc(p.id)}" hidden></div>
@@ -87,8 +87,8 @@ function toggleTimeline(root, problemId) {
 
 function timelineRow(d) {
   return '<div class="l-row"><span class="l-t">' + new Date(d.ts).toLocaleTimeString() + '</span>' +
-    '<span>' + dispChip(d.disposition, d.reasonCode) + ' <span class="mono">' + esc(d.reasonCode) +
-    '</span> · conf ' + d.confidence + ' · <span class="note">engine</span></span></div>';
+    '<span><span class="mc-line">' + dispChip(d.disposition, d.reasonCode) + '<span class="mono mc-conf">conf ' + d.confidence + '</span></span>' +
+    ' · <span class="note">engine</span></span></div>';
 }
 
 function ackRow(p) {

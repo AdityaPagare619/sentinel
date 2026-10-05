@@ -25,7 +25,6 @@ function proofCard(d) {
     <div class="pr-top">
       <span class="sev-chip sev-${esc(d.severity)}">${esc(SEV_LABEL[d.severity] || d.severity)}</span>
       ${dispChip(d.disposition, d.reasonCode)}
-      <span class="mono" style="font-size:13px"><strong>${esc(d.reasonCode)}</strong></span>
       <span class="note">${esc(d.service)} · ${fmtAge(d.ts)} · conf ${d.confidence}</span>
     </div>
     <div class="proof-grid">
