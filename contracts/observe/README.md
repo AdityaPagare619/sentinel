@@ -1,187 +1,140 @@
-# C6 — L5 ACT → L6 OBSERVE: `ForwardReceipt` v0.1
+# C5 — L4 DECIDE → L6 OBSERVE (trace-ID envelope)
 
-**Contract file:** `forward-receipt.v0.1.json` (JSON Schema, draft-07 — the contract;
-this README documents it, it is not the contract).
-**Status:** DRAFT v0.1.
-**Consumer-owner:** L6 OBSERVE (event-log/audit side). Consumer owns the contract
-(OPERATING-RULES §1.1; principal-governance §2 unforgiving API design).
-**Source:** PIPELINE-REVISION.md §2.2/C6; `forwarder-byok.md` §2.5 (the
-simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
+**Contract:** `decision-record.v0.1.json` · **Version:** 0.1 · **Status:** DRAFT (prep, not frozen)
+**Consumer-owner:** L6 OBSERVE (Ledger lane — the event log owns the record)
+**Producer:** L4 DECIDE (gate)
+**12H-PLAN task:** evlog-1 · **Reviewers:** Ledger (event-log side) per OPERATING-RULES §1.6
 
-## 1. What crosses
+## What crosses
 
-`ForwardReceipt{contract, contract_version, decision_id, attempt_no, wire_sha256, outcome, simulated, channel?, error_class?}`
+`DecisionRecord{contract, envelope, body}` — one per `decision_made` write:
 
-- `decision_id` — the event-log sequence number of the `decision_made`
-  event being acted on, rendered as a decimal string (e.g. `"412"`).
-  MINT — defined normatively here, the single contract that defines it
-  (Tripwire B5): (a) outbox/secondary channels — L5 reads the outbox row's
-  `decision_seq` column (INTEGER NOT NULL, eventlog.py:282) and renders it
-  decimal; (b) direct-degraded channel — no outbox row exists, so L5 MUST
-  capture the decision's event-log sequence into the spill record (spill
-  field `decision_seq`) at send time, and the replay MUST copy it verbatim
-  into the receipt. `"−1"` means NO joinable decision: control-plane pages
-  (eventlog.py `_enqueue_control_plane_page`) and degraded sends whose
-  decision never durably sequenced (e.g. the commit-watchdog path). L6
-  joins receipt → `decision_made` on this key; `"-1"` receipts stand alone.
-  Schema-enforced shape: `^-?[0-9]+$`.
-- `attempt_no` — 1-based; from the outbox row's `attempt_count` at claim time
-  (forwarder.py:444); shared with the retry-schedule index. On the
-  direct-degraded channel `attempt_no` is ALWAYS 1 — the degraded path makes
-  exactly one direct attempt (no retry ladder); duplicate suppression across
-  crash-replays is `spill_id`'s job, not `attempt_no`'s.
-- `spill_id` — REQUIRED when `channel` is `direct-degraded`, FORBIDDEN
-  otherwise (Tripwire B3). sha256 (lowercase hex) of the spill file's exact
-  bytes as read at replay. Stable across crash-replays of the same spill;
-  unique across distinct spill writes. The replay-dedup key: L6 MUST treat
-  same `(channel, spill_id)` as the same send replayed (keep first, drop
-  the rest).
-- `wire_sha256` — sha256 of the EXACT bytes presented to the transport
-  (pd_sender.py:338 hashes `wire`). For SIMULATED absorption: sha256 of the
-  CANONICAL KEYLESS serialization — the wire event as constructed on the
-  simulated path (which never resolves a routing key; the key value is
-  deliberately never materialized), serialized as JSON with keys sorted,
-  separators `(',',':')`, UTF-8 encoded (Tripwire B4 — the previous "exact
-  bytes that WOULD have been sent" had no canonical construction). The
-  producer MUST construct these exact bytes on the simulated path even
-  though nothing is transmitted. Never a re-serialization of pretty-printed
-  JSON, never a hash of an arbitrary placeholder.
-- `outcome` — `accepted | retryable | terminal`, pd_sender's own taxonomy
-  (pd_sender.py:91). `accepted` covers real wire acceptance AND simulated
-  absorption (the `simulated` flag distinguishes them).
-- `simulated` — **true iff the page was absorbed by simulated mode and
-  nothing went on the wire** (forwarder.py:766, `pd_outcome: "simulated"`).
-- `channel` — `outbox | direct-degraded | secondary`.
-- `error_class` — REQUIRED for `retryable`/`terminal`, FORBIDDEN for
-  `accepted`. This is what makes "failure" machine-detectable.
+- **envelope**: the hash-chained event envelope (`event_id`, `schema_v`, `ts`,
+  `actor=engine`, `type=decision_made`, `alert_id`, `fingerprint`,
+  `episode_id`, `outbox_id`) **plus `trace_id`** (W3C Trace Context
+  trace-id: 16 random bytes, 32 lowercase hex, all-zeros forbidden).
+  The envelope is part of the hashed material
+  (`row_hash = sha256(canonical(envelope-without-hashes + body) || prev_hash)`),
+  so trace-ID tampering breaks the chain.
+- **body**: the decision (`disposition`, `budget_outcome`, `lock_evaluation`,
+  `freshness`, `threshold_counterfactual`, `links` — the frozen vocabulary)
+  **plus two C5 additions**: `policy_version` (the policy that decided; fills the
+  gap the Prism UI currently labels as honestly absent — prism-ui.md P2/A6,
+  INV-3) and `stage_latencies{normalize_ms, correlate_ms, gate_race_ms,
+  decide_ms}` (monotonic-clock per-stage legs; answers "which stage ate the
+  budget" in one lookup — receiver.md R-3 lineage).
 
-## 2. The two normative behavioral rules (not just data)
+## What NEVER crosses
 
-1. **Atomicity — OUTBOX-BACKED CHANNELS (outbox, secondary).** The receipt
-   MUST be written in the SAME database transaction as the outbox scheduler
-   update it describes (claim / confirm / retry / dead-letter). A receipt
-   without its scheduler row, or a scheduler row without its receipt, is a
-   contract violation. *Why:* the failure mode is a crash between the two
-   writes — eternal friction (principal-systems law 2). I2, today's proudest
-   invariant (`event-log-audit.md` §1.1): "the event log and the work queue
-   can never disagree — a database property, not a code convention."
-   *Mechanism:* one transaction; plus a reconciliation test — every
-   scheduler transition to a terminal state MUST have a matching receipt —
-   owned by the L5 lane, plugged into the qa-2 `tests/contracts/` gate.
-   **DEGRADED CHANNEL (direct-degraded): there is NO scheduler row by design
-   — the atomicity rule does not apply** (Tripwire B3: the old text
-   criminalized the contract's own `direct-degraded` fixture). The honest
-   guarantee is AT-LEAST-ONCE REPLAY: every spill file is replayed into the
-   event log until its file is archived; a crash between the log append and
-   the file archive MAY emit a duplicate receipt for one send (mechanically
-   demonstrated by crash injection against `spill.py`). L6 MUST deduplicate
-   on `(channel, spill_id)`.
-2. **Simulated honesty.** `simulated: true` MUST propagate end-to-end
-   (spill → replay → event body) and MUST NEVER be recorded as a failure.
-   `simulated: true` + `outcome: accepted` is a CONFIRMATION of absorption,
-   not a failure. **This contract is where the simulated-spill audit lie dies**
-   (`forwarder-byok.md` §2.5: simulated degraded pages replaying as
-   `forward_failed` with `error_class: "degraded_send_failed"`). *Mechanism:*
-   the schema makes `simulated` a first-class required boolean AND makes the
-   lie shape unrepresentable: `simulated: true` ⇒ `outcome` MUST be
-   `"accepted"`, `error_class` MUST be absent (schema `allOf` branch 3;
-   a failure for a page never attempted on the wire cannot be expressed).
-   Standing falsifier from P6 survives into the build: *any code path that
-   emits `forward_failed` for a page never attempted on the wire falsifies
-   the contract.* Negative fixture
-   `fixtures/negative_simulated_as_failure.json` MUST fail validation.
+- **A second copy of trace_id in the body.** trace_id lives in the envelope
+  once (SSOT — principal-governance state isolation). A body duplicate is a
+  divergence incident waiting to happen.
+- **Raw vendor bytes.** They stop at L2 (C2 anti-corruption). The record
+  carries `input_sha256` as the join key; raw payloads are keyed by it
+  (event-log-audit P8).
+- **Vendor identity beyond the fingerprint.** The decision core never sees
+  foreign shapes (C2).
+- **Secrets, keys, PII.** BYOK key material, attestor identities beyond the
+  governance-required fields, and PII fields never enter the record
+  (event-log-audit P7).
+- **Policy content.** Only the `policy_version` label crosses. The content is
+  governance-controlled (R-1 attested lifecycle); the kernel's canonical
+  `PolicyVersion.content` is Aditya's Type-1 Q3 — this contract carries the
+  label, never the content.
+- **forward latency.** `forward_ms` arrives later via C6's `ForwardReceipt`;
+  L6 reconciles it onto the read view. The sealed `decision_made` row is
+  never rewritten (event-log appendix: the log is audit-only by design).
 
-## 3. What NEVER crosses (and the mechanism for each "never")
+## Version
 
-1. **A receipt without its scheduler row (or vice versa) — on outbox-backed
-   channels.** Mechanism: one transaction (§2.1) + the reconciliation test.
-   On the degraded channel there is no row by design; the "never" there is
-   **an undeduplicable duplicate**: mechanism is `spill_id` (required) +
-   L6's MUST-deduplicate rule — a degraded receipt without `spill_id` is a
-   contract violation (schema-enforced).
-2. **A simulated absorption recorded as failure.** Mechanism: §2.2 —
-   schema, negative fixture, P6 falsifier.
-3. **error_class on an accepted receipt.** Mechanism: schema `not required`
-   rule — an accepted receipt carrying an error is a lie in the other
-   direction (poisoning "accepted" for SLO math).
-4. **Re-serialized wire bytes hashed as wire_sha256.** Mechanism: producer
-   MUST hash the transport bytes; a test asserting
-   `receipt.wire_sha256 == sha256(bytes_actually_sent)` on the FakePD path.
-   On the simulated path the producer MUST hash the canonical keyless
-   serialization (defined in §1); a test asserting equality against
-   independently-constructed keyless bytes. A hash of an arbitrary
-   placeholder is a contract violation.
-5. **A new outcome value invented by a producer.** Mechanism: closed enum;
-   the consumer (L6) owns the enum and must approve additions
-   (principal-governance: no provider silently widens a contract).
+`contract.version: "0.1"` — additive inside a version; a new version only for
+true breaks (rename/remove/retype, new required key) — Google/Azure/Stripe
+consensus (see `contracts/serve/README.md` versioning policy).
 
-## 4. Version / compatibility
+## Per-layer propagation notes (what each layer must attach)
 
-Additive inside v0.1 (e.g. new optional fields); new version only for true
-breaks (C7 compat rule, OPERATING-RULES §1.1). Whether L6 materializes
-simulated receipts as `forward_confirmed`+`simulated:true` or as a distinct
-`forward_simulated` event is the CONSUMER's Type-2 decision (L6 owns the
-event taxonomy) — the contract only guarantees the boolean reaches L6.
+One trace ID is born at L1 ingress and carried through every hop. Propagation
+is by **explicit parameter threading** (a context object / function argument),
+never thread-local or ambient context — the hexagonal test
+("run core logic in tests with zero infrastructure") must keep passing, and
+ambient context is the failure mode eternal friction warns about.
 
-## 5. Pre-mortem (top 3 — principal-systems §2)
+| Layer | Must attach |
+|---|---|
+| **L1 INGEST** | **Mint-or-continue.** Accept inbound W3C `traceparent`; if well-formed (`00-<32hex>-<16hex>-<flags>`), continue it (keep trace-id, mint a fresh parent-id). If absent or malformed, mint 32 random lowercase hex. Malformed headers never reject the request (Postel at the edge — validated in the C1 ingress-schema tests). Record the monotonic-clock start as the latency baseline. Emit the first structured log line with `trace_id`. |
+| **L2 NORMALIZE** | Propagate trace_id into the pipeline context (never into vendor-shaped fields). Measure `normalize_ms` at the L2 boundary. |
+| **L3 DECIDE-1** | Propagate; measure `correlate_ms`. The `TriageResult` may reference the trace_id in episode links but never re-mints it. |
+| **L4 DECIDE-2** | Measure `gate_race_ms` (the Jev race budget leg) and `decide_ms` (total decide leg; `decide_ms ≥ gate_race_ms`). Attach `policy_version`. Write the DecisionRecord via `record_decision_and_enqueue` with `envelope.trace_id`. Every structured log line on the decide path carries `trace_id`. |
+| **L5 ACT** | Propagate trace_id into the outbox row and onto the outbound PagerDuty event (vendor contract permitting — custom detail, never the dedup_key, which is pinned per C4/C6 idempotency). Attempt latencies ride C6's `ForwardReceipt`, not this contract. |
+| **L6 OBSERVE** | Persist the envelope+body; every log line carries `trace_id`. Reconcile `forward_ms` from C6 receipts onto the served view (join on decision seq) — never into the sealed row. Chain verification covers the envelope including trace_id. |
+| **L7 SERVE** | Expose `trace_id` on `DecisionSummary` (C7) so an operator pivots from a slow decision to the exact slow stage in one lookup. The console's R25 trace plumbing consumes it (prism-ui.md A6 — currently absent; this contract is the supply). |
 
-1. *The receipt is written by a separate async writer "for performance."*
-   The dual-write crash window returns. Killed by §2.1: one transaction is
-   normative, not advisory; the reconciliation test fails the build.
-2. *A metrics consumer maps `simulated: true` → failure burn.*
-   The audit lie returns wearing a metrics costume. Killed by §2.2 + the
-   negative fixture + P6's falsifier; reviewers: any dashboard touching
-   receipts routes through Ledger.
-3. *`wire_sha256` gets computed over pretty-printed JSON instead of the
-   POST bytes.* The hash proves nothing. Killed by the FakePD byte-equality
-   test (§3.4).
+## Machine-checkable
 
-## 6. Skill & Evidence (OPERATING-RULES §2.2)
+```bash
+python3 contracts/observe/validate.py   # stdlib only; validates fixtures/
+```
 
-Binding clauses, each with how it binds:
-- **principal-systems law 2 (eternal friction):** the crash between "vendor
-  accepted" and "receipt written" is designed for, not hoped away — the
-  atomicity rule exists because the crash WILL happen (forwarder.py's
-  crash-window analysis is the repo's own prior art).
-- **principal-systems software constitution ("explicit versioned boundaries")
-  + `event-log-audit.md` §1.1:** the I2 invariant is a database property,
-  not a code convention — the contract states it as normative behavior, not
-  prose advice.
-- **principal-governance §2 (unforgiving API design; consumer owns):**
-  closed `outcome` enum owned by L6; additive-inside-version compatibility.
-- **principal-systems "Chesterton's fence":** `outcome` reuses pd_sender's
-  `accepted|retryable|terminal` (pd_sender.py:91) instead of inventing a new
-  taxonomy — the existing one carried embedded knowledge (terminal vs
-  retryable drives the retry ladder).
-- **OPERATING-RULES §3.4 honesty law ("no fake demos"):** the simulated
-  flag is the in-band honesty label; the contract is the enforcement point
-  of the P6 fix.
-- **External source — transactional outbox pattern**
-  (https://github.com/dcsg/archway/blob/HEAD/website/src/content/docs/glossary/outbox-pattern.mdx,
-  accessed 2026-10-05): "the transactional outbox pattern guarantees reliable
-  event publishing… by writing events to a database table in the same
-  transaction as the business operation, then relaying them asynchronously"
-  — the dual-write problem is exactly the receipt/scheduler-write pair.
-  This is what killed alternative (a) below: atomicity as a database
-  property, relay (the event log) as the async consumer.
+Fixtures: `fixtures/decision-page-now.json` (answered_in_time page path,
+outbox row present), `fixtures/decision-suppress.json` (timer_won suppress
+path, `outbox_id: null`, `threshold_counterfactual` populated, `segment_id`
+present to exercise chain-of-segments). Cross-fixture invariant: trace_id
+differs per request.
 
-Alternatives considered and rejected:
-- (a) receipt written by a separate async writer after the scheduler commit.
-  Rejected: the dual-write crash window is the failure mode being fixed;
-  a database property, not a code convention.
-- (b) fold `simulated` into the outcome enum only (no boolean), or record
-  simulated pages as failures. Rejected: (b1) loses the honesty signal —
-  audit can't distinguish simulated absorption from real wire success;
-  (b2) IS the audit lie (`forwarder-byok.md` §2.5).
-- (c) distinct `forward_simulated` event type instead of the flag.
-  Deferred to the consumer (L6): the contract guarantees the boolean reaches
-  L6; L6 chooses the event shape (Type-2, consumer-owned).
+## Skill clauses that bind
 
-Tool evidence: `contracts/validate_fixtures.py` (stdlib `json` only) —
-3 validating fixtures + 1 negative fixture; run output in the PR body.
-Inventory commands: `grep -n "attempt_no\|wire_sha256\|pd_outcome" src/sentinel/{forwarder,pd_sender,spill}.py`
-(all read, none modified).
+- **principal-governance §4 — Unified telemetry:** "one Trace-ID per user
+  interaction, injected from the browser through gateway, microservices, and
+  database." This contract is that clause made machine-checkable for the
+  decide path.
+- **principal-systems Infrastructure constitution — observability over
+  monitoring:** "trace a request through every layer, don't just alert on
+  CPU." stage_latencies is the per-layer trace made queryable.
+- **principal-governance — State isolation (SSOT):** trace_id lives in the
+  envelope once; no body duplicate.
+- **principal-governance — Contract first:** the contract is a JSON Schema,
+  not prose — prose here documents the contract (OPERATING-RULES §1.1).
 
-Consumer-owner: L6 OBSERVE (event-log side). Expected reviewers: Tripwire
-(full adversarial, per 12H-PLAN F6). Vault ack on the wire-hash handling
-surface (audit-tamper model).
+## Alternatives considered and rejected
+
+- **Reuse `event_id` (per-row uuid4) as the correlation ID.** Rejected: one
+  inbound request fans out to `decision_requested`, `decision_made`,
+  `forward_*` rows — per-row ids cannot correlate. A separate request-scoped
+  ID is required.
+- **Ambient propagation (contextvar/thread-local).** Rejected: fails the
+  hexagonal test under async, and is invisible to the tired maintainer
+  (eternal friction). Explicit threading is boring and testable.
+- **64-bit integer trace IDs.** Rejected: collision risk across restarts and
+  chain segments; the 128-bit W3C form is the vendor-neutral standard and
+  matches the 16-hex fingerprint vocabulary already in the codebase.
+
+## Web research
+
+- W3C Trace Context, `traceparent` format — trace-id = 32 lowercase hex,
+  16 bytes, all-zeros forbidden; malformed headers MUST be ignored, never
+  reject traffic (https://www.w3.org/TR/trace-context/, accessed 2026-10-05).
+  Shaped the mint-or-continue rule and the all-zeros rejection.
+- RFC 9745 / RFC 8594 deprecation practice (for C7, see
+  `contracts/serve/README.md`) — https://www.rfc-editor.org/rfc/rfc9745,
+  https://www.rfc-editor.org/rfc/rfc8594, accessed 2026-10-05.
+- Google Cloud Endpoints API lifecycle guidance — backwards-compatible
+  changes keep the version constant / bump minor; breaking changes get a new
+  major version deployed side-by-side
+  (https://docs.cloud.google.com/endpoints/docs/openapi/lifecycle-management,
+  accessed 2026-10-05); Google/Azure/Stripe consensus summary
+  (https://dev.to/freelance_inspector/google-azure-and-stripe-version-apis-three-different-ways-heres-what-they-agree-on-3mbg,
+  accessed 2026-10-05). Shaped the C7 versioning policy this contract defers to.
+
+## Open items (T+0 / amendment discipline)
+
+1. **Vocabulary amendment ADR.** `trace_id` (envelope), `policy_version` and
+   `stage_latencies` (body) widen the Type-1-frozen event vocabulary
+   (`eventlog.py` `_BODY_REQUIRED` is frozen). Adoption ships with the
+   contract-amendment ADR per OPERATING-RULES §1.1 — no silent widening.
+2. **trace_id on the other event types.** v0.1 pins the `decision_made`
+   DecisionRecord. Extending `envelope.trace_id` to `decision_requested`,
+   `forward_*`, `checkpoint` rows is the v0.2 extension (same ADR or a
+   follow-on; the per-layer notes above already specify the behavior).
+3. **`policy_version` format.** Carried as an opaque label here. If Aditya's
+   Type-1 Q3 (canonical `PolicyVersion.content`) lands, the label format is
+   pinned in the amendment; the contract shape does not change.

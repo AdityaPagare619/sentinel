@@ -233,3 +233,18 @@ Latest decisions on top.
   its own decision entry, not a parenthetical. What would reverse it: a stdlib Ed25519
   implementation, or a decision that attestor identity no longer needs public-key crypto.
   (Petu's ruling; wave coordinator's merge process flagged for the retro.)
+- 2026-10-05 ~20:25 IST — **Q2 decided: HMAC enforcement on `/v2/enqueue` (R-3 migration approach).**
+  Aditya, under the full authority release (2026-10-05 ~20:25 IST, T+0 FIRED), decided the Type-1
+  question Q2 as **HMAC enforcement** on the `POST /v2/enqueue` ingress route. The migration approach
+  (recv-2 prep design, `docs/design/r3-sender-inventory.md` + `docs/design/r3-hmac-migration.md`,
+  branch `lane/prep-r3-auth`): extend the existing, tested ADR-005 HMAC scheme (pure-function
+  `_webhook_sig_failure_reason`) to `/v2/enqueue` *trigger* deliveries, fail-closed with 403; the
+  silence direction (resolve/ack claims → `verified_resolve`) stays HMAC fail-closed in **all** modes,
+  including onboarding. Phased cutover, no flag day: Phase A is a 7-day onboarding-mode measurement
+  window logging auth outcomes keyed by routing_key hash — it is the completeness check that proves
+  the sender inventory (S1–S7) against real traffic *before* enforcement; secret rotation via a
+  secret *set* (old+new accepted during the window). S1–S3 (Alertmanager/Datadog/Grafana — cannot
+  sign natively) cut over via a signing relay/sidecar per estate or Aditya's logged risk acceptance.
+  Rollback is a config flip (`SENTINEL_WEBHOOK_ONBOARDING=1`, bounded restart <5 min), never a code
+  revert. Vault holds veto authority over the auth-matrix accuracy. The 12-hour execution wave owns
+  the Phase 1 build from this design. (Aditya's decision under full authority release, 2026-10-05.)

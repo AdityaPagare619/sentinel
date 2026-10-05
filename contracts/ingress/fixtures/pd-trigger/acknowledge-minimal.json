@@ -1,0 +1,1 @@
+{"dedup_key":"db-latency-p99-prod-20261005","event_action":"acknowledge","payload":{"severity":"critical","source":"db-primary-1.internal","summary":"acknowledged by on-call"},"routing_key":"rk-0123456789abcdef0123456789abcdef"}

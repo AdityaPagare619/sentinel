@@ -162,6 +162,9 @@ From AGENTS.md hard-won lessons (incidents cited):
   version, and decision log entries.
 - CI must be green. There is no "CI is flaky, merge anyway" — a flaky CI is itself a
   §5-reportable incident to Relay.
+- **Interim CI mechanism (until the R-11 mechanical runner lands):** every PR attaches the
+  full-suite run artifact (command, output tail, timestamp, commit hash); a PR without the
+  attached artifact is returned without review — "CI is broken, trust me" is not a merge state.
 
 ### 1.6 Ownership map (the router)
 
