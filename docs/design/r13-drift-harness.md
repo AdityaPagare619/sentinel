@@ -245,7 +245,9 @@ third-party vendors, so Sentinel owns a scheduled probe that diffs live response
 3. **Probes (read-only by default):** PD — `GET /v2/enqueue` is trigger-only, so the
    PD half uses *response-shape validation of the retry-table rows*: one
    trigger + ack + resolve cycle on a **sacrificial service** (delete after), plus
-   a malformed-trigger probe to confirm the 400 row. Jev — `pin_probe` question
+   a malformed-trigger probe to confirm the 400 row. *(PD side overridden to
+   FakePD-only by the §0 update box — Q6 SPLIT: no live PD probes run; this item
+   now describes the pre-decision plan only.)* Jev — `pin_probe` question
    shape (the template from `revalidation.py`), checking `DecisionResponse` field
    set and types, not choices.
 4. **Diff:** live response JSON-Schema (shape only — keys dropped, values
@@ -259,6 +261,27 @@ third-party vendors, so Sentinel owns a scheduled probe that diffs live response
 6. **False-positive budget:** tracked per run; a harness crying wolf weekly gets
    tuned, not ignored — a noisy alarm trains the ignore reflex (R-18's anti-theater
    decay: the genesis cry-wolf finding).
+
+### 5.1 Hard cost cap — the mechanism (binding, added post-Q6-SPLIT review)
+
+The §0 update box says "hard cost cap" — this section is the mechanism that makes
+it a cap instead of a label. **Max live Jev calls per scheduled run: 50.** The
+probe set in §5.3 is bounded by construction (one `pin_probe` shape check per
+pinned Jev model + one malformed-shape probe = ≤2 live calls), so 50 is generous
+headroom for retries, not a tuning dial. **Enforcement point:** a single in-process
+counter lives in the harness runner at the *only* live-transport choke point — the
+wrapper around the Jev client's request call that fires real HTTP (the same call
+site the cassette recorder intercepts in §3.1). The counter increments **before**
+each live request is sent; if the next increment would exceed 50, the runner
+aborts the whole run immediately with a hard failure (CI red, not "skipped", not a
+silent pass — an overrun means the probe set escaped its bound, which is a bug).
+A second, independent guard: CI asserts at plan time that the enumerated live-probe
+count ≤ 50 before the runner starts. **Cap changes:** raising or lowering the cap
+requires a signed entry in `ops/decision_log.md` approved by Petu (senior-most
+principal); any *increase* above 50 additionally requires Aditya's explicit
+approval (founder-deputy authority — the Jev key's spend is his). The counter is
+per-run (reset on each scheduled invocation); CI's plan-time assertion makes the
+cap visible before money is spent.
 
 **Verify (post-build, Phase 4):** introduce a synthetic contract change in scratch
 (PD returns a renamed field; Jev drops a field) — the harness must raise within
