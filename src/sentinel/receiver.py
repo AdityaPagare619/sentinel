@@ -488,8 +488,9 @@ class Pipeline:
 def _parse_json_object(body: bytes) -> dict:
     """Parse an ingress body into a JSON object (R-8 exception-path fix).
 
-    Raises Unparseable — never json.JSONDecodeError / UnicodeDecodeError —
-    so malformed ingress is dispositioned honestly as ``unparseable``.
+    Raises Unparseable — never json.JSONDecodeError / UnicodeDecodeError /
+    RecursionError — so malformed ingress is dispositioned honestly as
+    ``unparseable``.
     Before this fix the raw parse errors escaped handle_pd/handle_generic
     and were counted as ``handler_panics`` at the HTTP layer, lying about
     what happened: a sender's malformed bytes are a client-side input
@@ -497,7 +498,7 @@ def _parse_json_object(body: bytes) -> dict:
     """
     try:
         data = json.loads(body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise Unparseable(f"malformed JSON body: {exc}") from exc
     if not isinstance(data, dict):
         raise Unparseable("top-level JSON is not an object")

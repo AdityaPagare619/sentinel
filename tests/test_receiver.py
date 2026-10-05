@@ -326,8 +326,10 @@ class TestMalformedJsonDispositionR8(ReceiverTestBase):
 
     Before the fix, json.JSONDecodeError / UnicodeDecodeError escaped
     handle_pd/handle_generic and were counted as handler_panics at the HTTP
-    layer — the metrics lied about what happened. Malformed sender bytes
-    are a client-side input failure, not a handler defect.
+    layer — the metrics lied about what happened. (RecursionError on
+    deeply-nested input did the same until it was added to the guarded
+    tuple.) Malformed sender bytes are a client-side input failure,
+    not a handler defect.
     """
 
     def setUp(self):
@@ -364,6 +366,15 @@ class TestMalformedJsonDispositionR8(ReceiverTestBase):
 
     def test_pd_enqueue_valid_json_non_object_is_unparseable(self):
         resp = self._assert_malformed_is_unparseable("/v2/enqueue", b'[1, 2]')
+        self.assertEqual(resp["status"], "success")
+
+    def test_pd_enqueue_deeply_nested_json_is_unparseable(self):
+        # RecursionError is not a ValueError subclass: it escaped the
+        # original (JSONDecodeError, UnicodeDecodeError) tuple, so deeply
+        # nested input was still counted as handler_panics — the exact
+        # misdisposition this PR eliminates. Now: unparseable.
+        raw = b"[" * 25000 + b"]" * 25000
+        resp = self._assert_malformed_is_unparseable("/v2/enqueue", raw)
         self.assertEqual(resp["status"], "success")
 
     def test_generic_malformed_json_is_unparseable(self):
