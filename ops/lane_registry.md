@@ -40,3 +40,4 @@ at creation — a lane that isn't registered doesn't exist.
   killed. No branch rots silently — Relay's blocker sweep treats a 3-hour-quiet
   branch as blocked until proven otherwise.
 | `lane/c1-stepped-failopen` | Builder C1 | in flight | C1: adaptive storm detector (correlator) + stepped fail-open (gate) as ONE architectural change per design/rfc-c1-stepped-failopen.md. Holds src/sentinel/gate.py + src/sentinel/correlator.py until PR merges | — |
+| `lane/12h-dev-1-r10` | dev-1 (devops/environments) | in flight | R-10 wire-or-retract: flags.json schema + loader wiring into the live gate; F1 kill condition (drill passes on staging-lab by T+9 or retract ADR lands). Design: docs/design/r10-flags-wire.md; retract skeleton: docs/decisions/2026-10-05-r10-retract-DRAFT.md | — |

@@ -40,3 +40,7 @@ sentinel.db
 # deploy lane: generated bundles, never committed
 deploy/dist/
 deploy/dist-data/
+
+# R-10 drill lab: rebuilt from scratch by env-bootstrap.sh every drill
+# cycle (devops-foundation.md §1.1); never committed.
+staging-lab/
