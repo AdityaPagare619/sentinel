@@ -1,0 +1,97 @@
+%% scope: Alert ingress -> page delivery, end to end, on the CURRENT code (receiver -> correlator
+%%         -> race/gate -> forwarder -> PagerDuty), including every fail-open path. The revision's
+%%         contract boundaries (C1-C7) are annotated where they will land; the arrows follow today's calls.
+%% author-chief: Pager (SRE — owns the paging path)
+%% reviewer-chief: Vault (security — firewall + fail-open correctness)
+%% grounding: src/sentinel/receiver.py:237-300 (handle_pd), :433-475 (_triage), :652-681 (routes);
+%%            src/sentinel/correlator.py:587-731 (_classify_locked); deterministic-gate.md section 1.1
+%%            (S1/D6/C1/S2 order), section 1.2 (kernel table), section 1.3 (suppression locks);
+%%            race-jev-boundary.md sections 1.1 (race), 1.2 (client), 1.3 (slow/down/wrong);
+%%            src/sentinel/forwarder.py:201 (DurableForwarder), :342 (run_once), :745 (send_direct);
+%%            src/sentinel/pd_sender.py PD_RETRY_TABLE; PIPELINE-REVISION.md section 2.2 (C1-C7)
+%% date: 2026-10-05
+%% review-status: REVIEWED. 2 disputes resolved by disagree-and-commit (see README.md disputes D-2, D-3).
+
+sequenceDiagram
+    participant S as Sender
+    participant R as Receiver (Pipeline)
+    participant C as Correlator L3
+    participant G as Gate L4
+    participant RR as RaceRunner B=2700ms
+    participant J as Jev client
+    participant F as Forwarder L5
+    participant PD as PagerDuty API
+    participant EL as EventLog L6
+
+    Note over S,R: POST /v2/enqueue (PD-mirror). CURRENT: triggers carry NO auth check<br/>(headers ride along only for resolve/ack claims) - see seq-enqueue-auth.mmd
+
+    S->>R: POST /v2/enqueue {trigger payload}  [receiver.py:652 -> Pipeline.handle_pd :237]
+    R->>R: json parse; body.decode (C1 boundary: RawInbound formed here)
+
+    alt event_action is ack/resolve (not trigger)
+        R->>R: signed claim? -> resolve_episode(verified_resolve); unsigned -> refused the close (fail-closed)
+        R->>F: forward_raw(body) unchanged, untriaged [receiver.py:261-264]
+        F->>PD: relay
+        R-->>S: 200 {_pd_ok}
+    else unparseable / malformed JSON
+        Note over R: fail-open: NEVER drop. forward_raw(original bytes) + 200.<br/>malformed JSON takes the panic path (metric handler_panics, not unparseable) - receiver.md M-9
+        R->>F: forward_raw(body, dedup_key=_body_key(body))
+        F->>PD: relay
+        R-->>S: 200
+    else trigger
+        R->>R: _normalize_pd -> canonical Alert [receiver.py:480] (L2: vendor shape stops here)
+        R->>C: correlator.ingest(alert) [receiver.py:436]
+        C->>C: fingerprint sha256("service|check|severity_in|region|env|cluster")[:16]<br/>_classify_locked: (1) change_window (2) duplicate (3) storm fold<br/>(4) new/reopened (5) storm declaration (6) record observation
+        C-->>R: corr.kind in {new, duplicate, change_window, storm, reopened}
+
+        alt corr.kind == storm AND storm_declared
+            Note over R,G: D3: the aggregate takes the DETERMINISTIC digest path.<br/>It NEVER calls evaluate_policy, NEVER arms a race, and CANNOT suppress by construction.
+            R->>G: gate.digest_storm(aggregate, storm_size, storm_counts) [receiver.py:452]
+            G-->>R: disposition (always a page of the aggregate)
+            R->>F: forwarder.forward(agg, disp) - UNCONDITIONAL [receiver.py:456]
+            F->>PD: trigger
+            F->>EL: ForwardReceipt (I2: same transaction as outbox update)
+        else new / duplicate / change_window / reopened
+            R->>G: gate.evaluate(alert, state, {}, {}, correlation=corr) [receiver.py:466]
+            Note over G: gate.evaluate NEVER raises: outer except -> passthrough reason="error:<code>",<br/>and an audit row is written even on error.
+
+            alt S1 structural bars (deterministic, pre-Jev, no race armed)
+                G->>G: duplicate -> INHERIT prior disposition (reason="dedup")<br/>change_window -> page_business_hours<br/>storm-continuation -> folded (absorbed, NOT suppression)
+            else D6 instruction-firewall screen
+                G->>G: firewall hit -> page_now (fail-closed);<br/>flagged alerts NEVER arm the race - no model sees hostile text
+            else C1 stepped fail-open ladder (step > 0)
+                Note over G: deterministic degraded path REPLACES the race - no Jev call.<br/>step1: last-known-good signed policy (freshness-gated; stale -> step2)<br/>step2: static severity floor | step3: rate-capped paging + digest<br/>entry: 25% timer-win rate over trailing 900s (n>=30, 600s dwell)<br/>suppress unreachable by construction at every step
+                G->>G: degraded disposition (page_now / page_business_hours / digest)
+            else S2 race-to-page
+                G->>RR: submit inference; timer armed at B=2700ms [race.py:89]
+                RR->>J: decide(state) on 32-worker / 256-queue pool
+                alt inference answers first (CLAIMED_BY_INFERENCE)
+                    J-->>RR: answer {probs, q3, conf}
+                    RR-->>G: answered_in_time
+                    Note over G: answered path: (1) model pin asserted FIRST - drifted model -> passthrough "model_drift";<br/>(2) quantized leg-1 prob lock; (3) allowlist; (4) freshness legs (stale -> veto);<br/>(5) D8 PolicyGate fresh-reads policy-state file per suppress verdict;<br/>(6) D5 corroboration leg - uncorroborated -> page_now "uncorroborated";<br/>then evaluate_policy kernel (frozen section-4 table) -> Disposition
+                else timer fires first (CLAIMED_BY_TIMER)
+                    Note over G,RR: timer-won -> passthrough ("timer_won" / "timer_won_shed" when pool shed).<br/>The late answer becomes a shadow_decision event via the late-answer hook -<br/>it NEVER pages, NEVER suppresses, NEVER re-opens the decision.
+                    RR-->>G: timer_won
+                else inference raised (CLAIMED_BY_INFERENCE, error)
+                    RR-->>G: error_passthrough, reason="error:<class>"
+                else timer dead AND inference hung (CLAIMED_BY_GATE at B+500ms)
+                    RR-->>G: passthrough + control-plane page for the stalled scheduler
+                end
+            end
+            G->>EL: DecisionRecord{trace_id, stage_latencies} (C5) - written even on error
+            G-->>R: (Disposition, DecisionRecord)
+            R->>C: correlator.note_disposition(fingerprint, disp) [receiver.py:469]<br/>(feeds dedup's prior; discarded on resolve/flap-reopen - no stale-prior leak)
+
+            alt disp.action in (suppress, folded)
+                Note over R,F: suppressed: nothing forwarded. folded: absorbed into the aggregate page.<br/>R15 F4 honest exception: while C1-degraded, S1 dedup CAN emit suppress -<br/>inheriting a pre-degradation prior earned by the FULL conjunction, reason stays "dedup".
+            else page_now / page_business_hours / passthrough
+                R->>F: forwarder.forward(alert, disp, raw_bytes) [receiver.py:474]
+                F->>F: durable outbox: claim due row (queued->in_flight, single UPDATE)<br/>worker pool attempts; dedup_key pinned from the ROW, never re-derived
+                F->>PD: POST Events API v2 (PD_RETRY_TABLE: 202/400/429/5xx/network)<br/>retry 5s->15s->45s->2m->5m->15m->30m (jitter); 429 -> max(scheduled, 60s);<br/>terminal 4xx -> dead_letter + secondary channel + control-plane page
+                F->>EL: ForwardReceipt{decision_id, attempt_no, wire_sha256, outcome} (C6)
+            end
+            R-->>S: 200 {_pd_ok(alert_id)}
+        end
+    end
+
+    Note over S,EL: Revision annotations (not yet code): C2 anti-corruption at L2 (Alert.raw/source never cross);<br/>C3 typed TriageResult enum; C4 Disposition enum; C5 trace_id born at L1;<br/>Jev circuit breaker + cost circuit breaker on the judge path (section 2.4).

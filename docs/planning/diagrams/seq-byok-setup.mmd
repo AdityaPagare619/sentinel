@@ -1,0 +1,59 @@
+%% scope: BYOK key setup (UI -> API -> IntegrationStore) plus the test-page flow (UI -> API -> PD).
+%%         CURRENT code; the R-2 key-contract unification and R-16 write-surface auth are annotated as revised.
+%% author-chief: Prism (UI / integrations surface)
+%% reviewer-chief: Vault (security — key management)
+%% grounding: platform/server/app.py:421-490 (_int_test_page), :621-640 (_pd_enqueue),
+%%            :176-197 (endpoint inventory); src/sentinel/integrations.py (IntegrationStore:
+%%            600-perm JSON, write-only values, atomic set_many, 501 on ephemeral);
+%%            forwarder-byok.md sections 1.2 (key mgmt), 2.1 (THE DAMNING ONE: key-resolution split-brain),
+%%            section 3 P1 (R-2 one key-resolution contract); platform-api.md sections 1.1, 1.4 (auth story:
+%%            zero auth on the platform surface), section 3 P0-1 (Bearer), P1-5 (Idempotency-Key)
+%% date: 2026-10-05
+%% review-status: REVIEWED. 2 disputes resolved by disagree-and-commit (see README.md disputes D-4, D-5).
+
+sequenceDiagram
+    participant O as Operator
+    participant UI as Prism UI<br/>(Integrations tab)
+    participant API as Platform API<br/>platform/server/app.py
+    participant ST as IntegrationStore<br/>integrations.py
+    participant PD as PagerDuty API
+
+    Note over O,API: CURRENT: the platform write surface has ZERO authentication<br/>(no code anywhere reads an Authorization header; CORS defaults to *).<br/>Anyone reaching the port can read key status, overwrite/delete keys, toggle simulated<br/>mode, and fire test pages. REVISED (R-16, platform-api.md P0-1): Bearer on the five<br/>write endpoints, localhost-default deny.
+
+    rect rgb(240, 245, 255)
+    Note over O,ST: KEY SETUP (BYOK)
+    O->>UI: enter PagerDuty routing key (and/or Jev API key)
+    UI->>API: POST /api/v1/integrations/keys {pagerduty_routing_key, jev_api_key}
+    API->>API: validate-all-then-persist: key-format validation,<br/>operator-language errors that NEVER echo the value
+    API->>ST: set_many (atomic)
+    ST->>ST: 600-perm JSON under $SENTINEL_STATE_DIR (gitignored);<br/>values write-only. Ephemeral store -> raise 501 (loud-fail, never pretend to persist)
+    ST-->>API: ok
+    API-->>UI: 200
+    UI->>API: GET /api/v1/integrations/status
+    API-->>UI: {configured: true, last4: "…ab12"} per key - VALUES NEVER RETURNED
+    Note over UI: UI reports "configured". PROXY WARNING (forwarder-byok.md section 2.1):<br/>"configured" is a proxy for "pages will go out" - and it rank-orders with nothing.
+    end
+
+    rect rgb(255, 248, 240)
+    Note over O,PD: TEST PAGE (CURRENT)
+    O->>UI: "Send test page"
+    UI->>API: POST /api/v1/integrations/test-page {routing_key?}  [REVISED: Idempotency-Key header, platform-api.md P1-5]
+    alt simulated_paging() is ON  [app.py:432 - checked BEFORE key resolution]
+        API-->>UI: {ok: true, simulated: true, dedup_key: null,<br/>"no page was sent to PagerDuty"} - absorbed, honestly labeled. NO KEY NEEDED.
+    else real mode
+        Note over API: Key precedence for the TEST-PAGE path (app.py:455-457):<br/>1. per-request routing_key (validated: 32 hex chars; bad -> 422 bad_key)<br/>2. STORED user key (IntegrationStore)<br/>3. PD_ROUTING_KEY env<br/>none -> 422 no_routing_key
+        API->>ST: get(pagerduty_routing_key) [step 2 only]
+        API->>API: dedup = "sentinel-test/<rand>/<ts>";<br/>event = trigger {summary: "[SENTINEL TEST] Integrations test page - safe to acknowledge",<br/>severity: info, source: "sentinel/integrations"}
+        Note over API,PD: The test page goes via _pd_enqueue (app.py:477, :621-640):<br/>a DIRECT single urllib POST to https://events.pagerduty.com/v2/enqueue (10s timeout).<br/>It does NOT enter the durable outbox, does NOT use PD_RETRY_TABLE,<br/>has no retry schedule and writes no ForwardReceipt.
+        API->>PD: POST /v2/enqueue (single attempt)
+        alt 2xx
+            API-->>UI: {ok: true, simulated: false, dedup_key, key_source}
+        else non-2xx / timeout / DNS / TLS
+            API-->>UI: {ok: false, simulated: false, dedup_key,<br/>"PagerDuty did not accept the test page (HTTP …). Check the routing key and network egress."}<br/>Honest failure: what happened and what to do - NEVER the key value.
+        end
+    end
+    end
+
+    rect rgb(255, 240, 240)
+    Note over ST,PD: THE SPLIT-BRAIN (forwarder-byok.md section 2.1) - what this diagram must not hide:<br/>The test-page/legacy/degraded paths resolve: user store -> env -> unconfigured.<br/>The DURABLE production path (DurableForwarder._pinned_key) resolves ENV-ONLY<br/>(secret: refs -> SENTINEL_SECRET_* env vars). It NEVER consults IntegrationStore.<br/>An operator who configures their key ONLY through the UI gets configured:true in the UI<br/>while production pages SecretMissing -> retry -> dead_letter. R-2 (Phase 1) replaces both<br/>with ONE resolve_routing_key_for(ref): user store -> secret:-mapped env -> PD_ROUTING_KEY env -> SecretMissing,<br/>plus a loud warning when the UI reports a key the durable path cannot resolve.
+    end
