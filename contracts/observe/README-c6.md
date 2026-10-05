@@ -114,6 +114,31 @@ simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
 5. **A new outcome value invented by a producer.** Mechanism: closed enum;
    the consumer (L6) owns the enum and must approve additions
    (principal-governance: no provider silently widens a contract).
+6. **Raw secret material** (Vault never-crosses rule, attested 2026-10-05 —
+   see `docs/decisions/2026-10-05-nevercrosses-c4-c6.md` for the
+   field-by-field audit). No ForwardReceipt field carries key material:
+   - The receipt carries NO key field at all. The only key-adjacent value
+     is `wire_sha256` — a one-way hash of the POST bytes (preimage
+     resistance; it proves what went on the wire, it cannot recover the
+     key). `spill_id` is a hash of spill-file bytes that themselves carry
+     only `routing_key_ref` (a vault-path reference, `secret:pd/...`,
+     resolved env-side at send time; forwarder.py:806-823).
+   - The simulated path constructs the CANONICAL KEYLESS serialization and
+     never resolves a routing key — it reports the key SOURCE only
+     (`paging_key_source`, integrations.py:219).
+   - `payload_frozen` (what gets hashed/sent) must be keyless:
+     `PayloadNotKeyless` refuses key-bearing frozen payloads at send time
+     (pd_sender.py:173-186) — secrets never freeze to disk, so they can
+     never ride a hash or a receipt.
+   - Failure-channel strings (`error`, `error_class`, scheduler
+     `last_error`) run through `sanitize_error` (integrations.py:259),
+     which strips configured key VALUES before emission.
+   *Mechanism:* schema shape (no key-bearing field exists to fill) +
+   mechanically enforced by `tests/test_nevercrosses_key_hygiene.py` —
+   resolve_paging_key rigged to raise on both simulated paths, a canary key
+   asserted absent from stderr/spill/returned structures, and a negative
+   structural guard that fails the build if any C4/C6 fixture grows a bare
+   `routing_key` field.
 
 ## 4. Version / compatibility
 
