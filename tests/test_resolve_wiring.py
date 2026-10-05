@@ -152,6 +152,31 @@ class TestResolveAuth(ResolveWiringTestBase):
             any(line.startswith("[sentinel] FORGED")
                 for line in out.splitlines()),
             f"forged log line present in: {out!r}")
+
+    def test_hostile_unicode_dedup_key_cannot_forge_log_lines(self):
+        # D10 follow-up (reviewer-found bypass): the emission boundary must
+        # also neutralize U+2028/U+2029 (Python splitlines splits on them),
+        # NEL \x85 (honored as newline by xterm-class terminals) and C1
+        # \x9b CSI (terminal ANSI escape injection). Fail-before: the regex
+        # covered only [\x00-\x1f\x7f], so all three survived into stderr.
+        hostile = ("dk-evil\u2028[sentinel] FORGED LINE\u2028"
+                   "dk-nel\x85[sentinel] FORGED NEL\x85"
+                   "dk-csi\x9b31mFAKE\x9b0m")
+        raw = json.dumps(_resolve_claim(hostile)).encode()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code, _ = self._post("/v2/enqueue", raw, headers=_sign(raw))
+        self.assertEqual(code, 200)  # unknown key: safe no-op, never error
+        out = err.getvalue()
+        self.assertFalse(
+            any(line.startswith("[sentinel] FORGED")
+                for line in out.splitlines()),
+            f"forged log line present in: {out!r}")
+        # no C1/ANSI escape may pass through verbatim
+        self.assertNotIn("\u2028", out)
+        self.assertNotIn("\u2029", out)
+        self.assertNotIn("\x85", out)
+        self.assertNotIn("\x9b", out)
         # evidence preserved: the sanitized key is still recorded in-band
         self.assertIn("dk-evil?", out)
 

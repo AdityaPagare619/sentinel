@@ -371,6 +371,29 @@ class SimulatedPagingTest(unittest.TestCase):
             f"forged log line present in: {out!r}")
         self.assertIn("dk-evil?", out)
 
+    def test_simulated_send_sanitizes_unicode_hostile_dedup_key(self):
+        # D10 follow-up (reviewer-found bypass): U+2028/U+2029, NEL \x85,
+        # and C1 CSI \x9b must be neutralized at the forwarder emission
+        # boundary too — mirroring the ASCII \n hostile test above.
+        fwd = self._unroutable()
+        hostile = ("dk-evil\u2028[sentinel] FORGED LINE\u2028"
+                   "dk-nel\x85[sentinel] FORGED NEL\x85"
+                   "dk-csi\x9b31mFAKE\x9b0m")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            res = fwd._simulated_send("page_now", hostile, "a1")
+        self.assertTrue(res.simulated)
+        out = err.getvalue()
+        self.assertFalse(
+            any(line.startswith("[sentinel] FORGED")
+                for line in out.splitlines()),
+            f"forged log line present in: {out!r}")
+        self.assertNotIn("\u2028", out)
+        self.assertNotIn("\u2029", out)
+        self.assertNotIn("\x85", out)
+        self.assertNotIn("\x9b", out)
+        self.assertIn("dk-evil?", out)
+
 
 class LogSanitizeTest(unittest.TestCase):
     def test_sanitize_log_value(self):
@@ -382,6 +405,23 @@ class LogSanitizeTest(unittest.TestCase):
         self.assertEqual(sanitize_log_value(123), "123")
         # tabs are control chars too: replaced, never passed through raw
         self.assertEqual(sanitize_log_value("a\tb"), "a?b")
+
+    def test_sanitize_log_value_unicode_and_c1(self):
+        # D10 follow-up (reviewer-found bypass): the widened class must
+        # replace U+2028/U+2029 line separators, NEL \x85, CSI \x9b, and
+        # the whole C1 control range — individually and in the full sweep.
+        from sentinel.pd_sender import sanitize_log_value
+        self.assertEqual(sanitize_log_value("a\u2028b\u2029c"), "a?b?c")
+        self.assertEqual(sanitize_log_value("a\x85b\x9bc"), "a?b?c")
+        self.assertEqual(sanitize_log_value("a\x9b31mb\x9b0m"), "a?31mb?0m")
+        # full sweep: every char the class must neutralize becomes "?"
+        for cp in list(range(0x00, 0x20)) + list(range(0x7f, 0xA0)) \
+                + [0x2028, 0x2029]:
+            self.assertEqual(sanitize_log_value(chr(cp)), "?",
+                             f"U+{cp:04X} survived sanitize_log_value")
+        # adjacent non-class chars must be untouched
+        self.assertEqual(sanitize_log_value("a b~"), "a b~")
+        self.assertEqual(sanitize_log_value("à中🎉"), "à中🎉")
 
 
 class PlatformTwinTest(unittest.TestCase):

@@ -85,15 +85,38 @@ class DedupKeyInvalid(Exception):
 
 
 def sanitize_log_value(value) -> str:
-    """Replace ASCII control characters so sender-controlled values cannot
-    forge log lines (D10: a ``dedup_key`` containing ``\\n`` would otherwise
-    inject fake ``[sentinel] ...`` lines into stderr).
+    """Replace control / line-separator characters so sender-controlled
+    values cannot forge log lines or inject terminal escapes (D10: a
+    ``dedup_key`` containing ``\\n`` would otherwise inject fake
+    ``[sentinel] ...`` lines into stderr).
+
+    The replaced class is ``[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]``:
+
+    * ``\\x00-\\x1f`` — ASCII controls incl. ``\\n \\r \\t`` and the
+      splitlines boundaries VT/FF (\\x0b/\\x0c) and FS/GS/RS (\\x1c-\\x1e);
+    * ``\\x7f-\\x9f`` — DEL plus the C1 control range: NEL (\\x85, honored
+      as newline by xterm-class terminals), CSI (\\x9b — single-char ANSI
+      escape introducer), OSC (\\x9d), DCS (\\x90), APC (\\x9f), SOS/ST
+      (\\x98/\\x9c) — i.e. no ANSI/C1 escape can survive;
+    * ``\\u2028 \\u2029`` — Unicode line/paragraph separators; Python's
+      ``str.splitlines()`` splits on them, so a raw ``\\u2028`` in a
+      ``dedup_key`` would forge a line start even with no ASCII control
+      byte present.
+
+    Design choice (documented): an explicit widened regex rather than a
+    ``unicodedata.category`` filter (Cc/Cf). A pure Cc/Cf filter is
+    *strictly weaker* — U+2028/U+2029 are category Zl/Zp, not Cc/Cf, so it
+    would miss the very bypass this guards against. A Cc+Cf+Zl+Zp filter
+    would be equivalent-or-stronger but would additionally strip invisible
+    format chars (U+200B, U+FEFF, ...) beyond the D10 line-forging/escape
+    threat model, and is slower per char — noted as future hardening, not
+    this fix.
 
     Applied ONLY at the stderr emission boundary — the wire value sent to
     PagerDuty is untouched (dedup correctness requires the exact key).
     """
     s = "" if value is None else str(value)
-    return re.sub(r"[\x00-\x1f\x7f]", "?", s)
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", "?", s)
 
 
 # ---------------------------------------------------------------------------
