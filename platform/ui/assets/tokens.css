@@ -1,63 +1,91 @@
-/* Prism design tokens — Sentinel platform v0.1
- * Verbatim from design/DESIGN_SYSTEM.md §2. Rebrand = change this file. */
+/* tokens.css — Sentinel console design tokens (redesign v2).
+ *
+ * Hierarchy is carried by spacing, size, and weight (grayscale-first, M5).
+ * Color is reserved for STATE and state only (D3):
+ *   page/suppress/degraded/healthy/simulated.
+ * Dark-first: 3 AM is dark. Light theme via [data-theme="light"].
+ */
 :root {
-  --bg-0: #06090F;
-  --bg-1: #0B111A;
-  --bg-2: #111826;
-  --bg-3: #1A2436;
-  --line-0: #1E2A3E;
-  --line-1: #2C3B55;
-  --tx-0: #E8EEF7;
-  --tx-1: #9AA9C4;
-  --tx-2: #5D6E8C;
-  --tx-dim: #3A4A63;
+  color-scheme: dark;
 
-  --sev-1: #FF5470;
-  --sev-2: #FF9F43;
-  --sev-3: #FFD166;
-  --sev-4: #7BDFF2;
+  /* surfaces — 4 steps, no more */
+  --bg-0: #0b0e14;   /* app background */
+  --bg-1: #11151d;   /* cards, panels */
+  --bg-2: #171c26;   /* raised / hover */
+  --bg-3: #1f2632;   /* active / selected */
 
-  --disp-page: #FF5470;
-  --disp-suppress: #8A99B5;
-  --disp-escalate: #FF9F43;
-  --disp-defer: #5D6E8C;
+  /* text — 3 tiers (D3) */
+  --tx-1: #e8ecf3;   /* primary: what matters most */
+  --tx-2: #9aa4b5;   /* secondary: context */
+  --tx-3: #5d6779;   /* tertiary: metadata, timestamps */
 
-  --src-synthetic: #B28DFF;
-  --src-shadow: #FFB86B;
-  --src-production: #5EEAD4;
+  /* lines */
+  --line-1: #232a38;
+  --line-2: #2e3748;
 
-  /* B1 third channel — system health owns a RESERVED hue set (§2.2 taxonomy).
-   * These roles are reserved for the freshness/health channel and are never
-   * spent on severity or disposition. Freshness badges always carry a text
-   * label (§7), so adjacency to severity hues is safe by construction.
-   * --state-error intentionally shares the page/critical red: error and
-   * "a human was woken" share urgency semantics — documented, not accidental. */
-  --state-live: #34D399;
-  --state-cached: #9AA9C4;
-  --state-stale: #FBBF24;
-  --state-degraded: #F472B6;
-  --state-error: #FF5470;
+  /* state colors — the ONLY hues in the interface */
+  --st-page: #f0524f;      /* a page is outstanding — the one red that matters */
+  --st-page-dim: #7a2b2a;
+  --st-suppress: #8b93a3;  /* suppressed — deliberately muted, never alarming */
+  --st-degraded: #e0a63e;  /* degraded/stale — attention without panic */
+  --st-ok: #4cc38a;        /* healthy/armed */
+  --st-sim: #9a7ff5;       /* simulated — the honest violet, distinct from live */
+  --st-info: #5aa9e6;
 
-  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* severity */
+  --sev-1: #f0524f;
+  --sev-2: #e08a3e;
+  --sev-3: #e0c43e;
+  --sev-4: #8b93a3;
 
-  --radius-chip: 4px;
-  --radius-card: 8px;
-  --space: 8px;
+  /* type */
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+
+  /* spacing scale — constrained (M5: systems, not ad-hoc values) */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+
+  /* type scale */
+  --fs-1: 11px; --fs-2: 12px; --fs-3: 13px; --fs-4: 15px;
+  --fs-5: 20px; --fs-6: 28px;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+
+  /* mode surfaces */
+  --sim-bg: #1d1836;
+  --sim-line: #3a2f6e;
+  --live-bg: #0e1f16;
+  --live-line: #1d4632;
+  --ink-on-dark: #ffffff;
+  --sev2-bg: #5a3a1c;
+  --sev3-bg: #4a441c;
+  --undo-bg: #1d2b1d;
+  --storm-bg: #2b1a1a;
+  --degraded-bg: #2b2416;
 }
 
-* { box-sizing: border-box; }
-html, body { height: 100%; }
-body {
-  margin: 0;
-  background: var(--bg-0);
-  color: var(--tx-0);
-  font-family: var(--font-ui);
-  font-size: 13px;
-  line-height: 1.45;
+/* tabular numerals wherever numbers sit near numbers (§5.3) */
+.mono, .s-count, .s-label, .ledger, .kv dd {
+  font-variant-numeric: tabular-nums;
 }
-.mono, code, pre, kbd, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-a { color: var(--sev-4); text-decoration: none; }
-a:hover { text-decoration: underline; }
-::selection { background: var(--bg-3); }
-:focus-visible { outline: 1px solid var(--sev-4); outline-offset: 1px; }
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-0: #f4f6f9;
+  --bg-1: #ffffff;
+  --bg-2: #eceff4;
+  --bg-3: #dfe4ec;
+  --tx-1: #141a24;
+  --tx-2: #4d586c;
+  --tx-3: #8a94a6;
+  --line-1: #dfe4ec;
+  --line-2: #c9d1de;
+  --st-page: #c93a38;
+  --st-page-dim: #f0c9c8;
+  --st-suppress: #6d7688;
+  --st-degraded: #9a6b1a;
+  --st-ok: #1e7f52;
+  --st-sim: #6a4fd0;
+}

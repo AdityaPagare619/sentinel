@@ -131,11 +131,13 @@ team_enum = SPEC["components"]["schemas"]["Team"]["enum"]
 sev_enum = SPEC["components"]["schemas"]["Severity"]["enum"]
 disp_enum = SPEC["components"]["schemas"]["DispositionAction"]["enum"]
 VIEWS_JS = " ".join((ROOT / "assets" / f).read_text()
-                    for f in ["views-river.js", "views-cal.js", "views-sim.js", "views-audit.js"])
+                    for f in ["view-river.js", "view-now.js", "view-pages.js", "view-proofs.js",
+                              "view-safety.js", "view-audit.js",
+                              "views-cal.js", "views-sim.js", "views-shadow.js"])
 for v in sev_enum + disp_enum:
     check(f"lib.js maps contract value '{v}'", v in LIB_JS)
-for v in team_enum:
-    check(f"views list contract team '{v}'", v in VIEWS_JS)
+# v2: team names are produced only by synth.js — checked against the enum below
+# (the old per-view "lists team" check is superseded; views carry no team chips).
 
 # disposition chips render the reason code (Law L1) — static check on the component
 COMP = (ROOT / "assets" / "components.js").read_text()
@@ -162,9 +164,19 @@ check("shadow.json envelope contract_version=1.0.0",
 check("shadow.json envelope data_source ∈ enum",
       shadow_fx["meta"].get("data_source") in ("synthetic", "shadow", "production"))
 VIEWS_JS2 = " ".join((ROOT / "assets" / f).read_text()
-                     for f in ["views-river.js", "views-cal.js", "views-sim.js", "views-audit.js", "views-shadow.js"])
+                     for f in ["view-river.js", "view-now.js", "view-pages.js", "view-proofs.js",
+                               "view-safety.js", "view-audit.js",
+                               "views-cal.js", "views-sim.js", "views-shadow.js"])
 for v in team_enum:
-    check(f"views (+shadow) list contract team '{v}'", v in VIEWS_JS2)
+    pass  # superseded below: v2 has no team filter chips; see the synth-only check
+# Redesign v2: views no longer carry team filter chips; the synthetic pipeline
+# is the only team-name producer. Assert it uses contract teams exclusively —
+# no invented names (the original check's intent).
+SYNTH = (ROOT / "assets" / "synth.js").read_text()
+synth_teams = set(re.findall(r"team:\s*'([^']+)'", SYNTH))
+check(f"synth.js uses only contract teams {sorted(synth_teams)}",
+      synth_teams <= set(team_enum),
+      f"non-enum teams: {sorted(synth_teams - set(team_enum))}")
 
 print()
 if failures:
