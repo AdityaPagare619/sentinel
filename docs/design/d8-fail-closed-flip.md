@@ -354,6 +354,15 @@ records the contract:
    on-disk file; diffs emit `config_rejected`-class telemetry, no
    blocking) → D8 flip + loader flip together → on-disk file renamed
    `thresholds.json.retired` (never read; writers fail loudly).
+   **Genesis-validation gate (review amendment, PR #91):** the atomic
+   landing is blocked until the initialization ceremony executes
+   end-to-end **with the BLOCK-3 genesis-validation rule landed** (R-1(a)
+   lane). Rationale: at genesis, seeding vN from the on-disk file makes
+   diff-vs-LIVE verification vacuous — a pre-widened `thresholds.json`
+   could be attested as the trusted root, and D8's "positively
+   established authority" semantics would then rest on a laundered seed.
+   The T+9 freeze gate MUST check for the genesis-validation rule, not
+   merely that the ceremony ran.
 3. **What breaks (said plainly):** the 3 AM "widen the gate in
    `thresholds.json`" muscle memory stops working — that is the point.
    The sanctioned emergency path is the B3 emergency-override with
