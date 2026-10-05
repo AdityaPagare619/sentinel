@@ -1,0 +1,1 @@
+{"action":"passthrough","contract":"disposition","contract_version":"v0.1","detail":"Jev race timed out after 800ms (budget 750ms); failing open to passthrough per fail-closed contract","evidence_refs":["sha256:51de…0c77"],"reason_code":"error","reason_detail":{"error_code":"timeout"}}

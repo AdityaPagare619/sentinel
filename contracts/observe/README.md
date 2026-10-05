@@ -1,0 +1,147 @@
+# C6 — L5 ACT → L6 OBSERVE: `ForwardReceipt` v0.1
+
+**Contract file:** `forward-receipt.v0.1.json` (JSON Schema, draft-07 — the contract;
+this README documents it, it is not the contract).
+**Status:** DRAFT v0.1.
+**Consumer-owner:** L6 OBSERVE (event-log/audit side). Consumer owns the contract
+(OPERATING-RULES §1.1; principal-governance §2 unforgiving API design).
+**Source:** PIPELINE-REVISION.md §2.2/C6; `forwarder-byok.md` §2.5 (the
+simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
+
+## 1. What crosses
+
+`ForwardReceipt{contract, contract_version, decision_id, attempt_no, wire_sha256, outcome, simulated, channel?, error_class?}`
+
+- `decision_id` — the L4 decision being acted on. Opaque to L5. Today the
+  outbox row carries `alert_id`; implementations join `decision_id` from the
+  row's decision reference (or `alert_id` + the C5 trace ID until the
+  decision-record ID lands). L6 uses it to join receipt → `decision_made`.
+- `attempt_no` — 1-based; from the outbox row's `attempt_count` at claim time
+  (forwarder.py:444); shared with the retry-schedule index.
+- `wire_sha256` — sha256 of the EXACT bytes presented to the transport
+  (pd_sender.py:338 hashes `wire`). For simulated absorption: the exact bytes
+  that *would* have been sent. Never a re-serialization — re-serializing
+  before hashing destroys the audit proof.
+- `outcome` — `accepted | retryable | terminal`, pd_sender's own taxonomy
+  (pd_sender.py:91). `accepted` covers real wire acceptance AND simulated
+  absorption (the `simulated` flag distinguishes them).
+- `simulated` — **true iff the page was absorbed by simulated mode and
+  nothing went on the wire** (forwarder.py:766, `pd_outcome: "simulated"`).
+- `channel` — `outbox | direct-degraded | secondary`.
+- `error_class` — REQUIRED for `retryable`/`terminal`, FORBIDDEN for
+  `accepted`. This is what makes "failure" machine-detectable.
+
+## 2. The two normative behavioral rules (not just data)
+
+1. **Atomicity.** The receipt MUST be written in the SAME database transaction
+   as the outbox scheduler update it describes (claim / confirm / retry /
+   dead-letter / spill-replay). A receipt without its scheduler row, or a
+   scheduler row without its receipt, is a contract violation. *Why:* the
+   failure mode is a crash between the two writes — eternal friction
+   (principal-systems law 2). I2, today's proudest invariant
+   (`event-log-audit.md` §1.1): "the event log and the work queue can never
+   disagree — a database property, not a code convention." *Mechanism:*
+   one transaction; plus a reconciliation test — every scheduler transition
+   to a terminal state MUST have a matching receipt — owned by the L5 lane,
+   plugged into the qa-2 `tests/contracts/` gate.
+2. **Simulated honesty.** `simulated: true` MUST propagate end-to-end
+   (spill → replay → event body) and MUST NEVER be recorded as a failure.
+   `simulated: true` + `outcome: accepted` is a CONFIRMATION of absorption,
+   not a failure. **This contract is where the simulated-spill audit lie dies**
+   (`forwarder-byok.md` §2.5: simulated degraded pages replaying as
+   `forward_failed` with `error_class: "degraded_send_failed"`). *Mechanism:*
+   the schema makes `simulated` a first-class required boolean AND makes the
+   lie shape unrepresentable: `simulated: true` ⇒ `outcome` MUST be
+   `"accepted"`, `error_class` MUST be absent (schema `allOf` branch 3;
+   a failure for a page never attempted on the wire cannot be expressed).
+   Standing falsifier from P6 survives into the build: *any code path that
+   emits `forward_failed` for a page never attempted on the wire falsifies
+   the contract.* Negative fixture
+   `fixtures/negative_simulated_as_failure.json` MUST fail validation.
+
+## 3. What NEVER crosses (and the mechanism for each "never")
+
+1. **A receipt without its scheduler row (or vice versa).** Mechanism: one
+   transaction (§2.1) + the reconciliation test.
+2. **A simulated absorption recorded as failure.** Mechanism: §2.2 —
+   schema, negative fixture, P6 falsifier.
+3. **error_class on an accepted receipt.** Mechanism: schema `not required`
+   rule — an accepted receipt carrying an error is a lie in the other
+   direction (poisoning "accepted" for SLO math).
+4. **Re-serialized wire bytes hashed as wire_sha256.** Mechanism: producer
+   MUST hash the transport bytes; a test asserting
+   `receipt.wire_sha256 == sha256(bytes_actually_sent)` on the FakePD path.
+5. **A new outcome value invented by a producer.** Mechanism: closed enum;
+   the consumer (L6) owns the enum and must approve additions
+   (principal-governance: no provider silently widens a contract).
+
+## 4. Version / compatibility
+
+Additive inside v0.1 (e.g. new optional fields); new version only for true
+breaks (C7 compat rule, OPERATING-RULES §1.1). Whether L6 materializes
+simulated receipts as `forward_confirmed`+`simulated:true` or as a distinct
+`forward_simulated` event is the CONSUMER's Type-2 decision (L6 owns the
+event taxonomy) — the contract only guarantees the boolean reaches L6.
+
+## 5. Pre-mortem (top 3 — principal-systems §2)
+
+1. *The receipt is written by a separate async writer "for performance."*
+   The dual-write crash window returns. Killed by §2.1: one transaction is
+   normative, not advisory; the reconciliation test fails the build.
+2. *A metrics consumer maps `simulated: true` → failure burn.*
+   The audit lie returns wearing a metrics costume. Killed by §2.2 + the
+   negative fixture + P6's falsifier; reviewers: any dashboard touching
+   receipts routes through Ledger.
+3. *`wire_sha256` gets computed over pretty-printed JSON instead of the
+   POST bytes.* The hash proves nothing. Killed by the FakePD byte-equality
+   test (§3.4).
+
+## 6. Skill & Evidence (OPERATING-RULES §2.2)
+
+Binding clauses, each with how it binds:
+- **principal-systems law 2 (eternal friction):** the crash between "vendor
+  accepted" and "receipt written" is designed for, not hoped away — the
+  atomicity rule exists because the crash WILL happen (forwarder.py's
+  crash-window analysis is the repo's own prior art).
+- **principal-systems software constitution ("explicit versioned boundaries")
+  + `event-log-audit.md` §1.1:** the I2 invariant is a database property,
+  not a code convention — the contract states it as normative behavior, not
+  prose advice.
+- **principal-governance §2 (unforgiving API design; consumer owns):**
+  closed `outcome` enum owned by L6; additive-inside-version compatibility.
+- **principal-systems "Chesterton's fence":** `outcome` reuses pd_sender's
+  `accepted|retryable|terminal` (pd_sender.py:91) instead of inventing a new
+  taxonomy — the existing one carried embedded knowledge (terminal vs
+  retryable drives the retry ladder).
+- **OPERATING-RULES §3.4 honesty law ("no fake demos"):** the simulated
+  flag is the in-band honesty label; the contract is the enforcement point
+  of the P6 fix.
+- **External source — transactional outbox pattern**
+  (https://github.com/dcsg/archway/blob/HEAD/website/src/content/docs/glossary/outbox-pattern.mdx,
+  accessed 2026-10-05): "the transactional outbox pattern guarantees reliable
+  event publishing… by writing events to a database table in the same
+  transaction as the business operation, then relaying them asynchronously"
+  — the dual-write problem is exactly the receipt/scheduler-write pair.
+  This is what killed alternative (a) below: atomicity as a database
+  property, relay (the event log) as the async consumer.
+
+Alternatives considered and rejected:
+- (a) receipt written by a separate async writer after the scheduler commit.
+  Rejected: the dual-write crash window is the failure mode being fixed;
+  a database property, not a code convention.
+- (b) fold `simulated` into the outcome enum only (no boolean), or record
+  simulated pages as failures. Rejected: (b1) loses the honesty signal —
+  audit can't distinguish simulated absorption from real wire success;
+  (b2) IS the audit lie (`forwarder-byok.md` §2.5).
+- (c) distinct `forward_simulated` event type instead of the flag.
+  Deferred to the consumer (L6): the contract guarantees the boolean reaches
+  L6; L6 chooses the event shape (Type-2, consumer-owned).
+
+Tool evidence: `contracts/validate_fixtures.py` (stdlib `json` only) —
+3 validating fixtures + 1 negative fixture; run output in the PR body.
+Inventory commands: `grep -n "attempt_no\|wire_sha256\|pd_outcome" src/sentinel/{forwarder,pd_sender,spill}.py`
+(all read, none modified).
+
+Consumer-owner: L6 OBSERVE (event-log side). Expected reviewers: Tripwire
+(full adversarial, per 12H-PLAN F6). Vault ack on the wire-hash handling
+surface (audit-tamper model).

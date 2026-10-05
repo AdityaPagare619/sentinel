@@ -1,0 +1,1 @@
+{"action":"suppress","contract":"disposition","contract_version":"v0.1","detail":"triple lock passed: q3=suppress p3+p4=0.91 conf=0.96, fingerprint in allowlist, all freshness legs fresh","evidence_refs":["sha256:9f2c…a41b","policy:attested/LIVE#2026-10-04"],"reason_code":"allowlist"}
