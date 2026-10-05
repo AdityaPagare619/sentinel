@@ -42,7 +42,7 @@ The only key-adjacent shapes on either contract are:
 | `reason_detail.error_code` | clean (snake_case pattern) | schema |
 | `reason_detail.stale_legs[]` | clean shape; producer rule only | free-form leg names; fixture shows `["lock1_calibration: 26h old (ttl 24h)", …]` |
 | `reason_detail.detectors[]` | clean (fixed catalog) | firewall.py:383-408 detector names |
-| `reason_detail.evidence[]` | clean — cannot carry the key | firewall.py `_evidence` truncates to 80 chars (firewall.py:76) of *screened alert fields* (title/service/check/labels, firewall.py:68); alerts never contain the routing key — ingress strips it at the edge (receiver.py:485: key read for presence/auth, never copied into `Alert`) |
+| `reason_detail.evidence[]` | clean — cannot carry the key | firewall.py `_evidence` truncates to 80 chars (firewall.py:76) of *screened alert fields* (title/service/check/labels, firewall.py:68); the routing key is not in the firewall's screened-field whitelist (firewall.py:68), so evidence[] cannot smuggle it (note: Alert.raw retains the body; the whitelist is the protection) |
 | `reason_detail.step`, `.digest` | clean (int/bool) | schema |
 | `reason_detail.policy_reason` | clean (snake_case pattern) | schema |
 | `detail` | clean shape (human text ≤2000); producer rule only | no producer exists yet (draft contract); failure channels run through `sanitize_error` (integrations.py:259) |
@@ -73,12 +73,19 @@ The only key-adjacent shapes on either contract are:
   design); the spill record carries only the ref + hashes
   (forwarder.py:806-823). Simulated sends never resolve (see fix below).
 - Ingress edge: `routing_key` is extracted from the inbound PD event body
-  (receiver.py:485) for presence/auth and is never copied into the
-  normalized `Alert` — so no downstream field (firewall evidence, detail,
-  labels) can smuggle it.
+  (receiver.py:485) for presence/auth. Note: `Alert.raw = data` DOES retain
+  the raw body including the key — the actual protection is the firewall's
+  field whitelist (`_iter_field_texts`, firewall.py:68): only screened
+  fields (title/service/check/labels + raw.{summary,description,text,message,
+  details}) feed `evidence[]`, and the routing key is not in that whitelist,
+  so no downstream evidence/detail/label field can smuggle it.
 - Failure channels: `sanitize_error` (integrations.py:259) strips the exact
-  configured key VALUES from error strings on every forward failure path —
-  covering `error`/`error_class`/`last_error` crossing C6.
+  configured key VALUES from error strings in the legacy `_fail` path
+  (forwarder.py:1064), covering `error`/`error_class`/`last_error` there.
+  The durable `_retryable`/`_terminal` paths write `result.error`
+  unsanitized — no leak in practice (error strings are built from
+  closed-taxonomy fields, never the body), but a future hardening lane
+  should wrap those writes for uniformity.
 
 ## The one gap found (fixed, not waived)
 
