@@ -81,6 +81,22 @@ class DedupKeyInvalid(Exception):
 
 
 # ---------------------------------------------------------------------------
+# log-emission guard (D10)
+
+
+def sanitize_log_value(value) -> str:
+    """Replace ASCII control characters so sender-controlled values cannot
+    forge log lines (D10: a ``dedup_key`` containing ``\\n`` would otherwise
+    inject fake ``[sentinel] ...`` lines into stderr).
+
+    Applied ONLY at the stderr emission boundary — the wire value sent to
+    PagerDuty is untouched (dedup correctness requires the exact key).
+    """
+    s = "" if value is None else str(value)
+    return re.sub(r"[\x00-\x1f\x7f]", "?", s)
+
+
+# ---------------------------------------------------------------------------
 # classification
 
 
@@ -323,7 +339,8 @@ class PagerDutyClient:
                 "vendor_contract_violation"):
             # 202 without status == "success": loud, always.
             print(f"[sentinel] PD VENDOR CONTRACT VIOLATION status={status} "
-                  f"vendor_status={vendor_status!r} dedup_key={dedup_key}",
+                  f"vendor_status={vendor_status!r} "
+                  f"dedup_key={sanitize_log_value(dedup_key)}",
                   file=sys.stderr)
         retry_after_s = parse_retry_after(headers) if status == 429 else None
         if error is None and outcome != "accepted":

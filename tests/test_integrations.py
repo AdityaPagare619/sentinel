@@ -354,6 +354,35 @@ class SimulatedPagingTest(unittest.TestCase):
         self.assertTrue(res.simulated)
         self.assertIn("SIMULATED", err.getvalue())
 
+    def test_simulated_send_sanitizes_hostile_dedup_key(self):
+        # D10 emission boundary: a sender-controlled dedup_key with a
+        # newline must not forge log lines from the simulated page record.
+        # Inline echo of the sanitized text is evidence, not forgery.
+        fwd = self._unroutable()
+        hostile = "dk-evil\n[sentinel] FORGED LINE\n"
+        err = io.StringIO()
+        with redirect_stderr(err):
+            res = fwd._simulated_send("page_now", hostile, "a1")
+        self.assertTrue(res.simulated)
+        out = err.getvalue()
+        self.assertFalse(
+            any(line.startswith("[sentinel] FORGED")
+                for line in out.splitlines()),
+            f"forged log line present in: {out!r}")
+        self.assertIn("dk-evil?", out)
+
+
+class LogSanitizeTest(unittest.TestCase):
+    def test_sanitize_log_value(self):
+        from sentinel.pd_sender import sanitize_log_value
+        self.assertEqual(sanitize_log_value("dk-abc123"), "dk-abc123")
+        self.assertEqual(sanitize_log_value("a\nb\rc\x00d\x7f"),
+                         "a?b?c?d?")
+        self.assertEqual(sanitize_log_value(None), "")
+        self.assertEqual(sanitize_log_value(123), "123")
+        # tabs are control chars too: replaced, never passed through raw
+        self.assertEqual(sanitize_log_value("a\tb"), "a?b")
+
 
 class PlatformTwinTest(unittest.TestCase):
     """platform/server/integrations.py: same validation, same file format."""

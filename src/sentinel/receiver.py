@@ -69,6 +69,7 @@ from .gate import Gate
 from .health import HealthMonitor
 from .integrations import resolve_jev_key
 from .models import Alert, Thresholds
+from .pd_sender import sanitize_log_value
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
 from .state import build_state
@@ -309,14 +310,15 @@ class Pipeline:
             sys.stderr.write(
                 "[sentinel] resolve_claim_refused action=%s reason=%s "
                 "dedup_key=%s (unsigned resolve claims never close episodes)\n"
-                % (action, auth_failure, dedup_key))
+                % (action, auth_failure, sanitize_log_value(dedup_key)))
             return
         fp = self._fp_for_dedup_key(dedup_key) if dedup_key else None
         if fp is None:
             self.metrics["resolve_noop"] += 1
             sys.stderr.write(
                 f"[sentinel] resolve_claim_noop action={action} "
-                f"dedup_key={dedup_key} (no known episode; safe no-op)\n")
+                f"dedup_key={sanitize_log_value(dedup_key)} "
+                "(no known episode; safe no-op)\n")
             return
         closed = self.correlator.resolve_episode(fp,
                                                  reason="verified_resolve")

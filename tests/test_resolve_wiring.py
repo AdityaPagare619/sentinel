@@ -16,10 +16,12 @@ the wiring:
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
 from sentinel.correlator import fingerprint_for
@@ -131,6 +133,27 @@ class TestPdResolveClosesEpisode(ResolveWiringTestBase):
 class TestResolveAuth(ResolveWiringTestBase):
     def setUp(self):
         self._start_signed()
+
+    def test_hostile_dedup_key_cannot_forge_log_lines(self):
+        # D10: dedup_key is sender-controlled. A newline in it must not
+        # inject fake [sentinel] lines into stderr — the emission
+        # boundary replaces control chars (fail-before: the raw newline
+        # split the log line and a forged line appeared at line start).
+        # The attacker's text may still appear INLINE (evidence), but it
+        # must never begin a log line.
+        hostile = "dk-evil\n[sentinel] FORGED LINE\n"
+        raw = json.dumps(_resolve_claim(hostile)).encode()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code, _ = self._post("/v2/enqueue", raw, headers=_sign(raw))
+        self.assertEqual(code, 200)  # unknown key: safe no-op, never error
+        out = err.getvalue()
+        self.assertFalse(
+            any(line.startswith("[sentinel] FORGED")
+                for line in out.splitlines()),
+            f"forged log line present in: {out!r}")
+        # evidence preserved: the sanitized key is still recorded in-band
+        self.assertIn("dk-evil?", out)
 
     def test_unsigned_resolve_does_not_close(self):
         fp = self._fp()
