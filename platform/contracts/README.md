@@ -121,3 +121,45 @@ v1 demo: the read tier sits behind the platform's own session; the
 contract covers payload shape, not auth. Production hardens this
 (restricted read-only credentials, per Stripe's restricted-key
 precedent) without changing any payload.
+
+---
+
+## Versioning policy (C7, v0.1 — prep draft, 2026-10-05)
+
+Recorded per PIPELINE-REVISION §2.2/C7 and the Google/Azure/Stripe consensus
+on API versioning. This policy governs `contracts/serve/api-v1.v0.1.yaml`
+and every later revision of this contract.
+
+**Additive inside a version.** Within a major version, only
+backwards-compatible changes ship: new optional response fields, new
+endpoints, wider enums, looser validation. Old clients ignore unknown
+response fields (the forward-compatibility rule above); servers never
+require unknown request fields. Backwards-compatible changes keep the
+version constant or bump minor — never a new major.
+*Lineage: Google Cloud Endpoints lifecycle guidance*
+(https://docs.cloud.google.com/endpoints/docs/openapi/lifecycle-management,
+accessed 2026-10-05).
+
+**New version only for true breaks.** A rename, removal, retype, or new
+required request parameter is a true break and gets a new major version
+(`/api/v2`), deployed side-by-side with the old from the same backend.
+No in-place breaking changes, ever.
+*Lineage: the Google/Azure/Stripe consensus — all three agree: "version
+only when you can't make the change backward-compatible"*
+(https://dev.to/freelance_inspector/google-azure-and-stripe-version-apis-three-different-ways-heres-what-they-agree-on-3mbg,
+accessed 2026-10-05).
+
+**Deprecation is announced, not discovered.** Retired paths emit, on every
+response (success and error alike):
+`Deprecation: @<unix-seconds>` (RFC 9745, https://www.rfc-editor.org/rfc/rfc9745)
+and `Sunset: <HTTP-date>` (RFC 8594, https://www.rfc-editor.org/rfc/rfc8594),
+plus `Link: <successor>; rel="successor-version"`, `<migration-doc>;
+rel="deprecation"`. The Sunset date is never earlier than the Deprecation
+date. One canonical migration guide per retirement.
+*Lineage: principal-governance — "version explicitly, deprecate on a
+published timeline."*
+
+**Break taxonomy (what counts as breaking):**
+safe — adding an optional field, a new endpoint, a new optional parameter,
+widening an enum; breaking — removing, renaming, or retyping a field, or
+making an optional parameter required.
