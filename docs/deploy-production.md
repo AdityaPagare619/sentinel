@@ -223,12 +223,24 @@ Key lines: `[sentinel] FORWARD FAILED` (page relay failed — the decision
 already happened; investigate the relay, not the gate), `BROKEN: checkpoint`
 (event-log tamper — treat as an incident).
 
-## 8. Upgrading
+## 8. Upgrading — `deploy.sh` only
+
+Upgrades go **only** through `scripts/ops/deploy.sh`: pinned SHA →
+fresh artifact dir → gate on the pinned SHA → atomic symlink swap →
+`/healthz` health gate → auto-rollback on failure.
 
 ```bash
-cd /opt/sentinel/repo && git pull --ff-only
-sudo systemctl restart sentinel-receiver sentinel-platform
+SENTINEL_RESTART_CMD="sudo systemctl restart sentinel-receiver sentinel-platform" \
+SENTINEL_HEALTH_TOKEN=<token> \
+SENTINEL_PORT=8080 \
+  sudo -E /opt/sentinel/repo/scripts/ops/deploy.sh --sha <full-40-hex-SHA>
 ```
+
+> **`git pull` on production is forbidden** (full rule + reasons:
+> `docs/deploy-discipline.md`). It mutates the live tree with no health
+> gate and no rollback point. Roll back with
+> `scripts/ops/rollback.sh` — it swaps the `current` symlink and refuses
+> to declare success unless `/healthz` reports `ok:true`.
 
 The receiver refuses to start on invalid policy config (exit 2) — systemd
 will retry; fix the config, don't force it. The platform server is stateless
