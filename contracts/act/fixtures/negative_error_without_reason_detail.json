@@ -1,0 +1,1 @@
+{"contract":"disposition","contract_version":"v0.1","action":"page_now","reason_code":"error","evidence_refs":[],"_note":"Tripwire B1 regression: structured reason_code without reason_detail must be rejected"}

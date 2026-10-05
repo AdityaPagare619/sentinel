@@ -21,12 +21,19 @@ ROOT = Path(__file__).resolve().parent
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
+DECIMAL_ID = re.compile(r"^-?[0-9]+$")
 
 SIMPLE_REASONS = {
     "threshold", "allowlist", "uncertain", "shadow", "dedup",
     "change_window", "storm", "storm_digest", "model_drift",
     "verified_resolve", "operator_resolve", "label_pipeline_stale",
     "commit_watchdog_trip",
+}
+
+# reason_codes that MUST carry a structured reason_detail (Tripwire B1:
+# the schema enforces this at the then level; the validator mirrors it)
+STRUCTURED_REASONS = {
+    "error", "freshness_veto", "firewall_flagged", "failopen", "policy_block",
 }
 
 
@@ -65,6 +72,11 @@ def check_disposition(schema: dict, fx: dict, name: str) -> list[str]:
     elif not SNAKE.match(rc):
         e.append(err(ctx, f"reason_code {rc!r} carries interpolated data (not snake_case)"))
     # reason_detail per reason_code
+    # B1: structured reasons REQUIRE reason_detail (schema then-level
+    # required); an absent reason_detail used to validate vacuously.
+    if rc in STRUCTURED_REASONS and "reason_detail" not in fx:
+        e.append(err(ctx, f"structured reason {rc!r} REQUIRES reason_detail"))
+        return e
     det = fx.get("reason_detail", {})
     if not isinstance(det, dict):
         e.append(err(ctx, "reason_detail must be an object"))
@@ -92,15 +104,22 @@ def check_disposition(schema: dict, fx: dict, name: str) -> list[str]:
     elif rc == "failopen":
         if det.get("step") not in (1, 2, 3):
             e.append(err(ctx, "failopen requires step in {1,2,3}"))
-        if not isinstance(det.get("digest"), bool):
-            e.append(err(ctx, "failopen requires boolean digest"))
+        # B1-digest honesty: digest is OPTIONAL (absent == paged); producers
+        # MUST NOT fabricate it for error-driven steps.
+        if "digest" in det and not isinstance(det["digest"], bool):
+            e.append(err(ctx, "failopen digest must be boolean when present"))
         if "error_code" in det and not SNAKE.match(str(det["error_code"])):
             e.append(err(ctx, "failopen error_code must be snake_case"))
         if set(det) - {"step", "digest", "error_code"}:
             e.append(err(ctx, f"failopen reason_detail has unexpected fields {sorted(det)}"))
     elif rc == "policy_block":
-        if not isinstance(det.get("policy_reason"), str) or not det["policy_reason"]:
+        pr = det.get("policy_reason")
+        if not isinstance(pr, str) or not pr:
             e.append(err(ctx, "policy_block requires policy_reason"))
+        # B2: open vocabulary pending Q3, closed SHAPE — the same snake_case
+        # rule as every other machine-readable code field.
+        elif not SNAKE.match(pr):
+            e.append(err(ctx, f"policy_reason {pr!r} must be snake_case (no interpolated data)"))
         if set(det) != {"policy_reason"}:
             e.append(err(ctx, f"policy_block reason_detail has unexpected fields {sorted(det)}"))
     # evidence_refs
@@ -126,6 +145,9 @@ def check_forward_receipt(schema: dict, fx: dict, name: str) -> list[str]:
     an = fx.get("attempt_no")
     if not isinstance(an, int) or isinstance(an, bool) or an < 1:
         e.append(err(ctx, f"attempt_no must be integer >= 1, got {an!r}"))
+    ch = fx.get("channel")
+    if ch is not None and ch not in props["channel"]["enum"]:
+        e.append(err(ctx, f"channel {ch!r} not in enum"))
     if not isinstance(fx.get("wire_sha256"), str) or not HEX64.match(fx.get("wire_sha256", "")):
         e.append(err(ctx, "wire_sha256 must be 64 lowercase hex chars"))
     oc = fx.get("outcome")
@@ -141,17 +163,30 @@ def check_forward_receipt(schema: dict, fx: dict, name: str) -> list[str]:
             e.append(err(ctx, f"simulated:true REQUIRES outcome 'accepted', got {oc!r}"))
         if fx.get("error_class") is not None:
             e.append(err(ctx, "simulated:true MUST NOT carry error_class"))
-    ch = fx.get("channel")
-    if ch is not None and ch not in props["channel"]["enum"]:
-        e.append(err(ctx, f"channel {ch!r} not in enum"))
+    # B3: the degraded path makes exactly one direct attempt (no retry
+    # ladder); duplicate suppression across crash-replays is spill_id's job.
+    if ch == "direct-degraded" and an != 1:
+        e.append(err(ctx, f"direct-degraded attempt_no must be 1, got {an!r}"))
+    # B3: spill_id is the replay-dedup key — REQUIRED on the degraded
+    # channel (no scheduler row exists there), FORBIDDEN elsewhere.
+    sid = fx.get("spill_id")
+    if ch == "direct-degraded":
+        if not isinstance(sid, str) or not HEX64.match(sid):
+            e.append(err(ctx, "direct-degraded REQUIRES spill_id (64 lowercase hex)"))
+    elif sid is not None:
+        e.append(err(ctx, f"spill_id is FORBIDDEN on channel {ch!r}"))
     ec = fx.get("error_class")
     if oc in ("retryable", "terminal"):
         if not isinstance(ec, str) or not ec:
             e.append(err(ctx, f"outcome {oc!r} REQUIRES error_class"))
     elif oc == "accepted" and ec is not None:
         e.append(err(ctx, "accepted receipt MUST NOT carry error_class"))
-    if not isinstance(fx.get("decision_id"), str) or not fx.get("decision_id"):
-        e.append(err(ctx, "decision_id must be a non-empty string"))
+    # B5: decision_id is the event-log sequence number of the decision_made
+    # event, rendered decimal ("-1" = no joinable decision). Defined
+    # normatively in the schema; the validator mirrors the shape.
+    did = fx.get("decision_id")
+    if not isinstance(did, str) or not DECIMAL_ID.match(did):
+        e.append(err(ctx, f"decision_id must match ^-?[0-9]+$, got {did!r}"))
     return e
 
 

@@ -35,16 +35,25 @@ T+9 of the 12-hour wave, fwd-2 escalates to Ledger the same hour
   **reason_code NEVER carries interpolated data.** No `error:TimeoutError`,
   no `freshness:leg1|leg2` — those shapes are rejected by the enum (and by the
   schema's `pattern`, and by `validate_fixtures.py`).
-- `reason_detail` — the structured payload, selected by `reason_code`:
+- `reason_detail` — the structured payload, selected by `reason_code`.
+  REQUIRED for the 5 structured reason_codes — schema-enforced at instance
+  level (`"required": ["reason_detail"]` on each structured `then` branch;
+  previously an absent `reason_detail` validated vacuously, Tripwire B1):
   - `error` → `error_code` (snake_case, was `f"error:{code}"`; gate.py `_error_code`)
   - `freshness_veto` → `stale_legs[]` (every stale leg named, ADR-014; was
     `"freshness:" + "|".join(fresh_reasons)`)
   - `firewall_flagged` → `detectors[]` (+ optional `evidence[]`; was
     `firewall_flagged:<detectors>`)
-  - `failopen` → `step` (1–3), `digest` (bool), optional `error_code`
+  - `failopen` → `step` (1–3, required), `digest` (OPTIONAL bool — absent
+    means the step paged; only explicit `true` means folded into the
+    digest; producers MUST NOT fabricate it for error-driven steps),
+    optional `error_code`
     (collapses `failopen_step{1,2,3}{,_error,_digest}`)
-  - `policy_block` → `policy_reason` (open string; `policy_gate_not_configured`
-    today; full vocabulary pending Q3 — Type-1, Aditya's item)
+  - `policy_block` → `policy_reason` (open VOCABULARY pending Q3, closed
+    SHAPE: `^[a-z][a-z0-9_]*$` — `policy_gate_not_configured` today;
+    `error:TimeoutError|leg1|leg2` cannot ride one level down in the
+    machine-readable channel, Tripwire B2; full vocabulary pending Q3 —
+    Type-1, Aditya's item)
   - simple reasons → `reason_detail` MUST be absent or empty.
 - `detail` — optional human occurrence text (RFC 9457 shape: stable
   `reason_code` ≈ `type`/`title`, occurrence-specific `detail`).
@@ -65,8 +74,12 @@ Type-1 ruling).
    L5 is strict on ingest (validates before acting) — resilient ingest would
    silently admit invented vocabulary.
 2. **String-interpolated reasons.** *Mechanism:* closed enum + `pattern`
-   `^[a-z][a-z0-9_]*$` (no `:`, no `|`) + negative fixture
-   `fixtures/negative_stringly_typed_reason.json` that MUST fail validation.
+   `^[a-z][a-z0-9_]*$` (no `:`, no `|`) on `reason_code` AND on
+   `policy_reason` (same class of field, same rule) + negative fixtures
+   `fixtures/negative_stringly_typed_reason.json`,
+   `fixtures/negative_policy_reason_interpolated.json`, and
+   `fixtures/negative_error_without_reason_detail.json` that MUST fail
+   validation.
 3. **Machine logic parsing `detail`.** *Mechanism:* `detail` is optional and
    absent from every enum/allOf rule; the qa-2 `tests/contracts/` gate owns a
    test asserting no consumer matches on `detail` (this contract plugs into it).

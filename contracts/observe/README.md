@@ -12,16 +12,40 @@ simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
 
 `ForwardReceipt{contract, contract_version, decision_id, attempt_no, wire_sha256, outcome, simulated, channel?, error_class?}`
 
-- `decision_id` — the L4 decision being acted on. Opaque to L5. Today the
-  outbox row carries `alert_id`; implementations join `decision_id` from the
-  row's decision reference (or `alert_id` + the C5 trace ID until the
-  decision-record ID lands). L6 uses it to join receipt → `decision_made`.
+- `decision_id` — the event-log sequence number of the `decision_made`
+  event being acted on, rendered as a decimal string (e.g. `"412"`).
+  MINT — defined normatively here, the single contract that defines it
+  (Tripwire B5): (a) outbox/secondary channels — L5 reads the outbox row's
+  `decision_seq` column (INTEGER NOT NULL, eventlog.py:282) and renders it
+  decimal; (b) direct-degraded channel — no outbox row exists, so L5 MUST
+  capture the decision's event-log sequence into the spill record (spill
+  field `decision_seq`) at send time, and the replay MUST copy it verbatim
+  into the receipt. `"−1"` means NO joinable decision: control-plane pages
+  (eventlog.py `_enqueue_control_plane_page`) and degraded sends whose
+  decision never durably sequenced (e.g. the commit-watchdog path). L6
+  joins receipt → `decision_made` on this key; `"-1"` receipts stand alone.
+  Schema-enforced shape: `^-?[0-9]+$`.
 - `attempt_no` — 1-based; from the outbox row's `attempt_count` at claim time
-  (forwarder.py:444); shared with the retry-schedule index.
+  (forwarder.py:444); shared with the retry-schedule index. On the
+  direct-degraded channel `attempt_no` is ALWAYS 1 — the degraded path makes
+  exactly one direct attempt (no retry ladder); duplicate suppression across
+  crash-replays is `spill_id`'s job, not `attempt_no`'s.
+- `spill_id` — REQUIRED when `channel` is `direct-degraded`, FORBIDDEN
+  otherwise (Tripwire B3). sha256 (lowercase hex) of the spill file's exact
+  bytes as read at replay. Stable across crash-replays of the same spill;
+  unique across distinct spill writes. The replay-dedup key: L6 MUST treat
+  same `(channel, spill_id)` as the same send replayed (keep first, drop
+  the rest).
 - `wire_sha256` — sha256 of the EXACT bytes presented to the transport
-  (pd_sender.py:338 hashes `wire`). For simulated absorption: the exact bytes
-  that *would* have been sent. Never a re-serialization — re-serializing
-  before hashing destroys the audit proof.
+  (pd_sender.py:338 hashes `wire`). For SIMULATED absorption: sha256 of the
+  CANONICAL KEYLESS serialization — the wire event as constructed on the
+  simulated path (which never resolves a routing key; the key value is
+  deliberately never materialized), serialized as JSON with keys sorted,
+  separators `(',',':')`, UTF-8 encoded (Tripwire B4 — the previous "exact
+  bytes that WOULD have been sent" had no canonical construction). The
+  producer MUST construct these exact bytes on the simulated path even
+  though nothing is transmitted. Never a re-serialization of pretty-printed
+  JSON, never a hash of an arbitrary placeholder.
 - `outcome` — `accepted | retryable | terminal`, pd_sender's own taxonomy
   (pd_sender.py:91). `accepted` covers real wire acceptance AND simulated
   absorption (the `simulated` flag distinguishes them).
@@ -33,17 +57,25 @@ simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
 
 ## 2. The two normative behavioral rules (not just data)
 
-1. **Atomicity.** The receipt MUST be written in the SAME database transaction
-   as the outbox scheduler update it describes (claim / confirm / retry /
-   dead-letter / spill-replay). A receipt without its scheduler row, or a
-   scheduler row without its receipt, is a contract violation. *Why:* the
-   failure mode is a crash between the two writes — eternal friction
-   (principal-systems law 2). I2, today's proudest invariant
-   (`event-log-audit.md` §1.1): "the event log and the work queue can never
-   disagree — a database property, not a code convention." *Mechanism:*
-   one transaction; plus a reconciliation test — every scheduler transition
-   to a terminal state MUST have a matching receipt — owned by the L5 lane,
-   plugged into the qa-2 `tests/contracts/` gate.
+1. **Atomicity — OUTBOX-BACKED CHANNELS (outbox, secondary).** The receipt
+   MUST be written in the SAME database transaction as the outbox scheduler
+   update it describes (claim / confirm / retry / dead-letter). A receipt
+   without its scheduler row, or a scheduler row without its receipt, is a
+   contract violation. *Why:* the failure mode is a crash between the two
+   writes — eternal friction (principal-systems law 2). I2, today's proudest
+   invariant (`event-log-audit.md` §1.1): "the event log and the work queue
+   can never disagree — a database property, not a code convention."
+   *Mechanism:* one transaction; plus a reconciliation test — every
+   scheduler transition to a terminal state MUST have a matching receipt —
+   owned by the L5 lane, plugged into the qa-2 `tests/contracts/` gate.
+   **DEGRADED CHANNEL (direct-degraded): there is NO scheduler row by design
+   — the atomicity rule does not apply** (Tripwire B3: the old text
+   criminalized the contract's own `direct-degraded` fixture). The honest
+   guarantee is AT-LEAST-ONCE REPLAY: every spill file is replayed into the
+   event log until its file is archived; a crash between the log append and
+   the file archive MAY emit a duplicate receipt for one send (mechanically
+   demonstrated by crash injection against `spill.py`). L6 MUST deduplicate
+   on `(channel, spill_id)`.
 2. **Simulated honesty.** `simulated: true` MUST propagate end-to-end
    (spill → replay → event body) and MUST NEVER be recorded as a failure.
    `simulated: true` + `outcome: accepted` is a CONFIRMATION of absorption,
@@ -61,8 +93,12 @@ simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
 
 ## 3. What NEVER crosses (and the mechanism for each "never")
 
-1. **A receipt without its scheduler row (or vice versa).** Mechanism: one
-   transaction (§2.1) + the reconciliation test.
+1. **A receipt without its scheduler row (or vice versa) — on outbox-backed
+   channels.** Mechanism: one transaction (§2.1) + the reconciliation test.
+   On the degraded channel there is no row by design; the "never" there is
+   **an undeduplicable duplicate**: mechanism is `spill_id` (required) +
+   L6's MUST-deduplicate rule — a degraded receipt without `spill_id` is a
+   contract violation (schema-enforced).
 2. **A simulated absorption recorded as failure.** Mechanism: §2.2 —
    schema, negative fixture, P6 falsifier.
 3. **error_class on an accepted receipt.** Mechanism: schema `not required`
@@ -71,6 +107,10 @@ simulated-spill audit lie) and P6; `event-log-audit.md` §1.1 (I2 invariant).
 4. **Re-serialized wire bytes hashed as wire_sha256.** Mechanism: producer
    MUST hash the transport bytes; a test asserting
    `receipt.wire_sha256 == sha256(bytes_actually_sent)` on the FakePD path.
+   On the simulated path the producer MUST hash the canonical keyless
+   serialization (defined in §1); a test asserting equality against
+   independently-constructed keyless bytes. A hash of an arbitrary
+   placeholder is a contract violation.
 5. **A new outcome value invented by a producer.** Mechanism: closed enum;
    the consumer (L6) owns the enum and must approve additions
    (principal-governance: no provider silently widens a contract).
