@@ -592,6 +592,41 @@ class TestStandbyAndSpill(ForwarderTestBase):
         # Second replay finds nothing (archived).
         self.assertEqual(replay_spills(self.log, self.spill_dir), [])
 
+    def test_same_millisecond_spills_do_not_collide(self):
+        # PR #92 review: spill filenames were spill-<ms>-<pid>.json — two
+        # spills from one process inside one millisecond produced the SAME
+        # name and os.replace() silently overwrote the first record: silent
+        # audit loss on the degraded path, the exact failure the event log
+        # exists to prevent. Freeze the millisecond and prove both records
+        # survive with distinct names.
+        import sentinel.spill as spill_mod
+        frozen_ms = 1728020000123
+        real_time = spill_mod.time.time
+        spill_mod.time.time = lambda: frozen_ms / 1000.0
+        try:
+            p1 = write_spill(self.spill_dir, {
+                "kind": "evidence_loss", "alert_id": "a-collide-1",
+                "fingerprint": "fp1", "episode_id": "ep1",
+                "dedup_key": "k1", "payload_sha256": "aa",
+                "routing_key_ref": CONTROL_REF, "reason": "test",
+                "pd_outcome": "accepted", "pd_status": 202, "error": None})
+            p2 = write_spill(self.spill_dir, {
+                "kind": "evidence_loss", "alert_id": "a-collide-2",
+                "fingerprint": "fp2", "episode_id": "ep2",
+                "dedup_key": "k2", "payload_sha256": "bb",
+                "routing_key_ref": CONTROL_REF, "reason": "test",
+                "pd_outcome": "accepted", "pd_status": 202, "error": None})
+        finally:
+            spill_mod.time.time = real_time
+        self.assertIsNotNone(p1)
+        self.assertIsNotNone(p2)
+        self.assertNotEqual(p1, p2, "same-ms spills must get distinct names")
+        self.assertTrue(os.path.exists(p1), "first spill record was lost")
+        self.assertTrue(os.path.exists(p2), "second spill record was lost")
+        # Both records are intact and replayable — no silent overwrite.
+        seen = {rec["alert_id"] for _, rec in iter_spills(self.spill_dir)}
+        self.assertEqual(seen, {"a-collide-1", "a-collide-2"})
+
     def test_watchdog_trip_wires_degraded_send(self):
         # The event-log lane's commit watchdog → our degraded_sender:
         # direct-to-PD + spill + control-plane page, end to end.

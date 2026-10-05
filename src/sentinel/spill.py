@@ -28,6 +28,7 @@ never a failure.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import sys
@@ -36,6 +37,17 @@ import time
 SPILL_PREFIX = "spill-"
 SPILL_SUFFIX = ".json"
 REPLAYED_SUFFIX = ".replayed"
+
+# Per-process monotonic counter, appended to spill filenames. The filename
+# used to be spill-<epoch_ms>-<pid>.json — two spills from the same process
+# inside one millisecond produced the SAME name and os.replace() silently
+# overwrote the first record: silent audit data loss on the exact path the
+# event log exists to protect (PR #92 review). The counter closes it:
+# next() on itertools.count is atomic under the GIL, so concurrent threads
+# in one process still get distinct names. Zero-padded so iter_spills'
+# lexicographic sort stays chronological. (Counter resets on restart, but
+# the pid and/or millisecond then differ — the triple is unique in practice.)
+_spill_seq = itertools.count()
 
 
 def _utc_ts() -> str:
@@ -51,7 +63,7 @@ def write_spill(spill_dir: str | None, record: dict) -> str | None:
     try:
         os.makedirs(spill_dir, exist_ok=True)
         name = (f"{SPILL_PREFIX}{int(time.time() * 1000)}"
-                f"-{os.getpid()}{SPILL_SUFFIX}")
+                f"-{os.getpid()}-{next(_spill_seq):04d}{SPILL_SUFFIX}")
         path = os.path.join(spill_dir, name)
         full = {"ts": _utc_ts(), **record}
         # Write-then-rename: a crash mid-write never leaves a half record.
