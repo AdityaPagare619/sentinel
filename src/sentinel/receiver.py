@@ -310,13 +310,14 @@ class Pipeline:
             sys.stderr.write(
                 "[sentinel] resolve_claim_refused action=%s reason=%s "
                 "dedup_key=%s (unsigned resolve claims never close episodes)\n"
-                % (action, auth_failure, sanitize_log_value(dedup_key)))
+                % (sanitize_log_value(action), auth_failure,
+                   sanitize_log_value(dedup_key)))
             return
         fp = self._fp_for_dedup_key(dedup_key) if dedup_key else None
         if fp is None:
             self.metrics["resolve_noop"] += 1
             sys.stderr.write(
-                f"[sentinel] resolve_claim_noop action={action} "
+                f"[sentinel] resolve_claim_noop action={sanitize_log_value(action)} "
                 f"dedup_key={sanitize_log_value(dedup_key)} "
                 "(no known episode; safe no-op)\n")
             return
@@ -325,7 +326,7 @@ class Pipeline:
         if not closed:
             self.metrics["resolve_noop"] += 1
             sys.stderr.write(
-                f"[sentinel] resolve_claim_noop action={action} fp={fp} "
+                f"[sentinel] resolve_claim_noop action={sanitize_log_value(action)} fp={fp} "
                 "(episode already closed or pruned; safe no-op)\n")
             return
         self.metrics["episodes_resolved"] += 1

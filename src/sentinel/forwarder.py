@@ -1042,7 +1042,7 @@ class Forwarder:
         """
         _key, key_source = self._resolve_key()
         self.metrics["simulated"] = self.metrics.get("simulated", 0) + 1
-        print(f"[sentinel] SIMULATED PAGE action={action} alert={alert_id} "
+        print(f"[sentinel] SIMULATED PAGE action={action} alert={sanitize_log_value(alert_id)} "
               f"dedup={sanitize_log_value(dedup_key)} key_source={key_source} "
               f"(simulated paging is ON — nothing was sent to PagerDuty)",
               file=sys.stderr)
@@ -1057,7 +1057,7 @@ class Forwarder:
         # hostile/synthetic exception carrying the key must not echo it.
         self.metrics["errors"] += 1
         err = sanitize_error(str(exc))
-        print(f"[sentinel] FORWARD FAILED action={action} alert={alert_id} "
+        print(f"[sentinel] FORWARD FAILED action={action} alert={sanitize_log_value(alert_id)} "
               f"status={status_code} error={err}", file=sys.stderr)
         return ForwardResult(forwarded=False, status_code=status_code,
                              error=err, action=action, dedup_key=dedup_key)

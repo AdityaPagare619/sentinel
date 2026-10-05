@@ -25,6 +25,7 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 from sentinel.correlator import fingerprint_for
+from sentinel.forwarder import Forwarder
 
 from tests.test_gate import canned
 from tests.test_receiver import ReceiverTestBase, _pd_event, FixedClient
@@ -387,6 +388,80 @@ class TestResolveApiContract(ResolveWiringTestBase):
     def test_resolve_unknown_fingerprint_returns_false(self):
         self.assertFalse(self.pipeline.correlator.resolve_episode(
             "f" * 16, reason="operator_resolve"))
+
+
+class TestD10ActionLogForging(ResolveWiringTestBase):
+    """D10 follow-up (reviewer-found): the stderr emission boundary must
+    sanitize EVERY sender-controlled interpolation, not just dedup_key.
+
+    * resolve_claim_refused/noop interpolate event_action (receiver.py);
+    * SIMULATED PAGE / FORWARD FAILED interpolate alert_id (forwarder.py),
+      which is str(data["dedup_key"]) — attacker-controlled pre-auth.
+    """
+
+    def setUp(self):
+        self._start_signed()
+
+    @staticmethod
+    def _no_forged_lines(out):
+        return not any(line.startswith("[sentinel] FORGED")
+                       for line in out.splitlines())
+
+    def test_hostile_event_action_cannot_forge_refused_log(self):
+        # The refused-auth emission interpolates event_action. The HTTP
+        # membership gate only admits literal "resolve"/"acknowledge", so
+        # the hostile value is driven straight into _handle_resolve_claim
+        # with unsigned headers — the refused path — to prove the
+        # SANITIZER, not the gate. Fail-before: the newline split the
+        # line and a forged [sentinel] line appeared at line start.
+        hostile = ("resolve\n[sentinel] FORGED ACTION\u2028"
+                   "[sentinel] FORGED U2028")
+        data = {"event_action": hostile, "dedup_key": "dk-action-1"}
+        body = json.dumps(data).encode()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.pipeline._handle_resolve_claim(data, body, {})
+        self.assertEqual(self.pipeline.metrics["resolve_auth_refused"], 1)
+        out = err.getvalue()
+        self.assertIn("resolve_claim_refused", out)  # site was exercised
+        self.assertTrue(self._no_forged_lines(out),
+                        f"forged log line present in: {out!r}")
+        self.assertNotIn("\u2028", out)
+
+    def test_hostile_dedup_key_cannot_forge_simulated_page_alert(self):
+        # HTTP-reachable pre-auth: an unsigned resolve claim is refused
+        # the close, but the PD relay still runs (forward_raw). In
+        # simulated mode that logs SIMULATED PAGE alert=<dedup_key> —
+        # the attacker's value. Must not forge lines.
+        hostile = "dk-evil\n[sentinel] FORGED ALERT\u2028[sentinel] FORGED U2028"
+        raw = json.dumps(_resolve_claim(hostile)).encode()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"SENTINEL_SIMULATED_PAGING": "1"}):
+            with redirect_stderr(err):
+                code, _ = self._post("/v2/enqueue", raw)  # unsigned: refused
+        self.assertEqual(code, 200)
+        self.assertEqual(self.pipeline.metrics["resolve_auth_refused"], 1)
+        out = err.getvalue()
+        self.assertIn("SIMULATED PAGE", out)  # site was exercised
+        self.assertTrue(self._no_forged_lines(out),
+                        f"forged log line present in: {out!r}")
+        self.assertNotIn("\u2028", out)
+
+    def test_hostile_alert_id_cannot_forge_forward_failed(self):
+        # Same hostile value through the failure path: a PD send that
+        # raises lands in _fail -> FORWARD FAILED alert=<attacker value>.
+        fwd = Forwarder(pd_events_url="http://127.0.0.1:1/",
+                        default_routing_key="rk")
+        hostile = "dk-evil\n[sentinel] FORGED FAIL\u2028"
+        err = io.StringIO()
+        with redirect_stderr(err):
+            res = fwd.forward_raw(b"{}", alert_id=hostile, dedup_key="dk")
+        self.assertFalse(res.forwarded)
+        out = err.getvalue()
+        self.assertIn("FORWARD FAILED", out)  # site was exercised
+        self.assertTrue(self._no_forged_lines(out),
+                        f"forged log line present in: {out!r}")
+        self.assertNotIn("\u2028", out)
 
 
 if __name__ == "__main__":
