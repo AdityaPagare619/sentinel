@@ -20,7 +20,6 @@ function rowHtml(d) {
     <span class="r-t">${fmtTime(d.ts)}</span>
     <span class="sev-chip sev-${esc(d.severity)}">${esc(SEV_LABEL[d.severity] || d.severity)}</span>
     ${dispChip(d.disposition, d.reasonCode)}
-    <span class="mono" style="color:var(--tx-2)">${esc(d.reasonCode)}</span>
     <span class="mono">conf ${d.confidence}</span>
     <span class="mono" style="color:var(--tx-3)">${esc(d.service || '')}</span>
     <span class="mono" style="color:var(--tx-3)">fpr:${esc((d.fingerprint || '').replace('·', ''))}</span>
