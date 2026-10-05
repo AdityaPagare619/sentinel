@@ -323,5 +323,95 @@ class TestShadowEndToEnd(ReceiverTestBase):
         self.assertEqual(rows[0]["reason"], "shadow")
 
 
+class TestMalformedJsonDispositionR8(ReceiverTestBase):
+    """R-8: malformed JSON on ingress is `unparseable`, never `handler_panics`.
+
+    Before the fix, json.JSONDecodeError / UnicodeDecodeError escaped
+    handle_pd/handle_generic and were counted as handler_panics at the HTTP
+    layer — the metrics lied about what happened. (RecursionError on
+    deeply-nested input did the same until it was added to the guarded
+    tuple.) Malformed sender bytes are a client-side input failure,
+    not a handler defect.
+    """
+
+    def setUp(self):
+        # Onboarding mode (no webhook secret): /webhook/generic accepts
+        # unsigned deliveries loudly, so the malformed-JSON path is
+        # exercised without a signing fixture. R-8 assertions are the
+        # unparseable/handler_panics metrics, which are auth-independent.
+        self._start(FixedClient(canned(p1=0.9, conf=0.95)),
+                    webhook_secret=None, webhook_onboarding=True)
+
+    def _assert_malformed_is_unparseable(self, route, raw, headers=None):
+        code, resp = self._post(route, raw, headers)
+        self.assertEqual(code, 200)  # fail-open: never 5xx for bad input
+        self.assertEqual(self.pipeline.metrics["unparseable"], 1)
+        self.assertEqual(self.pipeline.metrics["handler_panics"], 0)
+        # fail-open preserved: the original bytes are still forwarded to PD
+        self.assertEqual(len(self.pd.requests), 1)
+        self.assertEqual(self.pd.requests[0]["body"], raw)
+        return resp
+
+    def test_pd_enqueue_malformed_json_is_unparseable(self):
+        resp = self._assert_malformed_is_unparseable(
+            "/v2/enqueue", b'{"event_action": "trigger", broken')
+        self.assertEqual(resp["status"], "success")
+
+    def test_pd_enqueue_invalid_utf8_is_unparseable(self):
+        resp = self._assert_malformed_is_unparseable(
+            "/v2/enqueue", b'\xff\xfe{"not": "utf-8"}')
+        self.assertEqual(resp["status"], "success")
+
+    def test_pd_enqueue_truncated_body_is_unparseable(self):
+        resp = self._assert_malformed_is_unparseable("/v2/enqueue", b'{"a":')
+        self.assertEqual(resp["status"], "success")
+
+    def test_pd_enqueue_valid_json_non_object_is_unparseable(self):
+        resp = self._assert_malformed_is_unparseable("/v2/enqueue", b'[1, 2]')
+        self.assertEqual(resp["status"], "success")
+
+    def test_pd_enqueue_deeply_nested_json_is_unparseable(self):
+        # RecursionError is not a ValueError subclass: it escaped the
+        # original (JSONDecodeError, UnicodeDecodeError) tuple, so deeply
+        # nested input was still counted as handler_panics — the exact
+        # misdisposition this PR eliminates. Now: unparseable.
+        raw = b"[" * 25000 + b"]" * 25000
+        resp = self._assert_malformed_is_unparseable("/v2/enqueue", raw)
+        self.assertEqual(resp["status"], "success")
+
+    def test_generic_malformed_json_is_unparseable(self):
+        raw = b"not json at all"
+        sig = TestGenericWebhook._sig(self, raw)
+        resp = self._assert_malformed_is_unparseable(
+            "/webhook/generic", raw, sig)
+        self.assertEqual(resp["disposition"], "passthrough")
+
+    def test_parse_json_object_raises_unparseable_not_decode_errors(self):
+        from sentinel.receiver import Unparseable, _parse_json_object
+        for raw in (b"{nope", b"\xff\xfe", b'["not", "an", "object"]'):
+            with self.assertRaises(Unparseable):
+                _parse_json_object(raw)
+        # and well-formed objects still parse
+        self.assertEqual(_parse_json_object(b'{"a": 1}'), {"a": 1})
+
+    def test_genuine_handler_defect_still_counts_handler_panics(self):
+        # The handler_panics metric must remain live for REAL defects —
+        # the fix narrows the exception path, it does not disable it.
+        raw = json.dumps(_pd_event()).encode()
+        orig_triage = self.pipeline._triage
+        self.pipeline._triage = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("synthetic handler defect"))
+        try:
+            code, resp = self._post("/v2/enqueue", raw)
+        finally:
+            self.pipeline._triage = orig_triage
+        self.assertEqual(code, 200)  # last resort: never 5xx
+        self.assertEqual(self.pipeline.metrics["handler_panics"], 1)
+        self.assertEqual(self.pipeline.metrics["unparseable"], 0)
+        # last resort still forwards the original bytes
+        self.assertEqual(len(self.pd.requests), 1)
+        self.assertEqual(self.pd.requests[0]["body"], raw)
+
+
 if __name__ == "__main__":
     unittest.main()
