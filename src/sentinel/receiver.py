@@ -244,9 +244,7 @@ class Pipeline:
         """
         self.metrics["received"] += 1
         try:
-            data = json.loads(body.decode("utf-8"))
-            if not isinstance(data, dict):
-                raise Unparseable("top-level JSON is not an object")
+            data = _parse_json_object(body)
             action = data.get("event_action")
             if action is not None and action != "trigger":
                 if action in ("resolve", "acknowledge"):
@@ -263,8 +261,15 @@ class Pipeline:
                     dedup_key=data.get("dedup_key"))
                 return _pd_ok(data.get("dedup_key") or _body_key(body))
             alert = _normalize_pd(data)
-        except Unparseable:
+        except Unparseable as exc:
             self.metrics["unparseable"] += 1
+            # R-8: the parse failure is evidence, not just a counter. The
+            # body hash correlates this line to the forwarded passthrough
+            # page (dedup_key is the same sha16); the raw body is NEVER
+            # logged — it may carry routing keys or alert content.
+            sys.stderr.write(
+                "[sentinel] unparseable_ingest route=/v2/enqueue "
+                f"reason={exc} body_sha16={_body_key(body)}\n")
             self.note_forward(self.forwarder.forward_raw(
                 body, alert_id="unparseable", dedup_key=_body_key(body)))
             return _pd_ok(_body_key(body))
@@ -414,12 +419,15 @@ class Pipeline:
         """POST /webhook/generic. Returns a small JSON response dict."""
         self.metrics["received"] += 1
         try:
-            data = json.loads(body.decode("utf-8"))
-            if not isinstance(data, dict):
-                raise Unparseable("top-level JSON is not an object")
+            data = _parse_json_object(body)
             alert = _normalize_generic(data)
-        except Unparseable:
+        except Unparseable as exc:
             self.metrics["unparseable"] += 1
+            # R-8 evidence: see handle_pd's except Unparseable — same
+            # reasoning (hash-correlated, body never logged).
+            sys.stderr.write(
+                "[sentinel] unparseable_ingest route=/webhook/generic "
+                f"reason={exc} body_sha16={_body_key(body)}\n")
             self.note_forward(self.forwarder.forward_raw(
                 body, alert_id="unparseable", dedup_key=_body_key(body)))
             return {"status": "success", "dedup_key": _body_key(body),
@@ -476,6 +484,25 @@ class Pipeline:
 
 
 # ------------------------------------------------------------------ normalize
+
+def _parse_json_object(body: bytes) -> dict:
+    """Parse an ingress body into a JSON object (R-8 exception-path fix).
+
+    Raises Unparseable — never json.JSONDecodeError / UnicodeDecodeError —
+    so malformed ingress is dispositioned honestly as ``unparseable``.
+    Before this fix the raw parse errors escaped handle_pd/handle_generic
+    and were counted as ``handler_panics`` at the HTTP layer, lying about
+    what happened: a sender's malformed bytes are a client-side input
+    failure, not a handler defect.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise Unparseable(f"malformed JSON body: {exc}") from exc
+    if not isinstance(data, dict):
+        raise Unparseable("top-level JSON is not an object")
+    return data
+
 
 def _normalize_pd(data: dict) -> Alert:
     """PD Events API v2 -> Alert. Raises Unparseable on missing fields."""
