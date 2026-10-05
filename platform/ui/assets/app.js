@@ -1,190 +1,290 @@
-/* app.js — shell: hash router, top bar, verdict strip, detail drawer,
- * command palette, SSE badge, MOCK DATA banner. Views own their screens. */
-import { Data, backendUrlConfigured, setBackendUrl } from './api.js';
-import { drawerHtml, esc, closeGlyph } from './components.js';
-import { parseHash, routeHref, SCREENS } from './lib.js';
-import { renderRiver } from './views-river.js';
-import { renderCal } from './views-cal.js';
+/* app.js — Sentinel console v2 shell.
+ *
+ * Hash router, mode bar (LIVE vs SIMULATED — in-band), the pipeline strip
+ * (the design model made visible), kill-switch + health chips, detail
+ * drawer, command palette, theme toggle. Views own their screens and talk
+ * to the Store, never to the backend directly.
+ */
+import { Store } from './store.js';
+import { esc, sevChip, dispChip, closeGlyph } from './components.js';
+import { SEV_LABEL } from './synth.js';
+import { renderNow } from './view-now.js';
+import { renderPages } from './view-pages.js';
+import { renderProofs } from './view-proofs.js';
+import { renderRiver } from './view-river.js';
+import { renderSafety } from './view-safety.js';
+import { renderAudit } from './view-audit.js';
+/* production entry: unconfigured live console shows setup, never data */
+import { backendUrlConfigured } from './api.js';
+import { renderSetup } from './views-setup.js';
+/* carried forward (adapted only by nav + labeling): the lab, keys, onboarding */
 import { renderSim } from './views-sim.js';
-import { renderAudit } from './views-audit.js';
+import { renderCal } from './views-cal.js';
 import { renderShadow } from './views-shadow.js';
 import { renderSettings } from './views-settings.js';
 import { renderStart } from './views-start.js';
-import { renderSetup } from './views-setup.js';
-import { loadPins } from './pins.js';
 
-const VIEWS = { river: renderRiver, calibration: renderCal, simulator: renderSim, audit: renderAudit, shadow: renderShadow, settings: renderSettings, start: renderStart };
-const CODE = { river: 'RIVER', calibration: 'CAL', simulator: 'SIM', audit: 'AUDIT', shadow: 'SHADOW', settings: 'KEYS', start: 'START' };
+const NAV = [
+  { id: 'now', code: 'NOW', label: 'Now — what\'s happening' },
+  { id: 'pages', code: 'PAGES', label: 'Open pages' },
+  { id: 'proofs', code: 'PROOFS', label: 'Suppression proof ledger' },
+  { id: 'river', code: 'RIVER', label: 'Decision river' },
+  { id: 'safety', code: 'SAFETY', label: 'Kill · policy · auth · race · degraded' },
+  { id: 'audit', code: 'AUDIT', label: 'Audit timeline' },
+  { id: 'lab', code: 'LAB', label: 'Simulator · calibration · shadow' },
+  { id: 'keys', code: 'KEYS', label: 'Integrations' },
+  { id: 'start', code: 'START', label: 'Onboarding' },
+];
 
 const el = {
   view: document.getElementById('view'),
-  strip: document.getElementById('strip'),
+  modebar: document.getElementById('modebar'),
   nav: document.getElementById('nav'),
-  srcBadge: document.getElementById('src-badge'),
-  dsVersion: document.getElementById('ds-version'),
-  sseState: document.getElementById('sse-state'),
+  pipeline: document.getElementById('pipeline'),
+  killChip: document.getElementById('kill-chip'),
+  healthChip: document.getElementById('health-chip'),
   drawer: document.getElementById('drawer'),
-  mockBanner: document.getElementById('mock-banner'),
   palette: document.getElementById('palette'),
   paletteInput: document.getElementById('palette-input'),
   paletteList: document.getElementById('palette-list'),
-  paletteHint: document.getElementById('palette-hint'),
 };
 let cleanups = [];
 const ctx = {
   registerCleanup(f) { cleanups.push(f); },
   setScreenCode(code) {
-    el.nav.innerHTML = SCREENS.map(s =>
-      `<a href="${routeHref(s.id, Data.mode === 'mock' ? { mock: '1' } : {})}" class="${s.code === code ? 'on' : ''}">${s.code}</a>`).join('');
+    const id = ({ NOW: 'now', PAGES: 'pages', PROOFS: 'proofs', RIVER: 'river', SAFETY: 'safety', AUDIT: 'audit', LAB: 'lab', KEYS: 'keys', START: 'start',
+      CAL: 'lab', SIM: 'lab', SHADOW: 'lab', SETTINGS: 'keys' })[code] || 'now';
+    el.nav.innerHTML = NAV.map((s) =>
+      `<a href="#/${s.id}" class="${s.id === id ? 'on' : ''}" title="${esc(s.label)}">${s.code}</a>`).join('');
   },
-  setStrip(text) { el.strip.textContent = text || ''; el.strip.hidden = !text; },
-  setSrcBadge(source) {
-    if (!source) return; /* badge shows first — never render a naked view */
-    el.srcBadge.dataset.src = source;
-    el.srcBadge.textContent = '◈ ' + source;
-  },
-  setDsVersion(v) { el.dsVersion.textContent = v || 'ds:—'; },
-  setSseState(s, attempt) {
-    const map = {
-      live: ['● live', 'ok'], paused: ['○ paused', ''],
-      reconnecting: [`◌ reconnecting…${attempt ? ' (attempt ' + attempt + ')' : ''}`, 'warn'],
-      polling: ['◌ polling', 'warn'],
-      snapshot: ['◌ snapshot — not live', 'warn'],
-    };
-    const [txt, cls] = map[s] || [s, ''];
-    el.sseState.textContent = txt;
-    el.sseState.className = 'sse-state mono ' + cls;
-  },
-  async openDrawer(id, { bins = null, flips = {} } = {}) {
-    try {
-      const env = await Data.getDecision(id);
-      const d = env.data;
-      let b = bins;
-      if (!b) {
-        try { const cal = await Data.getCalibration(d.team); b = cal.data.bins; } catch {}
-      }
-      el.drawer.innerHTML = drawerHtml(d, { bins: b, flips, datasetVersion: Data.datasetVersion, pins: loadPins() });
-      el.drawer.hidden = false;
-      el.drawer.querySelector('[data-close]').addEventListener('click', closeDrawer);
-      el.drawer.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', () => {
-        try { navigator.clipboard.writeText(btn.dataset.copy); btn.textContent = 'copied'; } catch {}
-      }));
-      el.drawer.querySelectorAll('[data-appeal]').forEach(btn => btn.addEventListener('click', () => {
-        btn.outerHTML = `<span class="mono" style="color:var(--tx-1)">demo build: no page sent — this would page through your normal paging path, audit-logged as an override.</span>`;
-      }));
-    } catch (e) {
-      el.drawer.innerHTML = `<div class="drawer-head"><span class="mono">decision #${esc(String(id))}</span><button class="drawer-close" aria-label="close">${closeGlyph()}</button></div>
-        <p class="drawer-note">Couldn't load this decision (${esc(e.message || 'unreachable')}). The gate is unaffected.</p>`;
-      el.drawer.hidden = false;
-      el.drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
-    }
-  },
-  openPalette(prefill = '') { openPalette(prefill); },
-  showKeymap() {
-    el.paletteHint.innerHTML = `<b>river keys</b> · j/k move · Enter drawer · Esc close · / filter · Shift+G jump to live · p/s/e/d dispositions · 1/2/3 density · ? this map`;
-    el.paletteHint.hidden = false;
-    setTimeout(() => { el.paletteHint.hidden = true; }, 6000);
-  },
+  openDrawer(id) { openDrawer(id); },
+  /* legacy-view compat: the v2 shell carries source/freshness/version as
+   * ambient chrome (mode bar + pipeline strip + health chip), so per-view
+   * badges are redundant. These are intentional no-ops, not missing wiring. */
+  setSrcBadge() {},
+  setStrip() {},
+  setDsVersion() {},
+  setSseState() {},
 };
+
+/* ---------- hash parsing (supports sub-routes via query params) ---------- */
+function parseLocation() {
+  const h = location.hash || '#/now';
+  const m = h.match(/^#\/([a-z]+)(\?(.*))?$/);
+  if (!m) return { screen: 'now', params: {} };
+  const params = {};
+  for (const part of (m[3] || '').split('&')) {
+    if (!part) continue;
+    const [k, v] = part.split('=');
+    params[decodeURIComponent(k)] = decodeURIComponent(v || '');
+  }
+  return { screen: m[1], params };
+}
+function legacyParams(params) { return new URLSearchParams(params); }
+
+/* ---------- mode bar ---------- */
+/* "SIMULATED SHOWCASE" + "snapshot — not live" are builder-enforced
+ * in-band honesty strings (STAGING_REQUIRED) — keep them visible here. */
+function paintModebar() {
+  if (Store.isSimulated) {
+    el.modebar.className = 'modebar sim';
+    el.modebar.innerHTML = `<span><strong>◈ SIMULATED SHOWCASE</strong> — synthetic pipeline, seed <span class="mono">${Store.seed}</span> ·
+      snapshot — not live · every number traceable · <span class="why-link" id="why-mode">why these numbers?</span> ·
+      <span class="note">not your system · nothing here pages anyone</span></span>`;
+    const w = document.getElementById('why-mode');
+    if (w) w.addEventListener('click', () => openDrawer('__synth'));
+  } else {
+    el.modebar.className = 'modebar live';
+    el.modebar.innerHTML = `<span><strong>● LIVE</strong> — connected to your Sentinel backend · real decisions · real paging</span>`;
+  }
+}
+
+/* ---------- pipeline strip ---------- */
+function paintPipeline() {
+  const p = Store.pipeline();
+  el.pipeline.innerHTML = p.stages.map((s, i) => `
+    <div class="stage${p.health !== 'live' ? ' degraded' : ''}">
+      <div class="s-label">${esc(s.label)}</div>
+      <div class="s-count">${s.count.toLocaleString()}</div>
+      <div class="s-note">${esc(s.note || '')} ${i < p.stages.length - 1 ? '<span class="s-arrow">→</span>' : ''}</div>
+      ${Store.isSimulated ? `<div class="why" data-why="${esc(s.key)}">why this number?</div>` : ''}
+    </div>`).join('');
+  el.pipeline.querySelectorAll('[data-why]').forEach((w) => w.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const info = Store.why(w.dataset.why);
+    alert(`${w.dataset.why}: ${info.count} events\nsample: ${(info.sampleEventIds || []).slice(0, 5).join(', ')}\n(seed ${Store.seed} — re-runnable, inspectable in synth.js)`);
+  }));
+  // health chip
+  const hc = el.healthChip;
+  hc.textContent = p.health === 'live' ? `● pipeline live${p.lagMs != null ? ` · ${p.lagMs}ms` : ''}`
+    : p.health === 'degraded' ? `◌ degraded · lag ${Math.round((p.lagMs || 0) / 1000)}s`
+    : `○ stale · lag ${Math.round((p.lagMs || 0) / 1000)}s`;
+  hc.className = 'health-chip mono ' + (p.health === 'live' ? 'ok' : p.health === 'degraded' ? 'warn' : 'bad');
+  // kill chip
+  const kc = el.killChip;
+  const engaged = p.killSwitch === 'ENGAGED';
+  kc.textContent = engaged ? '◼ KILL ENGAGED' : '◻ kill armed';
+  kc.className = 'kill-chip ' + (engaged ? 'engaged' : 'armed');
+}
+
+/* ---------- drawer ---------- */
+function openDrawer(id) {
+  if (id === '__synth') {
+    el.drawer.innerHTML = `
+      <div class="drawer-head"><span class="mono">the synthetic pipeline</span>
+      <button class="drawer-close" aria-label="close">${closeGlyph()}</button></div>
+      <p style="color:var(--tx-2);font-size:13px">This console is running a <strong>live simulation</strong> of
+      Sentinel's paging pipeline in your browser. Inputs are synthetic (seed <span class="mono">${Store.seed}</span>);
+      the pipeline logic — grouping, dispositions, proofs, fail-open — is the real logic. Every count on screen
+      traces to generating events; ask "why this number?" on any pipeline stage.</p>
+      <h4>HONESTY RULES</h4>
+      <div class="note">· labeled SIMULATED on every surface · nothing here pages anyone<br>
+      · same seed → same history (deterministic, re-runnable)<br>
+      · the generator is <span class="mono">assets/synth.js</span> — read it</div>`;
+    el.drawer.hidden = false;
+    el.drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
+    return;
+  }
+  const d = Store.decisionById(id);
+  if (!d) { return; }
+  const pr = d.proof || {};
+  el.drawer.innerHTML = `
+    <div class="drawer-head"><span class="mono">decision ${esc(d.id)}</span>
+    <button class="drawer-close" aria-label="close">${closeGlyph()}</button></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <span class="sev-chip sev-${esc(d.severity)}">${esc(SEV_LABEL[d.severity] || d.severity)}</span>
+      ${dispChip(d.disposition, d.reasonCode)}
+      <span class="mono" style="color:var(--tx-2)">${esc(d.reasonCode)}</span>
+    </div>
+    <h4>PROOF</h4>
+    <dl class="kv">
+      <dt>rule</dt><dd>${esc(pr.rule || '—')}</dd>
+      <dt>configured by</dt><dd>${esc(pr.configuredBy || '—')}</dd>
+      <dt>detail</dt><dd>${esc(pr.detail || '—')}</dd>
+      <dt>confidence</dt><dd>${d.confidence}</dd>
+      <dt>evidence age</dt><dd>${pr.evidenceAgeMs}ms</dd>
+      <dt>fingerprint</dt><dd>${esc(d.fingerprint || '—')}</dd>
+    </dl>
+    <h4>COST OF INACTION</h4>
+    <p style="font-size:13px;color:var(--tx-2)">${esc(d.costOfInaction || '—')}</p>
+    ${d.disposition === 'suppress' && !d.undone ? `
+      <button class="btn small" id="drawer-undo">↩ Undo this suppression</button>` : ''}
+    ${d.undone ? `<div class="undone-banner">↩ reversed — will page on next alert</div>` : ''}
+  `;
+  el.drawer.hidden = false;
+  el.drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
+  const u = el.drawer.querySelector('#drawer-undo');
+  if (u) u.addEventListener('click', () => { Store.undoSuppression(d.id); openDrawer(id); });
+}
 function closeDrawer() { el.drawer.hidden = true; el.drawer.innerHTML = ''; }
 
-/* ---------- command palette: every state is a deep link ---------- */
-function openPalette(prefill = '') {
+/* ---------- lab (carried forward) ---------- */
+async function renderLab(root, params, ctx2) {
+  ctx2.setScreenCode('LAB');
+  const tab = params.tab || 'simulator';
+  root.innerHTML = `
+    <div class="view-head"><h1>Lab</h1>
+    <div class="sub">Tune, calibrate, and review shadow evaluations — analysis, not operations.</div></div>
+    <div class="tabs">
+      <a href="#/lab?tab=simulator" class="${tab === 'simulator' ? 'on' : ''}">SIMULATOR</a>
+      <a href="#/lab?tab=calibration" class="${tab === 'calibration' ? 'on' : ''}">CALIBRATION</a>
+      <a href="#/lab?tab=shadow" class="${tab === 'shadow' ? 'on' : ''}">SHADOW</a>
+    </div>
+    <div id="lab-body"></div>`;
+  const body = root.querySelector('#lab-body');
+  const lp = legacyParams(params);
+  if (tab === 'calibration') await renderCal(body, lp, ctx2);
+  else if (tab === 'shadow') await renderShadow(body, lp, ctx2);
+  else await renderSim(body, lp, ctx2);
+}
+
+/* ---------- router ---------- */
+const VIEWS = {
+  now: renderNow, pages: renderPages, proofs: renderProofs, river: renderRiver,
+  safety: renderSafety, audit: renderAudit, lab: renderLab,
+  keys: (r, p, c) => { c.setScreenCode('KEYS'); return renderSettings(r, legacyParams(p), c); },
+  start: (r, p, c) => { c.setScreenCode('START'); return renderStart(r, legacyParams(p), c); },
+};
+
+async function route() {
+  cleanups.forEach((f) => { try { f(); } catch {} });
+  cleanups = [];
+  closeDrawer();
+  /* production entry contract: an unconfigured live console shows the
+   * backend-setup screen, never invented data (P3 honesty). */
+  if (window.SENTINEL_DATA_MODE === 'live' && !backendUrlConfigured()) {
+    ctx.setScreenCode('KEYS');
+    await renderSetup(el.view);
+    try { window.scrollTo(0, 0); } catch {}
+    return;
+  }
+  const { screen, params } = parseLocation();
+  const view = VIEWS[screen] || renderNow;
+  try {
+    await view(el.view, params, ctx);
+  } catch (e) {
+    el.view.innerHTML = `<div class="empty"><div class="e-big">Couldn't render this screen.</div>
+      <div class="note mono">${esc(e.message || String(e))}</div>
+      <div class="note">The gate is unaffected — paging behavior does not depend on this screen.</div></div>`;
+  }
+  try { window.scrollTo(0, 0); } catch {} /* jsdom and exotic embeds may lack scrollTo */
+}
+
+/* ---------- palette ---------- */
+function openPalette() {
   el.palette.hidden = false;
-  el.paletteInput.value = prefill;
+  el.paletteInput.value = '';
   el.paletteInput.focus();
   paintPalette('');
   el.paletteInput.oninput = () => paintPalette(el.paletteInput.value);
 }
 function closePalette() { el.palette.hidden = true; el.paletteInput.value = ''; }
-function paintPalette(qtext) {
-  const q = qtext.trim();
-  const items = [];
-  const tok = {};
-  q.split(/\s+/).forEach(t => { const m = t.match(/^([a-z_]+)[=:](.+)$/); if (m) tok[m[1]] = m[2]; });
-  for (const s of SCREENS) {
-    if (!q || s.label.toLowerCase().includes(q.toLowerCase()) || tok.screen === s.id)
-      items.push({ label: `${s.code} — ${s.label}`, href: routeHref(s.id, { ...(tok.team ? { team: tok.team } : {}), ...(Data.mode === 'mock' ? { mock: '1' } : {}) }) });
-  }
-  if (tok.team || tok.fpr || tok.reason || tok.last)
-    items.unshift({
-      label: `river filtered: ${[tok.team && 'team=' + tok.team, tok.fpr && 'fpr=' + tok.fpr, tok.reason && 'reason=' + tok.reason, tok.last && 'last=' + tok.last].filter(Boolean).join(' ')}`,
-      href: routeHref('river', { ...(tok.team ? { team: tok.team } : {}), ...(tok.fpr ? { fpr: tok.fpr } : {}), ...(tok.reason ? { reason: tok.reason } : {}), ...(tok.last ? { last: tok.last } : {}), ...(Data.mode === 'mock' ? { mock: '1' } : {}) }),
-    });
-  /* build-fixed modes have no data source to toggle (staging is static,
-   * production is live) — the toggle would be phantom interactivity (§8.9). */
-  if (!Data.modeFixed)
-    items.push({ label: `toggle data source (now: ${Data.mode})`, action: () => { Data.setMode(Data.mode === 'live' ? 'mock' : 'live'); location.reload(); } });
-  el.paletteList.innerHTML = items.map((it, i) =>
-    `<button class="palette-item mono" data-i="${i}">${esc(it.label)}</button>`).join('');
-  el.paletteList.querySelectorAll('.palette-item').forEach(b => b.addEventListener('click', () => {
-    const it = items[Number(b.dataset.i)];
-    closePalette();
-    if (it.action) it.action(); else location.hash = it.href;
+function paintPalette(q) {
+  const items = NAV.filter((s) => !q || s.label.toLowerCase().includes(q.toLowerCase()) || s.code.toLowerCase().includes(q.toLowerCase()));
+  el.paletteList.innerHTML = items.map((s, i) =>
+    `<button class="palette-item mono" data-i="${i}" data-href="#/${s.id}">${s.code} — ${esc(s.label)}</button>`).join('');
+  el.paletteList.querySelectorAll('.palette-item').forEach((b) => b.addEventListener('click', () => {
+    location.hash = b.dataset.href; closePalette();
   }));
 }
-document.getElementById('palette-btn').addEventListener('click', () => openPalette());
-el.paletteInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closePalette();
-  if (e.key === 'Enter') el.paletteList.querySelector('.palette-item')?.click();
-});
-el.palette.addEventListener('click', (e) => { if (e.target === el.palette) closePalette(); });
-document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); el.palette.hidden ? openPalette() : closePalette(); }
-  if (e.key === 'Escape' && !el.drawer.hidden) closeDrawer();
-});
 
-/* ---------- data honesty banner: the build's condition, stated in-band (P3) ---------- */
-function paintMockBanner() {
-  /* static showcase (GitHub Pages staging): the SIMULATED banner is part of the
-   * surface, not a footnote. Synthetic data, simulated paging, pre-rendered
-   * snapshots — nothing here is your system. No "go live" escape: there is no
-   * live backend behind a static host. */
-  if (Data.dataMode === 'static') {
-    el.mockBanner.hidden = false;
-    el.mockBanner.innerHTML = `◈ SIMULATED SHOWCASE — synthetic data · simulated paging · snapshots, not a live stream · not your system`;
-    return;
-  }
-  if (Data.mode === 'mock') {
-    el.mockBanner.hidden = false;
-    el.mockBanner.innerHTML = `◈ MOCK DATA — contract mocks v1.0.0 · illustrative, not your system · <button id="mock-off" class="mono">go live</button>`;
-    document.getElementById('mock-off').addEventListener('click', () => { Data.setMode('live'); location.reload(); });
-  } else el.mockBanner.hidden = true;
-}
-Data.onModeChange(paintMockBanner);
-paintMockBanner();
-
-/* ---------- router ---------- */
-async function route() {
-  cleanups.forEach(f => { try { f(); } catch {} });
-  cleanups = [];
-  closeDrawer(); closePalette();
-  const { screen, params } = parseHash();
-  /* preserve ?mock=1 across hash navigations */
-  if (Data.mode === 'mock' && !params.get('mock')) {
-    params.set('mock', '1');
-    history.replaceState(null, '', '#/' + screen + '?' + params.toString());
-  }
-  const view = VIEWS[screen] || VIEWS.river;
-  ctx.setSseState('paused');
-  el.view.innerHTML = '';
-  el.strip.textContent = '';
+/* ---------- boot ---------- */
+function boot() {
+  // theme
   try {
-    await view(el.view, params, ctx);
-  } catch (e) {
-    el.view.innerHTML = `<div class="error-block"><div class="error-what">This screen failed to render.</div><div class="error-detail mono">${esc(e.message || String(e))}</div></div>`;
-  }
-}
-window.addEventListener('hashchange', route);
+    if (localStorage.getItem('sentinel.theme') === 'light') document.documentElement.dataset.theme = 'light';
+  } catch {}
+  document.getElementById('theme-btn').addEventListener('click', () => {
+    const light = document.documentElement.dataset.theme === 'light';
+    if (light) { delete document.documentElement.dataset.theme; try { localStorage.removeItem('sentinel.theme'); } catch {} }
+    else { document.documentElement.dataset.theme = 'light'; try { localStorage.setItem('sentinel.theme', 'light'); } catch {} }
+  });
+  // kill chip → safety/kill
+  el.killChip.addEventListener('click', () => { location.hash = '#/safety?sub=kill'; });
+  // palette
+  document.getElementById('palette-btn').addEventListener('click', openPalette);
+  el.paletteInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closePalette();
+    if (e.key === 'Enter') {
+      const first = el.paletteList.querySelector('.palette-item');
+      if (first) { location.hash = first.dataset.href; closePalette(); }
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    if (e.key === 'Escape') { closePalette(); closeDrawer(); }
+  });
+  el.palette.addEventListener('click', (e) => { if (e.target === el.palette) closePalette(); });
 
-/* demo-contract: land on START for first-time visitors.
- * Production (DATA_MODE='live') with no backend configured: the honest empty
- * state — backend setup screen, never invented data (P3). */
-if (window.SENTINEL_DATA_MODE === 'live' && !backendUrlConfigured()) {
-  el.nav.innerHTML = '';
-  el.srcBadge.textContent = '◈ no backend';
-  renderSetup(el.view);
-} else {
-  if (!location.hash) location.hash = '#/start' + (Data.mode === 'mock' ? '?mock=1' : '');
+  paintModebar();
+  paintPipeline();
+  // the pipeline strip is alive: re-paint on every pipeline event
+  Store.on('pipeline', paintPipeline);
+  Store.on('health', paintPipeline);
+  Store.on('killswitch', paintPipeline);
+
+  window.addEventListener('hashchange', route);
   route();
 }
+
+boot();

@@ -36,7 +36,14 @@ test('INV-1: the decision drawer carries a freshness badge in the companions str
 });
 
 test('INV-1: every view wires freshness (static scan)', () => {
-  for (const v of ['views-river.js', 'views-cal.js', 'views-sim.js', 'views-audit.js', 'views-shadow.js']) {
+  /* Redesign v2: freshness is ambient chrome — app.js paints the pipeline
+   * strip + health chip on every screen (stronger than per-view badges).
+   * Carried-forward lab views keep their per-view freshnessBadge. */
+  const shell = src('app.js');
+  assert.ok(shell.includes('paintPipeline'), 'shell paints the pipeline strip');
+  assert.ok(shell.includes('health-chip'), 'shell renders the health chip');
+  assert.ok(shell.includes("Store.on('health'"), 'shell re-paints on health events');
+  for (const v of ['views-cal.js', 'views-sim.js', 'views-shadow.js']) {
     assert.ok(src(v).includes('freshnessBadge'), `${v} must render FreshnessBadge`);
   }
 });
@@ -58,8 +65,13 @@ test('INV-2: shadow figures are labeled derived', () => {
   assert.ok(src('views-shadow.js').includes('derivedMark'));
 });
 
-test('INV-2: audit chain derivation is labeled derived', () => {
-  assert.ok(src('views-audit.js').includes("derivedMark('derived'"));
+test('INV-2: audit entries carry attribution, never unlabeled automation', () => {
+  /* Redesign v2: the audit view has no chain-derivation feature to label —
+   * instead every timeline entry carries an explicit attribution tag
+   * (human / engine / rule), so automation is never anonymous. */
+  const s = src('view-audit.js');
+  assert.ok(s.includes('>human<') || s.includes('human</span>'), 'human attribution renders');
+  assert.ok(s.includes('>engine<') || s.includes('engine</span>'), 'engine attribution renders');
 });
 
 /* ---------- Invariant 3: no disposition renders without its evidence
@@ -108,7 +120,13 @@ test('INV-4: the named state renderers exist', () => {
 });
 
 test('INV-4: every view designs loading, error, and empty (static scan)', () => {
-  for (const v of ['views-river.js', 'views-cal.js', 'views-sim.js', 'views-audit.js', 'views-shadow.js']) {
+  /* Redesign v2: the synth store is synchronous (no loading flash to design);
+   * empty states are per-view, the error boundary is shell-global. */
+  for (const v of ['view-now.js', 'view-pages.js', 'view-proofs.js', 'view-river.js', 'view-audit.js', 'view-safety.js']) {
+    assert.ok(src(v).includes('empty'), `${v}: empty state designed`);
+  }
+  assert.ok(src('app.js').includes("Couldn't render this screen"), 'shell: global error boundary');
+  for (const v of ['views-cal.js', 'views-sim.js', 'views-shadow.js']) {
     const s = src(v);
     assert.ok(s.includes('skeletonRows'), `${v}: loading state`);
     assert.ok(s.includes('errorBlock'), `${v}: error state`);
@@ -127,8 +145,10 @@ test('INV-5: no Jev/model-evaluation call on any read path', () => {
   const re = /\/api\/jev|fetch\s*\([^)]*jev[^)]*\)|jev\s*\.\s*(call|ask|complete|answer)\s*\(/i;
   for (const f of ['lib.js', 'api.js', 'app.js', 'components.js', 'contract.js',
                    'freshness.js', 'shadow.js', 'chain.js', 'payload.js', 'pins.js',
-                   'views-river.js', 'views-cal.js', 'views-sim.js', 'views-audit.js',
-                   'views-shadow.js']) {
+                   'views-cal.js', 'views-sim.js', 'views-shadow.js', 'views-setup.js',
+                   'synth.js', 'store.js',
+                   'view-now.js', 'view-pages.js', 'view-proofs.js',
+                   'view-river.js', 'view-audit.js', 'view-safety.js']) {
     const s = src(f);
     if (re.test(s)) offenders.push(f);
   }
@@ -146,10 +166,12 @@ test('R1: pin paths can never enter the filter grammar', () => {
   assert.ok(!FILTERABLE_FIELDS.some(f => f.includes('.')), 'no dotted (payload) path is filterable');
 });
 
-test('R1: the river builds its filter params without consulting pins (static scan)', () => {
-  const s = src('views-river.js');
-  const apiParamsBody = s.slice(s.indexOf('const apiParams'), s.indexOf('function renderTokens'));
-  assert.ok(!/pins/i.test(apiParamsBody), 'filter params must never reference pins');
+test('R1: the river has no pin-based filtering at all (static scan)', () => {
+  /* Redesign v2: pins are gone from the river — the only filter operand is
+   * the disposition, a fixed envelope field. */
+  const s = src('view-river.js');
+  assert.ok(!/pins/i.test(s), 'the river must never reference pins');
+  assert.ok(s.includes("data-disp"), 'the disposition filter is a fixed-operand chip set');
 });
 
 /* ---------- Invariant 6 (R7 B1): row source badges derive from envelope
@@ -171,9 +193,14 @@ test('INV-6: no hardcoded srcBadge source in the row component (static scan)', (
   assert.doesNotMatch(c, /row-denom/, 'the unevidenced confidence denominator must not return');
 });
 
-test('INV-6: callers thread envelope evidence into decisionRow (static scan)', () => {
-  assert.ok(src('views-river.js').includes("env.meta?.data_source"),
-    'river threads the envelope data_source');
-  assert.ok(src('views-audit.js').includes("Data.lastMeta?.data_source"),
-    'audit threads the last envelope data_source');
+test('INV-6: the data source is in-band on every screen, derived from the build (static scan)', () => {
+  /* Redesign v2: per-row badges are replaced by the ambient mode bar — the
+   * source is derived from window.SENTINEL_DATA_MODE (the build), never
+   * hardcoded per row. A badge claiming a source the payload does not
+   * evidence is still a P3 honesty violation. */
+  const s = src('app.js');
+  assert.ok(s.includes('modebar'), 'shell renders the in-band mode bar');
+  assert.ok(s.includes('SIMULATED'), 'simulated mode is labeled in-band');
+  assert.ok(s.includes('window.SENTINEL_DATA_MODE') || s.includes('Store.isSimulated'),
+    'the mode derives from the build, never a hardcoded claim');
 });
