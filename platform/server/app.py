@@ -30,6 +30,8 @@ from urllib.parse import parse_qs
 
 from . import simulate as sim
 from . import auth as _authmod
+from . import rotation_api as _rotmod
+from .keystore import OPERATOR_TOKEN_NAME
 from .datasets import UnknownDataset
 from .integrations import (
     BadKey,
@@ -108,6 +110,12 @@ class PlatformApp:
         # every /api/* request except the two health probes.
         self.operator_tokens = (operator_token_store
                                 or _authmod.OperatorTokenStore())
+        # Rotation ceremony (Track 4, C4) over the canonical keystore.
+        # None when the token is env-provisioned or ephemeral — rotation
+        # needs a file-backed store; the route then fails honestly.
+        _ks = self.operator_tokens.keystore
+        self.rotation = (_rotmod.RotationService({OPERATOR_TOKEN_NAME: _ks})
+                         if _ks is not None else None)
 
     def _cors_headers(self, environ) -> list:
         """CORS headers for this request. "" disables (proxy owns the
@@ -225,6 +233,11 @@ class PlatformApp:
             m = re.fullmatch(r"/api/v1/integrations/keys/([a-z_]+)", path)
             if m and method == "DELETE":
                 return self._int_keys_delete(start_response, m.group(1))
+            # Rotation ceremony (Track 4, C4). C1 auth already enforced
+            # in __call__ — every /api/* request carries the operator token.
+            m = re.fullmatch(r"/api/v1/keys/([a-z_]+)/rotate", path)
+            if m and method == "POST":
+                return self._keys_rotate(environ, start_response, m.group(1))
         except _BadParam as e:
             return self._error(start_response, 400, e.code, str(e))
         return self._error(start_response, 404, "not_found",
@@ -451,6 +464,36 @@ class PlatformApp:
             return self._error(start_response, 501, "persistence_unavailable", str(e))
         return self._ok(start_response, {"deleted": name,
                                          "integrations": self.integrations.status()})
+
+    def _keys_rotate(self, environ, start_response, name):
+        """POST /api/v1/keys/{name}/rotate — rotation ceremony (C4).
+
+        Body: {"stage": "stage_secondary"|"verify_secondary"|"promote"|
+        "retire"|"status", "value": "<new secret>"} — value only for
+        stage_secondary. Every stage is audit-logged; no secret values
+        ever appear in responses.
+        """
+        if self.rotation is None:
+            return self._error(
+                start_response, 422, "rotation_unavailable",
+                "operator token is env-provisioned or ephemeral — "
+                "rotation requires a file-backed store")
+        body, err = self._int_body(environ, start_response)
+        if err:
+            return err
+        stage = body.get("stage")
+        if not isinstance(stage, str):
+            return self._error(start_response, 422, "bad_body",
+                               "stage must be one of: stage_secondary, "
+                               "verify_secondary, promote, retire, status")
+        code, resp = self.rotation.handle(name, stage, body,
+                                          actor="operator")
+        if code == 200:
+            return self._ok(start_response, resp)
+        detail = (resp.get("error") if isinstance(resp, dict)
+                  else None) or "rotation failed"
+        return self._error(start_response, code, "rotation_failed",
+                           str(detail))
 
     def _int_simulated(self, environ, start_response):
         body, err = self._int_body(environ, start_response)

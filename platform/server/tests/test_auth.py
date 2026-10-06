@@ -234,13 +234,15 @@ class AuthCase(unittest.TestCase):
         self.assertNotIn(self.token, r["body"].decode())
 
     def test_dual_accept_seam_for_rotation(self):
-        """C4 seam: store carries {primary, secondary, generation};
-        verify accepts either. (Track 4 builds rotation on this.)"""
+        """C4 seam: the canonical keystore carries {primary, secondary,
+        generation} per secret; verify accepts either. (Track 4 builds
+        rotation on this.)"""
         with open(self.token_path) as fh:
             data = json.load(fh)
-        self.assertEqual(data["generation"], 1)
-        self.assertIn("primary", data["tokens"])
-        self.assertIn("secondary", data["tokens"])
+        rec = data["records"]["operator_bearer"]
+        self.assertEqual(rec["generation"], 1)
+        self.assertIn("primary", rec)
+        self.assertIn("secondary", rec)
         # secondary empty -> no second credential accepted
         self.assertFalse(self.store.verify("anything-else"))
         # operator presents primary -> accepted
