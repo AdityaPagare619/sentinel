@@ -73,10 +73,106 @@ FAKE_PD_KEY = "SIM-FAKE-ROUTING-KEY-0000000000000000"
 
 # --------------------------------------------------------------------------
 # FakePD sink: a local HTTP acceptor speaking the PD Events API v2 shape.
+#
+# Simple mode (default): always-202 acceptor, zero latency — kept for unit
+# tests, where determinism matters more than realism.
+#
+# Faithful mode (production-stages lane, 2026-10-06): a simulated SERVICE
+# with PagerDuty-faithful delivery semantics:
+#   * per-request ACK latency, sampled 80-400ms — MODELED, NOT MEASURED.
+#     No PagerDuty timing data was available; this assumption is documented
+#     in docs/planning/production/CALIBRATION.md. Recalibrate against real
+#     PD Events API timings when they exist.
+#   * delivery state machine per dedup_key, with REAL time gaps on a
+#     background thread: RECEIVED -> ACCEPTED(202) -> QUEUED -> DELIVERED,
+#     or -> FAILED on injected faults;
+#   * PagerDuty dedup semantics: a trigger whose dedup_key matches an
+#     already-open incident is APPENDED (same dedup_key echoed, no new
+#     incident) — the idempotent-receiver behavior the forwarder relies on;
+#   * fault injection: 429 rate-limit (with Retry-After), 500 transient,
+#     delayed delivery, dropped connection — the forwarder's retry/backoff
+#     paths get genuinely exercised, not bypassed.
+# Both modes keep the loopback-only + never-pagerduty.com guards, and the
+# `pages` property (received payloads) behaves identically.
 # --------------------------------------------------------------------------
 
 class _FakePDHandler(BaseHTTPRequestHandler):
     server_version = "FakePD/1.0"
+
+    def _faithful_post(self, payload):
+        cfg = self.server.faithful_cfg
+        rng = self.server.faithful_rng
+        # 1. ACK latency — the service takes real time to answer.
+        time.sleep(rng.uniform(*cfg["ack_latency_ms"]) / 1000.0)
+        # 2. Fault draw.
+        fault = _draw_pd_fault(rng, cfg["faults"])
+        dedup_key = payload.get("dedup_key")
+        rec = {"dedup_key": dedup_key,
+               "event_action": payload.get("event_action"),
+               "fault": fault, "deduped": False, "transitions": []}
+        now = time.time()
+        rec["transitions"].append(("RECEIVED", now))
+        if fault == "drop":
+            # Connection dies mid-request: no response at all.
+            with self.server.faithful_lock:
+                self.server.deliveries.append(rec)
+            self.connection.close()
+            return
+        if fault == "rate_limit_429":
+            rec["transitions"].append(("FAILED", time.time()))
+            with self.server.faithful_lock:
+                self.server.deliveries.append(rec)
+            self._send_json(429, {"status": "rate_limited",
+                                  "message": "simulated 429 (fault injection)"},
+                            extra_headers={"Retry-After": "1"})
+            return
+        if fault == "transient_500":
+            rec["transitions"].append(("FAILED", time.time()))
+            with self.server.faithful_lock:
+                self.server.deliveries.append(rec)
+            self._send_json(500, {"status": "error",
+                                  "message": "simulated 500 (fault injection)"})
+            return
+        # 3. Dedup: open incident with this key => append, no new incident.
+        with self.server.faithful_lock:
+            open_inc = self.server.open_incidents.get(dedup_key)
+            if dedup_key and open_inc is not None:
+                rec["deduped"] = True
+                open_inc["appends"] += 1
+        rec["transitions"].append(("ACCEPTED", time.time()))
+        self._send_json(202, {
+            "status": "success",
+            "message": "accepted by FakePD (faithful) — nothing was paged",
+            "dedup_key": dedup_key,
+        })
+        # 4. Async delivery: QUEUED -> DELIVERED after a modeled delay, or
+        # DELAYED further on the delay fault. Real time gaps, background
+        # thread — the forwarder's at-least-once world, faithfully.
+        delay_s = rng.uniform(*cfg["delivery_delay_ms"]) / 1000.0
+        if fault == "delayed":
+            delay_s += cfg["faults"].get("delay_extra_ms", 5000) / 1000.0
+        with self.server.faithful_lock:
+            self.server.deliveries.append(rec)
+            if not rec["deduped"] and dedup_key:
+                self.server.open_incidents[dedup_key] = {"appends": 0}
+        threading.Thread(target=self._complete_delivery,
+                         args=(rec, delay_s), daemon=True).start()
+
+    def _complete_delivery(self, rec, delay_s):
+        time.sleep(delay_s)
+        with self.server.faithful_lock:
+            rec["transitions"].append(("QUEUED", time.time() - delay_s))
+            rec["transitions"].append(("DELIVERED", time.time()))
+
+    def _send_json(self, status, obj, extra_headers=None):
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):  # noqa: N802
         if self.path != "/v2/enqueue":
@@ -91,6 +187,9 @@ class _FakePDHandler(BaseHTTPRequestHandler):
             payload = {"_unparseable": True}
         self.server.received.append(
             {"payload": payload, "headers": dict(self.headers)})
+        if getattr(self.server, "faithful", False):
+            self._faithful_post(payload)
+            return
         resp = json.dumps({
             "status": "success",
             "message": "accepted by FakePD — nothing was paged",
@@ -106,12 +205,47 @@ class _FakePDHandler(BaseHTTPRequestHandler):
         pass
 
 
-class FakePDSink:
-    """Local PD Events API v2 acceptor. Pages land here, never at PagerDuty."""
+def _draw_pd_fault(rng, faults):
+    r = rng.random()
+    if r < faults.get("rate_limit_429", 0.0):
+        return "rate_limit_429"
+    if r < faults.get("rate_limit_429", 0.0) + faults.get("transient_500", 0.0):
+        return "transient_500"
+    if (r < faults.get("rate_limit_429", 0.0)
+            + faults.get("transient_500", 0.0)
+            + faults.get("delayed", 0.0)):
+        return "delayed"
+    if (r < faults.get("rate_limit_429", 0.0)
+            + faults.get("transient_500", 0.0)
+            + faults.get("delayed", 0.0)
+            + faults.get("drop", 0.0)):
+        return "drop"
+    return None
 
-    def __init__(self):
+
+class FakePDSink:
+    """Local PD Events API v2 acceptor. Pages land here, never at PagerDuty.
+
+    faithful=False (default): instant always-202 — for unit tests.
+    faithful=True: simulated delivery service (latency, state machine,
+    dedup, fault injection). `deliveries` exposes the per-dedup_key
+    transition logs; `pages` behaves identically in both modes.
+    """
+
+    def __init__(self, *, faithful=False, seed=None, fault_profile=None):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakePDHandler)
         self.server.received = []
+        self.server.faithful = faithful
+        self.server.faithful_lock = threading.Lock()
+        self.server.deliveries = []
+        self.server.open_incidents = {}
+        self.server.faithful_rng = random.Random(seed)
+        self.server.faithful_cfg = {
+            # ACK latency modeled, NOT measured — see module docstring.
+            "ack_latency_ms": (80.0, 400.0),
+            "delivery_delay_ms": (200.0, 1500.0),
+            "faults": dict(fault_profile or {}),
+        }
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             kwargs={"poll_interval": 0.05}, daemon=True)
@@ -131,6 +265,12 @@ class FakePDSink:
     @property
     def pages(self):
         return list(self.server.received)
+
+    @property
+    def deliveries(self):
+        """Per-dedup_key delivery records (faithful mode)."""
+        with self.server.faithful_lock:
+            return [dict(d) for d in self.server.deliveries]
 
 
 # --------------------------------------------------------------------------
@@ -599,12 +739,11 @@ def answers_for(alert: Alert, kind: str, rng: random.Random) -> DecisionResponse
     )
 
 
-def script_fakejev(alerts: list[Alert], kinds: list[str],
-                   seed: int) -> MockSystemOneClient:
-    """Script the mock keyed by input_sha256(state) — the exact key the
-    gate's race uses when it calls decide(). Two alerts with identical
-    states (flaps/duplicates) share one entry: same evidence, same answer.
-    """
+def _script_dict(alerts: list[Alert], kinds: list[str],
+                 seed: int) -> dict:
+    """Script keyed by input_sha256(state) — the exact key the gate's race
+    uses when it calls decide(). Two alerts with identical states
+    (flaps/duplicates) share one entry: same evidence, same answer."""
     script = {}
     for alert, kind in zip(alerts, kinds):
         # Identical to Pipeline._triage's state construction — this is the
@@ -617,7 +756,28 @@ def script_fakejev(alerts: list[Alert], kinds: list[str],
             hashlib.sha256(f"{seed}:jev:{alert.alert_id}".encode()).digest()[:8],
             "big"))
         script[key] = answers_for(alert, kind, arng)
-    return MockSystemOneClient(script, model="jev-mock-0.0.0")
+    return script
+
+
+def script_fakejev(alerts: list[Alert], kinds: list[str],
+                   seed: int) -> MockSystemOneClient:
+    """Script the mock keyed by input_sha256(state) — the exact key the
+    gate's race uses when it calls decide(). Two alerts with identical
+    states (flaps/duplicates) share one entry: same evidence, same answer.
+    """
+    return MockSystemOneClient(_script_dict(alerts, kinds, seed),
+                               model="jev-mock-0.0.0")
+
+
+def script_faithfuljev(alerts: list[Alert], kinds: list[str], seed: int,
+                       *, faults=None) -> "FaithfulJev":
+    """Same scripted answers as script_fakejev, but served by a FaithfulJev:
+    real-measured latencies + honest fault injection, seeded. The
+    dispositions are still scripted (deterministic); the TIMING and FAULTS
+    are faithful. See FaithfulJev's docstring for the honesty boundary."""
+    from sentinel.client import FaithfulJev
+    return FaithfulJev(_script_dict(alerts, kinds, seed), seed=seed,
+                       faults=faults)
 
 
 # --------------------------------------------------------------------------
@@ -633,6 +793,14 @@ def script_fakejev(alerts: list[Alert], kinds: list[str],
 def resolve_judge(judge: str, jev_model: str | None = None):
     if judge == "fake":
         return ("fake-jev", None, None)
+    if judge == "faithful":
+        # Latency-modeled scripted judge: real-measured timing + honest
+        # faults, zero spend, no key. The client is scripted downstream in
+        # run_scenario (it needs the alert list); the model id is honest.
+        print("[sim] judge=faithful-jev (jev-faithful-sim-1.0); latencies "
+              "from the 2026-10-03 real-key campaign; zero spend.",
+              file=sys.stderr)
+        return ("faithful-jev", None, None)
     if judge == "real":
         key, source = resolve_jev_key()
         if not key:
@@ -651,7 +819,7 @@ def resolve_judge(judge: str, jev_model: str | None = None):
         return ("jev", SystemOneClient(api_key=key, model=model,
                                        allow_floating_model=floating),
                 None if floating else model)
-    raise SystemExit(f"unknown --judge {judge!r}; expected 'fake' or 'real'")
+    raise SystemExit(f"unknown --judge {judge!r}; expected 'fake', 'faithful' or 'real'")
 
 
 # --------------------------------------------------------------------------
@@ -827,9 +995,13 @@ def run_scenario(manifest: dict, judge="fake", realtime: bool = False,
 
     if judge_name == "fake-jev":
         client = script_fakejev(alerts, kinds, seed)
+    elif judge_name == "faithful-jev":
+        # Faithful simulated services: latency-modeled judge + faithful
+        # FakePD delivery semantics. Zero spend, seeded, reproducible.
+        client = script_faithfuljev(alerts, kinds, seed)
     judge_tuple = (judge_name, client, real_pin)
 
-    fakepd = FakePDSink()
+    fakepd = FakePDSink(faithful=(judge == "faithful"), seed=seed)
     fakepd.start()
     tmpdir = tempfile.mkdtemp(prefix="sentinel-sim-")
     try:
@@ -952,9 +1124,11 @@ def main(argv=None) -> int:
                     "FakePD sink over the REAL Sentinel pipeline.")
     ap.add_argument("--scenario", required=True,
                     help="scenario name under platform/server/sim/scenarios/")
-    ap.add_argument("--judge", default="fake", choices=["fake", "real"],
-                    help="fake (default, deterministic, zero spend) or real "
-                         "(resolves the Jev key per C2; prints cost warning)")
+    ap.add_argument("--judge", default="fake", choices=["fake", "faithful", "real"],
+                    help="fake (default, deterministic, zero spend), faithful "
+                         "(latency-modeled scripted judge + faithful FakePD, "
+                         "zero spend), or real (resolves the Jev key per C2; "
+                         "prints cost warning)")
     ap.add_argument("--jev-model", default=None,
                     help="pinned Jev model id for --judge real (ADR-015); "
                          "omit only to float 'jev-latest' as a loud opt-out")

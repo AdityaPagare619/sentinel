@@ -424,3 +424,187 @@ class MockSystemOneClient(SystemOneClient):
                 f"MockSystemOneClient has no scripted answer for state "
                 f"fingerprint {fingerprint[:16]}..."
             ) from None
+
+
+# ---------------------------------------------------------------------------
+# Faithful simulated Jev service (production-stages lane, 2026-10-06).
+#
+# MockSystemOneClient answers instantly with canned values — correct for unit
+# tests, theater for a simulation. FaithfulJev keeps the scripted answers
+# (deterministic dispositions, same fingerprint contract) but behaves like
+# the MEASURED service:
+#   * every decide() blocks for a latency sampled from the REAL measured
+#     distribution below (109 successful real-key calls, 2026-10-03
+#     campaign). The race runs the judge on a worker thread against a real
+#     budget, so the slept tail genuinely exercises timer-wins;
+#   * fault injection: transient 520-class errors at the measured ~0.7%
+#     rate, plus opt-in 429 / timeout / slow-tail injection for overload
+#     drills. Injected faults raise the SAME exception types the real
+#     client raises (JevRateLimited, JevTimeout, JevError), so the race's
+#     error paths are exercised, never bypassed.
+# Seeded RNG => reproducible runs. Honestly labeled: model id
+# "jev-faithful-sim-1.0" — never a real jev version id, so the gate's
+# drift assertion stays meaningful.
+# ---------------------------------------------------------------------------
+
+#: Empirical latencies (ms) from 109 successful real-key calls, 2026-10-03.
+#: Source: research/jev-behavior/latency-report-2026-10-03.md
+#: (research/jev-behavior/latency-n100.json.jsonl, status==200 rows).
+#: p50=816ms p95=1312ms p99=1526ms min=494ms max=1678ms.
+_JEV_LATENCY_CAMPAIGN_MS = (494.2, 495.4, 507.4, 517.3, 528.1, 530.9, 549.1, 557.4, 568.6, 576.6, 579.6, 581.2, 587.1, 595.3, 597.3, 598.3, 615.3, 616.1, 616.3, 634.2, 637.3, 639.8, 648.4, 650.3, 658.0, 663.8, 675.5, 679.0, 682.4, 694.9, 711.0, 714.1, 717.6, 722.5, 731.0, 737.7, 747.9, 751.5, 753.2, 763.9, 764.9, 768.9, 769.7, 772.9, 775.4, 780.4, 782.1, 786.3, 790.8, 796.2, 800.3, 805.4, 807.3, 814.6, 815.6, 820.1, 821.8, 824.3, 831.6, 832.4, 841.6, 850.0, 852.9, 861.0, 864.3, 868.8, 870.7, 886.7, 890.1, 903.0, 905.3, 912.2, 913.8, 915.7, 938.9, 948.1, 950.9, 954.8, 957.0, 959.6, 961.9, 969.4, 984.2, 987.3, 993.0, 995.0, 1004.2, 1005.0, 1028.8, 1029.1, 1042.6, 1044.6, 1051.9, 1064.1, 1073.1, 1100.7, 1101.3, 1101.4, 1172.1, 1173.7, 1257.5, 1283.8, 1301.8, 1319.6, 1329.4, 1332.2, 1357.1, 1540.5, 1678.5)
+_JEV_LATENCY_SOURCE = "research/jev-behavior/latency-report-2026-10-03.md"
+_JEV_LATENCY_MEASURED_ON = "2026-10-03"
+#: Measured fault rates from the same campaign (150 calls): one transient
+#: HTTP 520 => ~0.007. Zero 429/529 observed at <=0.35 req/s.
+_JEV_MEASURED_520_RATE = 1 / 150
+
+
+def _quantile(sorted_vals, q):
+    if not sorted_vals:
+        return 0.0
+    idx = min(int(q * len(sorted_vals)), len(sorted_vals) - 1)
+    return sorted_vals[idx]
+
+
+class LatencyModel:
+    """Empirical latency sampler: uniform draw over measured samples.
+
+    Sampling the raw empirical values (with replacement) reproduces the
+    measured distribution exactly — including the tail the race budget must
+    survive. Seeded for reproducible runs.
+    """
+
+    def __init__(self, samples, *, seed=None, source=_JEV_LATENCY_SOURCE,
+                 measured_on=_JEV_LATENCY_MEASURED_ON):
+        self._samples = tuple(float(s) for s in samples)
+        if not self._samples:
+            raise ValueError("LatencyModel needs at least one sample")
+        self._rng = random.Random(seed)
+        self.source = source
+        self.measured_on = measured_on
+
+    def sample_ms(self):
+        return self._rng.choice(self._samples)
+
+    @classmethod
+    def jev_campaign(cls, *, seed=None):
+        """The 2026-10-03 real-key campaign distribution."""
+        return cls(_JEV_LATENCY_CAMPAIGN_MS, seed=seed)
+
+    def describe(self):
+        s = sorted(self._samples)
+        return {
+            "n": len(s),
+            "min_ms": s[0],
+            "p50_ms": _quantile(s, 0.50),
+            "p95_ms": _quantile(s, 0.95),
+            "p99_ms": _quantile(s, 0.99),
+            "max_ms": s[-1],
+            "source": self.source,
+            "measured_on": self.measured_on,
+        }
+
+
+class FaultProfile:
+    """Fault-injection rates for the faithful fake.
+
+    Defaults mirror MEASURED reality (transient 520s at ~0.7%); everything
+    else is opt-in and explicit, so overload drills are deliberate, never
+    accidental. draw() returns None (healthy) or a fault name.
+    """
+
+    def __init__(self, *, transient_520_rate=_JEV_MEASURED_520_RATE,
+                 rate_limit_429_rate=0.0, timeout_rate=0.0,
+                 slow_tail_rate=0.0, slow_tail_ms=4500.0):
+        for name, v in (("transient_520_rate", transient_520_rate),
+                        ("rate_limit_429_rate", rate_limit_429_rate),
+                        ("timeout_rate", timeout_rate),
+                        ("slow_tail_rate", slow_tail_rate)):
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(f"{name} must be in [0,1], got {v}")
+        self.transient_520_rate = transient_520_rate
+        self.rate_limit_429_rate = rate_limit_429_rate
+        self.timeout_rate = timeout_rate
+        self.slow_tail_rate = slow_tail_rate
+        self.slow_tail_ms = float(slow_tail_ms)
+
+    def draw(self, rng):
+        r = rng.random()
+        if r < self.transient_520_rate:
+            return "transient_520"
+        if r < self.transient_520_rate + self.rate_limit_429_rate:
+            return "rate_limit_429"
+        if r < self.transient_520_rate + self.rate_limit_429_rate + self.timeout_rate:
+            return "timeout"
+        if (r < self.transient_520_rate + self.rate_limit_429_rate
+                + self.timeout_rate + self.slow_tail_rate):
+            return "slow_tail"
+        return None
+
+    def describe(self):
+        return {
+            "transient_520_rate": self.transient_520_rate,
+            "rate_limit_429_rate": self.rate_limit_429_rate,
+            "timeout_rate": self.timeout_rate,
+            "slow_tail_rate": self.slow_tail_rate,
+            "slow_tail_ms": self.slow_tail_ms,
+        }
+
+
+class FaithfulJev(MockSystemOneClient):
+    """Scripted answers, real-measured timing, honest faults.
+
+    Same fingerprint contract as MockSystemOneClient (unscripted states raise
+    JevError), but decide() sleeps the sampled latency BEFORE answering and
+    injects faults per the profile. Per-call records land in `trace`:
+    {latency_ms, fault, disposition} — the calibration evidence.
+    """
+
+    FAITHFUL_MODEL_ID = "jev-faithful-sim-1.0"
+
+    def __init__(self, script=None, *, seed=None, latency=None,
+                 faults=None, model=FAITHFUL_MODEL_ID):
+        super().__init__(script, model=model)
+        self._rng = random.Random(seed)
+        self._latency = latency or LatencyModel.jev_campaign(seed=seed)
+        self._faults = faults or FaultProfile()
+        self._trace = []
+
+    @property
+    def trace(self):
+        return list(self._trace)
+
+    def calibration(self):
+        return {
+            "model_id": self.FAITHFUL_MODEL_ID,
+            "latency": self._latency.describe(),
+            "faults": self._faults.describe(),
+            "calls": len(self._trace),
+        }
+
+    def decide(self, state, questions):
+        latency_ms = self._latency.sample_ms()
+        fault = self._faults.draw(self._rng)
+        if fault == "slow_tail":
+            latency_ms = self._faults.slow_tail_ms
+        # Block the calling thread like a real network call would. The race
+        # runs the judge on a pool worker against a real budget, so this
+        # sleep genuinely exercises timer-wins on the tail.
+        time.sleep(latency_ms / 1000.0)
+        rec = {"latency_ms": round(latency_ms, 1), "fault": fault}
+        self._trace.append(rec)
+        if fault == "transient_520":
+            raise JevError("simulated transient 520 (fault injection; "
+                           "measured rate ~0.7%)")
+        if fault == "rate_limit_429":
+            raise JevRateLimited("simulated 429 (fault injection)",
+                                 retry_after=1.0)
+        if fault == "timeout":
+            raise JevTimeout("simulated timeout (fault injection)")
+        resp = super().decide(state, questions)
+        try:
+            rec["disposition"] = next(
+                iter(resp.answers.values())).choice
+        except Exception:
+            rec["disposition"] = None
+        return resp
