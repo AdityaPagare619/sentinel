@@ -82,7 +82,75 @@ released). A clean 60-chunk re-run on identical chunks/settings did
 **157/s**. The engine's true rate is ~3x the pressured number; the 1M tier
 (running now, clean box) establishes the real figure.
 
-### Tier 1M (running — clean baseline, no pressure)
+### Tier 1M ✅ (2026-10-06 ~15:40-17:20 IST, seed 7, 32 workers, clean baseline)
+
+- **1,092,876 alerts in 5,830s wall (97 min) → 187.4 alerts/s** (24.0h virtual)
+- Problems triaged 1,092,830 · deduped 902,560 (**82.6%**) · storms 46
+- Race: judge-wins 924 · **timer-wins 0** · errors 4
+  (only 0.08% of alerts reach the race — dedup+fold absorb the rest;
+  judge p99 1.1s < 2.7s budget, so timer-wins 0 is correct, not theater —
+  the race's reality was proven by the 100K pressure phase)
+- Actions: folded 691,342 · page_now 388,552 · page_business_hours 1,631 ·
+  suppress 11,080 (1.0%) · passthrough 271
+- Judge: real 170 / faithful 7,544 (2.2% seeded sample) · cap not tripped
+- Real Jev: n=170 **p50 560ms / p99 1,122ms**
+- Faithful: p50 769ms / p99 1,302ms · faults: 4 transient_520 (0.05%)
+- Spend **$0.0079 → $0.01/M alerts** (at 2% sampling)
+- FakePD pages 390,421 · real PagerDuty contacted: **false** (verified)
+- **Capacity at measured rate: 16,191,360 alerts/day**
+
+### Burst probe (40 req/s vendor bound) ✅
+
+Deliberate 400-call probe at the vendor bound (40 req/s × 10s):
+- **400/400 ok, zero 429s, zero errors** — the vendor does NOT reject at the bound.
+- **BUT: p50 latency 5,152ms / p99 9,071ms** — 10x degradation vs the ~500ms
+  at polite rates. The vendor throttles by SLOWING, not by 429ing.
+- Achieved 9.0/s actual (calls take 5-9s each, so 40/s offered → 9/s completed).
+- **Production implication:** at the bound, every real call exceeds the 2.7s
+  race budget → 100% timer-wins → fail-open pages everything. The design
+  degrades gracefully (pages, never silences), but the PRACTICAL real-Jev
+  rate for good latency is far below 40/s. At our 2% sampling (≈0.2 calls/s
+  at 187/s engine rate), we live in the good-latency zone. Spend $0.0063.
+
+## Verdict: can we handle millions/day?
+
+**YES — with large headroom, on a single box.**
+
+| Measure | Result |
+|---|---|
+| Sustained engine throughput | **187 alerts/s** (1M tier, 32 workers) |
+| Daily capacity | **16.2M alerts/day** (16x the "millions" bar) |
+| Breaking point | Soft knee at 32 workers (211/s peak); 64 workers = -24% speed, zero errors, suppression unchanged |
+| Real Jev @ 2% sample (n=444 total) | p50 ~530ms, p99 ~1.1s — inside the 2.7s race budget |
+| Cost | **$0.01 per million alerts** (2% real sampling); $5 cap never touched ($0.02 total across all tiers) |
+| Fail-open under judge pressure | **PASS** — timer-wins 50 vs 1; suppression 0.009 vs 0.217 (fell, never rose) |
+| Real PagerDuty contact | **Zero** across 1.23M alerts (FakePD only, verified) |
+| Vendor bound | Respected (pacer); burst probe: 0 errors at 40/s, 10x latency |
+
+**The three load-test catches** (bugs this env found that unit tests didn't):
+1. Fail-open ladder `deque mutated during iteration` under 16-thread load → serialized (commit `3fac416` + `dcf0955`).
+2. Unbounded audit RAM (~43MB/min → 7GB OOM at 1M) → file-backed DB + bounded trace (commit `9dfeb96`).
+3. btrfs 60ms sqlite fsync serializing 32 workers → WAL+NORMAL for the test harness; production note: audit DB belongs on fast storage (commit `581054d`).
+
+## What this test did NOT prove
+
+1. **Judgment semantics at volume are modeled, timing is measured.**
+   FaithfulJev dispositions follow scripted `answers_for` semantics; only
+   the 2% real sample (n=444) carries true Jev judgments. Timing, faults,
+   race dynamics, dedup, storm behavior, and cost are measured.
+2. **The 100K tier's 55/s was environment-depressed** (box under memory
+   pressure during that run). The 1M's 187/s on a clean box is the
+   authoritative number; a clean 60-chunk re-run did 157/s, consistent.
+3. **Virtual time, not real time.** Correlator windows see virtual density;
+   sub-minute burst shapes are approximated by batch concurrency.
+4. **Single machine.** No distributed-systems effects: no network partitions,
+   no multi-instance dedup races, no cross-AZ latency.
+5. **The burst probe's 10x latency degradation** means the real-Jev sampling
+   rate cannot scale linearly — at 100% real, the race would timer-win
+   constantly (fail-open, but noisy). The 2% sampling strategy is load-bearing.
+6. **Audit durability vs speed:** the test used WAL+NORMAL; production uses
+   fsync-per-commit. On slow filesystems the audit is the throughput cap
+   (measured 60ms/commit on btrfs).
 
 **Load-test catch #3 (the 55/s mystery, solved):** the 100K tier's 55/s was
 NOT the engine's limit. Thread-stack dumps showed 65/68 threads parked on
