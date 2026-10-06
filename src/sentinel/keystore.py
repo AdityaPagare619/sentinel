@@ -209,7 +209,7 @@ class RotatingKeyStore:
         Issued (break-glass) tokens verify only at their issuance
         generation — a promote kills every pre-rotation break-glass token.
         """
-        cand = candidate or ""
+        cand = candidate if isinstance(candidate, str) else ""
         data = self._read_file()
         raw = self._records(data).get(name)
         if raw is None:
