@@ -56,8 +56,8 @@ class TestAC1KillDrill(unittest.TestCase):
         except ValueError:
             self.fail(f"kill_drill.py did not print JSON:\n"
                       f"{proc.stdout[-2000:]}")
-        ms = data.get("flip_to_halt_ms")
-        self.assertIsNotNone(ms, "drill printed no flip_to_halt_ms")
+        ms = data.get("measured_ms")
+        self.assertIsNotNone(ms, "drill printed no measured_ms")
         self.assertLess(ms, 5000,
                         f"measured flip->halt {ms} ms >= 5000 ms")
         print(f"\n[AC-1a] measured flip->halt: {ms:.0f} ms")

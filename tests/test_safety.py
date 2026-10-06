@@ -356,18 +356,22 @@ class SafetyHTTP(unittest.TestCase):
         self.log = EventLog(self.db)
         self.addCleanup(self.log.close)
         self.ks = KillSwitch(log=self.log)
-        self.token = "http-test-token"
-        _safety.set_operator_verifier(
-            lambda tok: "http-tester" if tok == self.token else None)
-        self.addCleanup(_safety.reset_operator_verifier)
 
         import _pkg
         app_mod = _pkg.load("app")
+        auth_mod = _pkg.load("auth")
         shed_mod = _pkg.load("shed")
+        # Real C1 operator token (Track 1 merged): the app installs the
+        # safety verifier from this store at construction.
+        self.op_store = auth_mod.OperatorTokenStore(
+            os.path.join(self.tmp.name, "operator_token.json"))
+        self.token = self.op_store.first_boot_token
+        self.addCleanup(_safety.reset_operator_verifier)
         self.app = app_mod.PlatformApp(
             store=object(), registry=object(),
             gate=shed_mod.AdmissionGate(), degrade=shed_mod.DegradePolicy(),
-            kill_switch=self.ks, drill_dir=self.tmp.name)
+            kill_switch=self.ks, drill_dir=self.tmp.name,
+            operator_token_store=self.op_store)
 
     def _call(self, path, method="GET", body=None, token="USE"):
         raw = json.dumps(body).encode() if body is not None else b""
@@ -415,7 +419,7 @@ class SafetyHTTP(unittest.TestCase):
         evs = self.log.events_by_type("kill_switch_engaged")
         self.assertEqual(len(evs), 1)
         self.assertEqual(json.loads(evs[0]["body"])["actor_id"],
-                         "http-tester")
+                         "operator")
 
     def test_rearm_without_confirm_rejected(self):
         self._call("/api/v1/safety/kill", "POST")
@@ -461,7 +465,8 @@ class SafetyHTTP(unittest.TestCase):
         shed_mod = _pkg.load("shed")
         app = app_mod.PlatformApp(
             store=object(), registry=object(),
-            gate=shed_mod.AdmissionGate(), degrade=shed_mod.DegradePolicy())
+            gate=shed_mod.AdmissionGate(), degrade=shed_mod.DegradePolicy(),
+            operator_token_store=self.op_store)
         env = {"REQUEST_METHOD": "POST",
                "PATH_INFO": "/api/v1/safety/kill", "QUERY_STRING": "",
                "CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(b""),

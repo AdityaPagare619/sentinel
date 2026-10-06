@@ -204,12 +204,12 @@ def run_drill(args) -> dict:
     ks = _safety.KillSwitch(log=log)
     fake_pd = _FakePD()
 
-    # Drill operator identity through the C1 seam (Track 1 plugs the real
-    # verifier here; the drill's token is single-use and never leaves the
-    # process).
+    # Drill operator identity: provision the drill token via the C1 env
+    # seam BEFORE app construction, so the app's real operator-token store
+    # (Track 1, merged) recognizes it. The safety_api verifier is installed
+    # by the app itself from that store (defense in depth).
     token = secrets.token_urlsafe(32)
-    _safety.set_operator_verifier(
-        lambda tok: "kill-drill" if tok == token else None)
+    os.environ["SENTINEL_OPERATOR_TOKEN"] = token
 
     fwd = DurableForwarder(
         log,
@@ -398,8 +398,19 @@ def main(argv=None) -> int:
     ap.add_argument("--artifact-dir", default=os.path.join(_REPO, "ops",
                                                            "drills"),
                     help="where the drill artifact JSON is written")
+    ap.add_argument("--json", action="store_true",
+                    help="also print the artifact JSON to stdout (for "
+                         "the Track 7 validation harness)")
     args = ap.parse_args(argv)
-    artifact = run_drill(args)
+    if args.json:
+        # Validation-harness mode: human lines go to stderr so stdout is
+        # pure artifact JSON (json.loads(proc.stdout) must succeed).
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            artifact = run_drill(args)
+        print(json.dumps(artifact, indent=2, sort_keys=True), flush=True)
+    else:
+        artifact = run_drill(args)
     return 0 if artifact["passed"] else 1
 
 
