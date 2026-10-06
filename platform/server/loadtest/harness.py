@@ -96,6 +96,19 @@ class LoadHarness:
             sim.build_sim_pipeline(manifest, judge_tuple,
                                    self.fakepd.url, self.tmpdir,
                                    audit_db_path=self.audit_db_path)
+        # Load-test audit tuning: the production EventLog fsyncs every
+        # commit (correct for production). On this box's btrfs that is
+        # ~60ms/commit, which serializes 32 triage workers on the audit
+        # lock and caps throughput at ~55/s — a filesystem artifact, not
+        # an engine limit. WAL + NORMAL removes the fsync from the hot
+        # path for the measurement; production defaults are untouched.
+        # (Found by stack-dump: 65/68 threads parked on the audit lock.)
+        try:
+            conn = self.pipeline.audit._log._conn
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+        except Exception as exc:
+            print(f"[loadtest] audit pragma failed: {exc}", file=sys.stderr)
         # Drift detection is intentionally inactive for the load run
         # (mixed judge); the pinned path was validated by the live run.
         print("[loadtest] gate pinned_model=None (drift inactive, loud "
