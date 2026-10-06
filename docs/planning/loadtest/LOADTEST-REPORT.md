@@ -48,7 +48,7 @@ pressure. Fixed in `src/sentinel/failopen.py` (commit `3fac416`): locks +
 snapshot iteration on both monitors, whole-`observe()` RLock on the
 controller. 39/39 C1 unit tests pass; 32k-observation 16-thread hammer clean.
 
-### Tier 100K (running — with pressure phase)
+### Tier 100K ✅ (2026-10-06 ~14:20-15:00 IST, seed 7, 32 workers, WITH pressure)
 
 **Load-test catch #2 (memory, fixed before it bit):** the first 100K
 attempt showed ~43MB/min unbounded RSS growth — the sim pipeline's
@@ -57,11 +57,32 @@ At 1M alerts that's ~7GB on a 7GB box: a guaranteed OOM. Fixed in commit
 `9dfeb96`: `build_sim_pipeline` takes an `audit_db_path` (file-backed DB
 next to the report, provenance-recorded in the report JSON); the mixed
 judge's per-call trace list became route counters + a bounded 1000-sample.
-Restarted 100K with the fixes; RSS flat at ~67MB where the old code was at
-435MB and climbing. The 10K tier's numbers stand (its absolute scale never
-threatened RAM).
+Restarted 100K with the fixes.
 
-### Tier 1M
+- **130,812 alerts in 2,380s wall (39.7 min) → 55.0 alerts/s** (6.0h virtual)
+- Problems triaged 130,776 · deduped 100,903 (**77.2%**) · storms 36
+- Race: judge-wins 7,082 · **timer-wins 51** · errors 2
+- Actions: folded 80,274 · page_now 22,135 · page_business_hours 9,287 ·
+  suppress 18,316 (14.0%) · passthrough 800
+- Judge: real 177 / faithful 7,970 (2.17%) · cap not tripped
+- Real Jev: n=177 **p50 503ms / p99 932ms** · Spend **$0.0083 → $0.06/M**
+- FakePD pages 32,222 · real PagerDuty contacted: **false**
+
+**Pressure phase (the fail-open proof):** slow-tail attack (15% of judgments
+at 4.5s > 2.7s budget) across the middle third of chunks:
+- **Timer-wins: 50 under pressure vs 1 at baseline** — the race is REAL, not
+  theater. When the judge is slow, the timer wins.
+- **Suppression rate: 0.009 under pressure vs 0.217 baseline** — NO creep;
+  it FELL. A slow judge pages (timer-win → fail-open), never silences.
+  The control principle holds under load. **PASS.**
+
+**Throughput caveat (honest):** the 55/s was measured while the box was
+under memory pressure (0 free RAM — the killed first attempt hadn't
+released). A clean 60-chunk re-run on identical chunks/settings did
+**157/s**. The engine's true rate is ~3x the pressured number; the 1M tier
+(running now, clean box) establishes the real figure.
+
+### Tier 1M (running — clean baseline, no pressure)
 
 ### Breaking point ✅ (2026-10-06 ~14:00 IST, 2K-alert steady workload, all-faithful)
 
