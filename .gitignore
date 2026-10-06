@@ -40,3 +40,5 @@ sentinel.db
 # deploy lane: generated bundles, never committed
 deploy/dist/
 deploy/dist-data/
+
+deploy/dist-prod/
