@@ -1,0 +1,250 @@
+{
+  "generated_at": "2026-10-06T05:48:10.830676+00:00",
+  "branch": "lane/build-t7-validation",
+  "sha": "4b61528",
+  "criteria": {
+    "AC-1 kill-switch drill": {
+      "verdict": "BLOCKED",
+      "PASS": 0,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 4,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_1a_drill_artifact_runs_and_measures (tests.validation.test_ac1_kill_drill.TestAC1KillDrill.test_1a_drill_artifact_runs_and_measures)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no kill endpoint (/api/v1/safety/kill), no `mode` field on the disposition record, no scripts/kill_drill.py on this branch (scripts/kill_drill.py absent)"
+        },
+        {
+          "test": "test_1b_sticky_no_self_revive (tests.validation.test_ac1_kill_drill.TestAC1KillDrill.test_1b_sticky_no_self_revive)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no kill endpoint (/api/v1/safety/kill), no `mode` field on the disposition record, no scripts/kill_drill.py on this branch (scripts/kill_drill.py absent)"
+        },
+        {
+          "test": "test_1c_rearm_separate_deliberate (tests.validation.test_ac1_kill_drill.TestAC1KillDrill.test_1c_rearm_separate_deliberate)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no kill endpoint (/api/v1/safety/kill), no `mode` field on the disposition record, no scripts/kill_drill.py on this branch (scripts/kill_drill.py absent)"
+        },
+        {
+          "test": "test_1d_kill_above_jev_control_principle (tests.validation.test_ac1_kill_drill.TestAC1KillDrill.test_1d_kill_above_jev_control_principle)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no kill endpoint (/api/v1/safety/kill), no `mode` field on the disposition record, no scripts/kill_drill.py on this branch (scripts/kill_drill.py absent)"
+        }
+      ]
+    },
+    "AC-2 race outcomes": {
+      "verdict": "BLOCKED",
+      "PASS": 6,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 2,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_2e_key_absent_fakejev_honest (tests.validation.test_ac2_race_outcomes.TestAC2RaceOutcomes.test_2e_key_absent_fakejev_honest)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 2 judge adapter not merged \u2014 FakeJev, spend endpoint, and the JudgeResult `source` field are unavailable on this branch"
+        },
+        {
+          "test": "test_2f_budget_exhausted_deterministic (tests.validation.test_ac2_race_outcomes.TestAC2RaceOutcomes.test_2f_budget_exhausted_deterministic)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 2 judge adapter not merged \u2014 FakeJev, spend endpoint, and the JudgeResult `source` field are unavailable on this branch"
+        }
+      ]
+    },
+    "AC-3 suppression correctness": {
+      "verdict": "PASS",
+      "PASS": 9,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 0,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": []
+    },
+    "AC-4 scale test": {
+      "verdict": "BLOCKED",
+      "PASS": 1,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 1,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_4_track6_manifests_probe (tests.validation.test_ac4_scale.TestAC4Scale.test_4_track6_manifests_probe)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED (Track 6): no scenario manifests under platform/server/scenarios/ \u2014 running harness-generated profiles instead"
+        }
+      ]
+    },
+    "AC-5 P0 re-walk": {
+      "verdict": "BLOCKED",
+      "PASS": 0,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 8,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_5_probe (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5_probe)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5a_unauthenticated_key_overwrite_401 (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5a_unauthenticated_key_overwrite_401)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5b_bogus_bearer_401 (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5b_bogus_bearer_401)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5c_cross_origin_post_blocked (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5c_cross_origin_post_blocked)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5d_unauthenticated_key_delete_401 (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5d_unauthenticated_key_delete_401)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5e_no_auth_on_non_exempt_surfaces (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5e_no_auth_on_non_exempt_surfaces)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5f_health_endpoints_exempt (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5f_health_endpoints_exempt)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        },
+        {
+          "test": "test_5g_authenticated_key_save_works (tests.validation.test_ac5_p0_rewalk.TestAC5P0Rewalk.test_5g_authenticated_key_save_works)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 1 not merged \u2014 /api/* has no operator bearer auth on this branch (the P0 from the infra domain research is still open)"
+        }
+      ]
+    },
+    "AC-6 shadow audit": {
+      "verdict": "BLOCKED",
+      "PASS": 0,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 4,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_6a_mode_field_correct (tests.validation.test_ac6_shadow_audit.TestAC6ShadowAudit.test_6a_mode_field_correct)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no `mode` field on the disposition record (shadow vs live) on this branch"
+        },
+        {
+          "test": "test_6b_zero_rewritten_reasons (tests.validation.test_ac6_shadow_audit.TestAC6ShadowAudit.test_6b_zero_rewritten_reasons)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no `mode` field on the disposition record (shadow vs live) on this branch"
+        },
+        {
+          "test": "test_6c_shadow_is_powerless (tests.validation.test_ac6_shadow_audit.TestAC6ShadowAudit.test_6c_shadow_is_powerless)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no `mode` field on the disposition record (shadow vs live) on this branch"
+        },
+        {
+          "test": "test_6d_kill_attribution_intact (tests.validation.test_ac6_shadow_audit.TestAC6ShadowAudit.test_6d_kill_attribution_intact)",
+          "verdict": "BLOCKED",
+          "detail": "BLOCKED: Track 3 not merged \u2014 no `mode` field on the disposition record (shadow vs live) on this branch"
+        }
+      ]
+    },
+    "AC-7 falsifiers": {
+      "verdict": "DEFERRED",
+      "PASS": 0,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 0,
+      "DEFERRED": 9,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": [
+        {
+          "test": "test_7_1_3am_dynamic (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_1_3am_dynamic)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_2_scale_dynamic (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_2_scale_dynamic)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_3_honesty_static (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_3_honesty_static)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_4_ai_generic_static (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_4_ai_generic_static)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_5_hierarchy_grayscale_dynamic (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_5_hierarchy_grayscale_dynamic)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_6_no_process_theater_static (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_6_no_process_theater_static)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_7_dynamics_dynamic (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_7_dynamics_dynamic)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_8_appeal_audit_dynamic (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_8_appeal_audit_dynamic)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        },
+        {
+          "test": "test_7_9_phone_static (tests.validation.test_ac7_falsifiers.TestAC7Falsifiers.test_7_9_phone_static)",
+          "verdict": "DEFERRED",
+          "detail": "DEFERRED: Track 8 has not merged a console on program/full-build yet"
+        }
+      ]
+    },
+    "AC-8 honesty audit": {
+      "verdict": "PASS",
+      "PASS": 5,
+      "FAIL": 0,
+      "ERROR": 0,
+      "BLOCKED": 0,
+      "DEFERRED": 0,
+      "CANNOT-VERIFY": 0,
+      "SKIPPED": 0,
+      "details": []
+    }
+  },
+  "totals": {
+    "tests": 49,
+    "pass": 21,
+    "fail": 0,
+    "blocked": 19,
+    "deferred": 9,
+    "cannot_verify": 0
+  },
+  "sign_off": "WITHHELD \u2014 red criteria present"
+}
