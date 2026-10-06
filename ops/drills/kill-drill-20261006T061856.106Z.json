@@ -1,0 +1,33 @@
+{
+  "actor_id": "kill-drill",
+  "artifact": "kill-drill",
+  "checks": {
+    "fresh_row_stays_queued": true,
+    "hot_path_confirmed": true,
+    "kill_200": true,
+    "measured_from_log_ts": true,
+    "no_sends_after_halt": true,
+    "rearm_200": true,
+    "rearm_rejected_false_confirm": true,
+    "rearm_rejected_without_confirm": true,
+    "recovered_after_rearm": true,
+    "status_200": true,
+    "unauth_401": true
+  },
+  "contract": "C3",
+  "environment": {
+    "host": "htch-runtime",
+    "python": "3.12.3",
+    "sentinel_rev": "5e4c0c5"
+  },
+  "flip_at": "2026-10-06T06:18:56.219Z",
+  "flip_seq": 13,
+  "forwarder_halted_at": "2026-10-06T06:18:56.265Z",
+  "halt_seq": 14,
+  "lane": "lane/build-t3-shadow-kill",
+  "measured_ms": 46.0,
+  "notes": "flip \u2192 forwarder-halt measured from decision-log event timestamps (kill_switch_engaged.ts \u2192 forwarder_halted.ts) on the real WSGI + forwarder path. No Jev consulted.",
+  "passed": true,
+  "started_at": "2026-10-06T06:18:56.106Z",
+  "threshold_ms": 5000.0
+}

@@ -24,17 +24,68 @@ class Alert:
     raw: dict = field(default_factory=dict)  # original payload, retained
 
 
+class ReasonRewriteError(AttributeError):
+    """Raised on a second write to Disposition.reason.
+
+    The disposition's ``reason`` is WRITE-ONCE (contract C3): only the
+    decisioning path (the gate's policy kernel) may set it, exactly once.
+    The shadow path must never rewrite it — it records ``mode="shadow"``
+    and carries the causal reason through untouched, via
+    ``Disposition.as_shadow()`` / ``as_shadow_shell()``.
+    """
+
+
 @dataclass
 class Disposition:
     action: str  # "page_now" | "page_business_hours" | "suppress" | "passthrough" | "folded"
                  # "folded" (D3): storm-continuation absorbed into the aggregate
                  # page — intentionally not forwarded, but NOT suppression.
-    reason: str  # "threshold" | "allowlist" | "uncertain" | "shadow" |
-                 # "dedup" | "change_window" | "storm" | "storm_digest" |
-                 # "error:<code>"
+    reason: str  # WRITE-ONCE. Always the CAUSAL reason: "threshold" |
+                 # "allowlist" | "uncertain" | "dedup" | "change_window" |
+                 # "storm" | "storm_digest" | "kill_switch" | "flap_debounce" |
+                 # "failopen_step1" | ... | "error:<code>". NEVER "shadow" —
+                 # shadow is a MODE, not a reason. The shadow path sets
+                 # mode="shadow" and leaves reason exactly as the
+                 # decisioning path wrote it (contract C3).
     team: str | None
     confidence: float | None
     latency_ms: float
+    mode: str = "live"  # "live" | "shadow". Written by the path that executes
+                        # (or mirrors) the decision — never by decisioning.
+
+    def __setattr__(self, name, value):
+        # Write-once enforcement for reason: the first assignment (inside
+        # __init__, from the decisioning path) commits it; any later
+        # assignment — e.g. a shadow-path rewrite of reason — raises.
+        if name == "reason":
+            if self.__dict__.get("_reason_committed", False):
+                raise ReasonRewriteError(
+                    f"Disposition.reason is write-once (contract C3): refusing "
+                    f"to rewrite {self.__dict__.get('reason')!r} as {value!r}. "
+                    f"Shadow is a mode, not a reason — use as_shadow().")
+            object.__setattr__(self, "_reason_committed", True)
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self):
+        if self.mode not in ("live", "shadow"):
+            raise ValueError(
+                f"Disposition.mode must be 'live'|'shadow', got {self.mode!r}")
+
+    def as_shadow(self) -> "Disposition":
+        """The shadow path's audit copy: the WOULD-BE verdict, causal reason
+        carried through untouched, mode="shadow". The shadow path never
+        assigns ``reason`` itself — it goes through here."""
+        return Disposition(action=self.action, reason=self.reason,
+                           team=self.team, confidence=self.confidence,
+                           latency_ms=self.latency_ms, mode="shadow")
+
+    def as_shadow_shell(self) -> "Disposition":
+        """The disposition RETURNED to the caller in shadow mode: the action
+        is forced to "passthrough" (never executed), the causal reason is
+        carried through untouched, mode="shadow"."""
+        return Disposition(action="passthrough", reason=self.reason,
+                           team=self.team, confidence=self.confidence,
+                           latency_ms=self.latency_ms, mode="shadow")
 
 
 @dataclass

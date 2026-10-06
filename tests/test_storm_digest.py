@@ -340,10 +340,15 @@ class TestShadowDigestMirror(unittest.TestCase):
                 # branch working, not the setup failing to suppress.
                 self.assertEqual(rec.disposition.action, "suppress")
         # The storm-declaring aggregate's honest would-be is 'paged via the
-        # aggregate' — recorded (reason "shadow"), never executed.
+        # aggregate' — recorded with the CAUSAL reason ("storm_digest") and
+        # mode="shadow" (contract C3: shadow is a mode, never a reason),
+        # never executed.
         self.assertEqual(rec.disposition.action, "page_now")
-        self.assertEqual(rec.disposition.reason, "shadow")
+        self.assertEqual(rec.disposition.reason, "storm_digest")
+        self.assertEqual(rec.disposition.mode, "shadow")
         self.assertEqual(disp.action, "passthrough")  # recorded, not executed
+        self.assertEqual(disp.reason, "storm_digest")  # causal reason kept
+        self.assertEqual(disp.mode, "shadow")
         # The digest path never consults Jev — not even in shadow.
         self.assertEqual(len(self.client.calls), 1)
         # No invented evidence on the digest path (honesty contract — W1).

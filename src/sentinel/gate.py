@@ -556,13 +556,14 @@ class Gate:
             self._note("unhealthy_error", "passthrough")
 
         if self.shadow:
+            # Contract C3: the shadow path NEVER rewrites reason. The causal
+            # reason from the decisioning path rides through untouched; the
+            # only thing the shadow path writes is mode="shadow"
+            # (Disposition.as_shadow / as_shadow_shell — any direct
+            # `reason=` assignment here would raise ReasonRewriteError).
             would_be = disp
-            audit_disp = Disposition(
-                action=would_be.action, reason="shadow", team=would_be.team,
-                confidence=would_be.confidence, latency_ms=would_be.latency_ms)
-            disp = Disposition(
-                action="passthrough", reason="shadow", team=would_be.team,
-                confidence=would_be.confidence, latency_ms=would_be.latency_ms)
+            audit_disp = would_be.as_shadow()
+            disp = would_be.as_shadow_shell()
         else:
             audit_disp = disp
 

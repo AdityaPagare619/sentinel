@@ -98,11 +98,12 @@ class TestRiver(unittest.TestCase):
         self.assertAlmostEqual(probs["p1_critical"], 0.90, places=6)
 
     def test_shadow_flag(self):
+        # C3: "shadow" is a mode, not a reason — the flag derives from mode.
         items = self.store.decisions(action="passthrough", limit=500)
-        shadows = [i for i in items if i["reason"] == "shadow"]
+        shadows = [i for i in items if i["mode"] == "shadow"]
         self.assertTrue(shadows)
         self.assertTrue(all(i["shadow"] for i in shadows))
-        nons = [i for i in items if i["reason"] != "shadow"]
+        nons = [i for i in items if i["mode"] != "shadow"]
         self.assertTrue(all(not i["shadow"] for i in nons))
 
     def test_has_older(self):

@@ -768,7 +768,9 @@ class ShadowPipeline:
             human_disposition=self._human_disposition(ep),
             gate_would=rec.disposition.action,   # the WOULD-BE verdict
             gate_confidence=rec.disposition.confidence,
-            gate_reason=rec.disposition.reason,   # "shadow"
+            gate_reason=rec.disposition.reason,   # CAUSAL reason (contract C3:
+                                                 # never "shadow" — shadow is
+                                                 # rec.disposition.mode)
             gate_latency_ms=rec.disposition.latency_ms,
             estate_severity=ep.final_severity,
             evidence={
@@ -867,8 +869,8 @@ class ShadowPipeline:
         unreachable by construction. The shadow tap must record the same
         would-be: ``page_now`` via digest. Recorded, not executed, mirroring
         exactly how ``Gate.evaluate()`` wraps would-be verdicts in shadow
-        mode (would-be action kept, reason "shadow", returned disposition
-        forced to passthrough).
+        mode (would-be action kept, causal reason carried through,
+        mode="shadow", returned disposition forced to passthrough).
 
         Deliberately disposition-only: the live digest's advisory Jev call
         and decision_made emission are execution-side effects — the shadow
@@ -877,12 +879,11 @@ class ShadowPipeline:
         would_be = storm_digest_disposition(
             storm_size=sum(corr.storm_counts.values()),
             storm_counts=dict(corr.storm_counts))
-        audit_disp = Disposition(
-            action=would_be.action, reason="shadow", team=would_be.team,
-            confidence=would_be.confidence, latency_ms=would_be.latency_ms)
-        disp = Disposition(
-            action="passthrough", reason="shadow", team=would_be.team,
-            confidence=would_be.confidence, latency_ms=would_be.latency_ms)
+        # Contract C3: the shadow path NEVER rewrites reason. The digest's
+        # causal reason ("storm_digest") rides through untouched; the only
+        # thing written here is mode="shadow".
+        audit_disp = would_be.as_shadow()
+        disp = would_be.as_shadow_shell()
         rec = DecisionRecord(
             alert=alert,
             input_sha256=input_sha256(state),

@@ -21,7 +21,7 @@ from sentinel.client import (Answer, DecisionResponse, JevError,
 from sentinel.correlator import CorrelationResult
 from sentinel.forwarder import Forwarder
 from sentinel.gate import Gate
-from sentinel.models import Thresholds
+from sentinel.models import ReasonRewriteError, Thresholds
 from sentinel.quantized import (AllowlistEntry, Attestation, FitStore,
                                 REFERENCE_CLASS, wilson_upper_onesided)
 from sentinel.state import build_state, input_sha256
@@ -405,7 +405,10 @@ class TestShadowMode(GateTestBase):
             shadow=True)
         disp, _rec = gate.evaluate(alert, state, {}, {})
         self.assertEqual(disp.action, "passthrough")
-        self.assertEqual(disp.reason, "shadow")
+        # Contract C3: the causal reason rides through untouched; only the
+        # mode marks this as shadow.
+        self.assertEqual(disp.reason, "threshold")
+        self.assertEqual(disp.mode, "shadow")
 
     def test_shadow_audit_logs_would_be_disposition(self):
         alert = make_alert()
@@ -416,7 +419,29 @@ class TestShadowMode(GateTestBase):
         rows = self.audit.decisions_for_fingerprint(alert.fingerprint)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["action"], "page_now")  # would-be
-        self.assertEqual(rows[0]["reason"], "shadow")
+        self.assertEqual(rows[0]["reason"], "threshold")  # causal, not "shadow"
+        self.assertEqual(rows[0]["mode"], "shadow")
+
+    def test_shadow_reason_is_write_once(self):
+        # A second write to reason raises — the shadow path can never
+        # rewrite it (contract C3 enforcement).
+        alert = make_alert()
+        gate, _c, state = self.scripted_gate(
+            alert, canned(p1=0.9, p2=0.0, p3=0.1, p4=0.0, conf=0.95),
+            shadow=True)
+        disp, _rec = gate.evaluate(alert, state, {}, {})
+        with self.assertRaises(ReasonRewriteError):
+            disp.reason = "shadow"
+
+    def test_live_dispositions_carry_live_mode(self):
+        alert = make_alert()
+        gate, _c, state = self.scripted_gate(
+            alert, canned(p1=0.9, p2=0.0, p3=0.1, p4=0.0, conf=0.95),
+            shadow=False)
+        disp, _rec = gate.evaluate(alert, state, {}, {})
+        self.assertEqual(disp.action, "page_now")
+        self.assertEqual(disp.reason, "threshold")
+        self.assertEqual(disp.mode, "live")
 
 
 class TestAuditAlwaysWritten(GateTestBase):

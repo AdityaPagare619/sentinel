@@ -292,7 +292,12 @@ class ReadStore:
             "input_sha256": body.get("input_sha256"),
             "jev_model": jev_model,
             "latency_ms": body.get("latency_ms"),
-            "shadow": reason == "shadow",
+            # C3: shadow is a MODE, never a reason. mode rides top-level in
+            # the decision_made body (and as a VIEW column); the
+            # reason == "shadow" fallback covers pre-C3 rows only.
+            "mode": body.get("mode") or row.get("mode") or "live",
+            "shadow": (body.get("mode") or row.get("mode")) == "shadow"
+                      or reason == "shadow",
         }
         summary["_ctx"] = ctx  # internal; stripped before serving
         return summary

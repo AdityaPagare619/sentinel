@@ -37,7 +37,7 @@ def make_decision(audit, *, alert_id, service="web", check="http_5xx",
                   severity_in="critical", region="us-east", team="platform",
                   action="page_now", reason="p1p2-mass", sev="p1_critical",
                   confidence=0.9, disp_choice=None, jev_model="system-one",
-                  input_sha256=None, latency_ms=800.0):
+                  input_sha256=None, latency_ms=800.0, mode="live"):
     fp = fingerprint_for(service, check, severity_in, region,
                        env="test", cluster="test")
     alert = Alert(alert_id=alert_id, received_at="2026-10-03T10:00:00+00:00",
@@ -54,7 +54,8 @@ def make_decision(audit, *, alert_id, service="web", check="http_5xx",
     q2 = Answer(qid="team", qtype="choice", choice=team, noul=None,
                 probabilities={team: 0.95}, confidence=0.95)
     disp = Disposition(action=action, reason=reason, team=team,
-                       confidence=confidence, latency_ms=latency_ms)
+                       confidence=confidence, latency_ms=latency_ms,
+                       mode=mode)
     rec = DecisionRecord(alert=alert,
                          input_sha256=input_sha256 or f"sha-{alert_id}",
                          jev_model=jev_model, q_severity=q1, q_team=q2,
@@ -68,17 +69,19 @@ def make_store_db(n_per_team: int = 4):
     tmp.close()
     audit = AuditLog(tmp.name)
     teams = ["platform", "data", "network"]
-    actions = [("suppress", "triple-lock", "known_noise", 0.96),
-               ("page_now", "p1p2-mass", "p1_critical", 0.9),
-               ("page_business_hours", "queue-policy", "p3_medium", 0.8),
-               ("passthrough", "shadow", "known_noise", 0.95)]
+    actions = [("suppress", "triple-lock", "known_noise", 0.96, "live"),
+               ("page_now", "p1p2-mass", "p1_critical", 0.9, "live"),
+               ("page_business_hours", "queue-policy", "p3_medium", 0.8,
+                "live"),
+               ("passthrough", "known_noise", "known_noise", 0.95,
+                "shadow")]
     i = 0
     for team in teams:
-        for action, reason, sev, conf in actions[:n_per_team]:
+        for action, reason, sev, conf, mode in actions[:n_per_team]:
             i += 1
             make_decision(audit, alert_id=f"alt-{i:04d}", team=team,
                           action=action, reason=reason, sev=sev,
-                          confidence=conf, service=f"svc-{team}")
+                          confidence=conf, service=f"svc-{team}", mode=mode)
     # Outcomes for half the alerts (became_sev12 alternates).
     conn = sqlite3.connect(tmp.name)
     for j in range(1, i + 1, 2):
