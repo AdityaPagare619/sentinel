@@ -744,9 +744,10 @@ class FailopenController:
                      now: float | None = None) -> list[dict]:
         """External escalation (e.g. the gate's C5 auto-fall on a stale
         policy mid-decision). Safety escalations bypass dwell."""
-        t = self._t(now)
-        return self._enter(step, t, cause, bypass_dwell=True,
-                           alarm=(step == 2 and "stale" in cause))
+        with self._lock:
+            t = self._t(now)
+            return self._enter(step, t, cause, bypass_dwell=True,
+                               alarm=(step == 2 and "stale" in cause))
 
     def _recover(self, now: float) -> list[dict]:
         self._step_history.append({
@@ -776,21 +777,27 @@ class FailopenController:
     def decide(self, alert, step: int, now: float | None = None) -> Disposition:
         """The deterministic degraded disposition for one alert. Never
         calls Jev, never raises (the company-ending bug is dropping the
-        page — a bug here degrades to passthrough, loudly)."""
-        t = self._t(now)
-        try:
-            if step == 1:
-                return self._decide_step1(alert)
-            if step == 2:
-                return self._decide_step2(alert, t)
-            if step == 3:
-                return self._decide_step3(alert, t)
-            raise ValueError(f"unknown failopen step {step}")
-        except Exception as exc:  # fail open, loudly
-            logger.exception("failopen step-%d decide failed: %s", step, exc)
-            return Disposition(action="passthrough",
-                               reason=f"failopen_step{step}_error",
-                               team=None, confidence=None, latency_ms=0.0)
+        page — a bug here degrades to passthrough, loudly).
+
+        Serialized like observe(): the gate calls this from triage threads
+        while other threads feed observe() — the step-3 token deque and the
+        digest would otherwise race.
+        """
+        with self._lock:
+            t = self._t(now)
+            try:
+                if step == 1:
+                    return self._decide_step1(alert)
+                if step == 2:
+                    return self._decide_step2(alert, t)
+                if step == 3:
+                    return self._decide_step3(alert, t)
+                raise ValueError(f"unknown failopen step {step}")
+            except Exception as exc:  # fail open, loudly
+                logger.exception("failopen step-%d decide failed: %s", step, exc)
+                return Disposition(action="passthrough",
+                                   reason=f"failopen_step{step}_error",
+                                   team=None, confidence=None, latency_ms=0.0)
 
     def _decide_step1(self, alert) -> Disposition:
         # Last-known-good policy WITHOUT the Jev call: the deterministic
