@@ -1,0 +1,1 @@
+{"$schema":"https://openapi.vercel.sh/vercel.json","headers":[{"headers":[{"key":"Cache-Control","value":"no-store"}],"source":"/api/(.*)"},{"headers":[{"key":"X-Sentinel-Deployment","value":"production-api"}],"source":"/(.*)"}],"rewrites":[{"destination":"/api/index-prod.py","source":"/api/:path*"},{"destination":"/api/index-prod.py","source":"/api"}]}
