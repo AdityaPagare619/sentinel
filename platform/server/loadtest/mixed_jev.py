@@ -155,8 +155,24 @@ class MixedJevClient:
         self._faithful_lock = threading.Lock()
         self.trace: list[dict] = []
         self.cap_tripped = False
+        # Archived per-batch faithful latencies (delegates are swapped and
+        # dropped; their timing evidence must survive for the report).
+        self.faithful_latencies: list[float] = []
+        self.faithful_faults: dict[str, int] = {}
         # The gate reads .model; be honest that this is a mixture.
         self.model = f"mixed:sampled-real@{sample_rate}+faithful"
+
+    def _archive_trace(self, faithful) -> None:
+        # Idempotent per delegate: mark archived so double-flush can't
+        # double-count.
+        if getattr(faithful, "_lt_archived", False):
+            return
+        for rec in faithful.trace:
+            self.faithful_latencies.append(rec["latency_ms"])
+            f = rec.get("fault")
+            if f:
+                self.faithful_faults[f] = self.faithful_faults.get(f, 0) + 1
+        faithful._lt_archived = True
 
     def set_faithful(self, faithful) -> None:
         """Swap the bulk delegate between drained batches.
@@ -165,6 +181,9 @@ class MixedJevClient:
         delegate swaps. Call only when no race is in flight (batch drained).
         """
         with self._faithful_lock:
+            old = self.faithful
+            if old is not None:
+                self._archive_trace(old)
             self.faithful = faithful
 
     def _current_faithful(self):
@@ -208,10 +227,17 @@ class MixedJevClient:
         return resp
 
     def summary(self) -> dict:
+        # Flush the current delegate's trace so the final batch counts.
+        with self._faithful_lock:
+            if self.faithful is not None:
+                self._archive_trace(self.faithful)
         with self._lock:
             routes = {}
             for t in self.trace:
                 routes[t["route"]] = routes.get(t["route"], 0) + 1
+        lat = sorted(self.faithful_latencies)
+        def q(x):
+            return lat[min(int(x * len(lat)), len(lat) - 1)] if lat else 0
         return {
             "sample_rate": self.sample_rate,
             "routed": routes,
@@ -220,4 +246,8 @@ class MixedJevClient:
             "real_spend_usd": round(self.real.spend_usd(), 4),
             "real_calls": len(self.real.calls),
             "real_latency_ms": self.real.latencies(),
+            "faithful_calls": len(self.faithful_latencies),
+            "faithful_latency_p50_ms": round(q(0.50), 1),
+            "faithful_latency_p99_ms": round(q(0.99), 1),
+            "faithful_faults": dict(self.faithful_faults),
         }

@@ -75,6 +75,12 @@ class LoadHarness:
         self.pipeline = None
         self.vclock = None
         self.judge_info = None
+        # Page accounting: the sink accumulates full payloads; at millions
+        # scale we compact per batch into counts + a bounded sample.
+        self._page_counts = {"total": 0, "sim_tagged": 0,
+                             "storm_aggregate": 0}
+        self._page_sample: list[dict] = []
+        self._sample_keep = 200
 
     # -- setup -----------------------------------------------------------
     def build(self, manifest_name: str = "loadtest"):
@@ -156,6 +162,7 @@ class LoadHarness:
                   for k in metrics_after}
         rdelta = {k: race_after.get(k, 0) - race_before.get(k, 0)
                   for k in race_after}
+        self._drain_pages()
         return {
             "alerts": len(alerts),
             "wall_s": round(wall_s, 2),
@@ -166,12 +173,38 @@ class LoadHarness:
             "chunk_idx": chunk_idx,
         }
 
+    def _drain_pages(self) -> None:
+        """Compact the FakePD sink: counts + bounded sample, then clear.
+
+        At millions scale the full payload list would exhaust memory; the
+        honesty properties (sim-tagged, loopback-only) are preserved as
+        counts, and a bounded sample stays inspectable.
+        """
+        received = self.fakepd.server.received
+        for p in received:
+            summary = str((p["payload"].get("payload") or {}).get("summary", ""))
+            self._page_counts["total"] += 1
+            if "[SIMULATED]" in summary:
+                self._page_counts["sim_tagged"] += 1
+            if summary.startswith("Alert storm:"):
+                self._page_counts["storm_aggregate"] += 1
+            if len(self._page_sample) < self._sample_keep:
+                self._page_sample.append(
+                    {"summary": summary[:160],
+                     "dedup_key": p["payload"].get("dedup_key")})
+        received.clear()
+
     def totals(self) -> dict:
+        # Drain any pages that arrived after the last batch boundary.
+        self._drain_pages()
         pages = self.fakepd.pages
         return {
             "pipeline_metrics": dict(self.pipeline.metrics),
             "race_metrics": self.pipeline.gate._race_metrics.snapshot(),
             "judge": self.mixed.summary(),
-            "fakepd_pages": len(pages),
+            "fakepd_pages": self._page_counts["total"],
+            "fakepd_sim_tagged": self._page_counts["sim_tagged"],
+            "fakepd_storm_aggregate": self._page_counts["storm_aggregate"],
+            "fakepd_sample": self._page_sample[:10],
             "real_pagerduty_contacted": False,
         }
