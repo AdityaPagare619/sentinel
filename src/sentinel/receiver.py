@@ -72,6 +72,8 @@ from .keystore import WebhookSecretStore
 from .models import Alert, Thresholds
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
+# Track 2 (C2): the sim judge adapter — real Jev in simulation.
+from . import sim_judge
 from .state import build_state
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -222,6 +224,12 @@ class Pipeline:
         # The shadow pipeline's object graph contains no paging/write
         # path — see sentinel/shadow.py.
         self.shadow_pipeline: ShadowPipeline | None = None
+        # Track 2 (C2): the sim Jev spend tracker + judge mode. Attached
+        # by build_pipeline_from_env() when SENTINEL_SIM=1; None /
+        # "unconfigured" otherwise (production/mock paths never spend).
+        # The tracker holds amounts and counts only — never key material.
+        self.jev_tracker = None
+        self.jev_judge_mode = "unconfigured"
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -643,6 +651,20 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 return
             code, body = self.pipeline.health.check()
             self._send_json(code, body)
+        elif path == "/api/v1/jev/spend":
+            # Track 2 (C2): the sim Jev spend meter. Read-only; carries
+            # amounts, counts, and the blocked flag — NEVER key material.
+            # NOTE (merge): Track 1's operator auth (C1) must cover this
+            # route when it lands — every /api/* request requires the
+            # bearer token. Until then this process binds 127.0.0.1 by
+            # default (operator-local only).
+            tracker = getattr(self.pipeline, "jev_tracker", None)
+            if tracker is None:
+                self._send_json(200, {"session_usd": 0.0,
+                                      "budget_usd": 0.0,
+                                      "calls": 0, "blocked": False})
+            else:
+                self._send_json(200, tracker.snapshot())
         else:
             self._send_json(404, {"status": "error", "message": "not found"})
 
@@ -1086,12 +1108,17 @@ def _legacy_allowlist_from_env() -> tuple[dict[str, str], str | None]:
 
 def build_pipeline_from_env(policy=None,
                             config_loader: ConfigLoader | None = None,
-                            state_dir: str | None = None) -> Pipeline:
+                            state_dir: str | None = None,
+                            jev_budget_usd: float | None = None) -> Pipeline:
     """Wire correlator/audit/gate/forwarder from environment (§8).
 
     `policy` must be a validated PolicyConfig from ConfigLoader.load_startup()
     (or a reload). Fail-closed: without one we refuse to build a pipeline —
     Sentinel never supervises paging with an unvalidated policy.
+
+    `jev_budget_usd`: the sim Jev spend budget (``--jev-budget-usd``);
+    None resolves via SENTINEL_JEV_BUDGET_USD, default 0.50. Only read
+    when SENTINEL_SIM=1.
     """
     # BYOK: the operator's own Jev key (Integrations settings) takes
     # precedence over the platform key. The source is safe to log; the
@@ -1107,29 +1134,42 @@ def build_pipeline_from_env(policy=None,
     # floating default — the opt-out below is explicit and loudly warned,
     # never a quiet default.
     pinned_model = _model_pin_from_env()
-    if os.environ.get("SENTINEL_MOCK", "0") == "1":
-        # Local dev/demo: mock client with no scripted answers. Every decide()
-        # raises JevError inside the mock, which the gate converts to
-        # passthrough (fail-open) — the full pipeline runs, nothing is ever
-        # suppressed, and no network call is made.
-        client = MockSystemOneClient()
-    elif not api_key:
-        raise SystemExit(
-            "TYPESAFE_API_KEY is not set. Export it before starting the receiver "
-            "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
-    elif pinned_model:
-        client = SystemOneClient(api_key=api_key, model=pinned_model)
-        sys.stderr.write(
-            f"[sentinel] Jev model pinned: {pinned_model} (ADR-015); the "
-            "client never floats 'jev-latest'.\n")
+    # Track 2 (C2): SENTINEL_SIM=1 selects the sim judge — the REAL Jev
+    # judge in simulation. It resolves the real key (user store →
+    # TYPESAFE_API_KEY env) and runs the real race, spend-capped; absent
+    # key → FakeJev ("simulated judge"), honestly labeled. Takes
+    # precedence over SENTINEL_MOCK (explicit new mode beats legacy dev
+    # mock). PagerDuty stays FakePD in sim — the forwarder wiring below
+    # is untouched.
+    sim_mode = os.environ.get(sim_judge.SIM_MODE_ENV, "0") == "1"
+    if sim_mode:
+        client, jev_tracker, jev_judge_mode = sim_judge.build_sim_judge(
+            budget_usd=jev_budget_usd)
     else:
-        sys.stderr.write(
-            "[sentinel] WARNING: no model pin available (SENTINEL_FRESHNESS_BUNDLE "
-            "unset or pinning.json unreadable) — the Jev client floats "
-            "'jev-latest' as an EXPLICIT, loudly-warned opt-out (ADR-015); "
-            "model_drift detection is INACTIVE and a silent vendor remap "
-            "will NOT be caught. Set the bundle before cutover.\n")
-        client = SystemOneClient(api_key=api_key, allow_floating_model=True)
+        jev_tracker, jev_judge_mode = None, "unconfigured"
+        if os.environ.get("SENTINEL_MOCK", "0") == "1":
+            # Local dev/demo: mock client with no scripted answers. Every decide()
+            # raises JevError inside the mock, which the gate converts to
+            # passthrough (fail-open) — the full pipeline runs, nothing is ever
+            # suppressed, and no network call is made.
+            client = MockSystemOneClient()
+        elif not api_key:
+            raise SystemExit(
+                "TYPESAFE_API_KEY is not set. Export it before starting the receiver "
+                "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
+        elif pinned_model:
+            client = SystemOneClient(api_key=api_key, model=pinned_model)
+            sys.stderr.write(
+                f"[sentinel] Jev model pinned: {pinned_model} (ADR-015); the "
+                "client never floats 'jev-latest'.\n")
+        else:
+            sys.stderr.write(
+                "[sentinel] WARNING: no model pin available (SENTINEL_FRESHNESS_BUNDLE "
+                "unset or pinning.json unreadable) — the Jev client floats "
+                "'jev-latest' as an EXPLICIT, loudly-warned opt-out (ADR-015); "
+                "model_drift detection is INACTIVE and a silent vendor remap "
+                "will NOT be caught. Set the bundle before cutover.\n")
+            client = SystemOneClient(api_key=api_key, allow_floating_model=True)
     if policy is None:
         raise SystemExit(
             "no validated policy config: refusing to start without one "
@@ -1188,7 +1228,11 @@ def build_pipeline_from_env(policy=None,
                 freshness_monitor=freshness_monitor,
                 pinned_model=pinned_model,
                 legacy_allowlist=legacy_map,
-                legacy_window_ends_at=legacy_window_ends_at)
+                legacy_window_ends_at=legacy_window_ends_at,
+                # Track 2 (C2): the sim Jev spend tracker; None outside
+                # sim mode. Lets the gate attach the contract JudgeResult
+                # (who decided, at what cost) to decision payloads.
+                jev_tracker=jev_tracker)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
@@ -1203,6 +1247,10 @@ def build_pipeline_from_env(policy=None,
     pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
                         policy=policy, config_loader=config_loader,
                         state_dir=state_dir)
+    # Track 2 (C2): sim judge state for the spend meter
+    # (GET /api/v1/jev/spend). Amounts and counts only — never key material.
+    pipeline.jev_tracker = jev_tracker
+    pipeline.jev_judge_mode = jev_judge_mode
     # Stage-0 read-only tap (design 06 §a): attached only when
     # SENTINEL_SHADOW_TAP=1. Runs on the validated policy's thresholds —
     # the fail-closed gate above already refused to boot without one.
@@ -1278,6 +1326,10 @@ def main(argv=None) -> None:
     parser.add_argument("--state-dir", default=os.environ.get(
         "SENTINEL_STATE_DIR", "./sentinel-state"),
         help="writable state dir (generations, restarts, events)")
+    parser.add_argument("--jev-budget-usd", type=float,
+                        default=sim_judge.budget_usd_from_env(),
+                        help="sim Jev spend budget in USD (SENTINEL_SIM=1 "
+                             "only; default 0.50; 0 disables all Jev calls)")
     args = parser.parse_args(argv)
 
     # Fail-closed config gate (design 05, §4): invalid config with no
@@ -1291,7 +1343,8 @@ def main(argv=None) -> None:
         raise SystemExit(2)
 
     pipeline = build_pipeline_from_env(policy=policy, config_loader=loader,
-                                       state_dir=args.state_dir)
+                                       state_dir=args.state_dir,
+                                       jev_budget_usd=args.jev_budget_usd)
     print(f"[sentinel] serving policy generation {policy.generation}",
           file=sys.stderr)
     record_restart(args.state_dir)
