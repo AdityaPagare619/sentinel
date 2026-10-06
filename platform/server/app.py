@@ -32,6 +32,7 @@ from . import simulate as sim
 from . import auth as _authmod
 from . import rotation_api as _rotmod
 from . import safety_api
+from . import ops_health
 from .keystore import OPERATOR_TOKEN_NAME
 from .datasets import UnknownDataset
 from .integrations import (
@@ -264,6 +265,10 @@ class PlatformApp:
                 return safety_api.handle_rearm(self, environ, start_response)
             if path == "/api/v1/safety/status" and method == "GET":
                 return safety_api.handle_status(self, environ, start_response)
+            # Track 8: Operations Health aggregate for the console's
+            # Operations Health surface. C1 auth enforced in __call__.
+            if path == "/api/v1/ops/health" and method == "GET":
+                return ops_health.handle_health(self, environ, start_response)
         except _BadParam as e:
             return self._error(start_response, 400, e.code, str(e))
         return self._error(start_response, 404, "not_found",
