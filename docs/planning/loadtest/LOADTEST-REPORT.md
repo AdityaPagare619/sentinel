@@ -84,6 +84,18 @@ released). A clean 60-chunk re-run on identical chunks/settings did
 
 ### Tier 1M (running — clean baseline, no pressure)
 
+**Load-test catch #3 (the 55/s mystery, solved):** the 100K tier's 55/s was
+NOT the engine's limit. Thread-stack dumps showed 65/68 threads parked on
+the audit lock. Root cause: the production `EventLog` fsyncs every commit
+(correct for production); on this box's **btrfs** a commit costs **~60ms**
+vs 0.2ms on tmpfs. 32 triage workers serialized on the audit lock → 55/s
+cap. A filesystem artifact, not an engine limit — but a REAL production
+deployment note: the audit DB belongs on fast storage (or batched commits).
+Fixed in commit `581054d`: the harness sets `WAL + synchronous=NORMAL` on
+the load-test audit connection (production defaults untouched). 5-chunk
+verification: **335/s** (was 54/s). The 1M tier measures the engine, not the
+filesystem.
+
 ### Breaking point ✅ (2026-10-06 ~14:00 IST, 2K-alert steady workload, all-faithful)
 
 Worker ramp on the fixed workload — where throughput plateaus and HOW it
