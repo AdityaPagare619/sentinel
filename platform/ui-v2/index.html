@@ -681,15 +681,18 @@ function prodSyncStore(h, decisions, s){
 const ProductionAdapter = {
   name:'production', version:'1.0',
   _timers:[],
+  /* backend base: <html data-backend="https://..."> on hosted builds,
+     else same-origin (local dev serves the API itself) */
+  _base(){ try{ return document.documentElement.dataset.backend||''; }catch(e){ return ''; } },
   _token(){ try{ return sessionStorage.getItem('sentinel.op.token')||''; }catch(e){ return ''; } },
   async _get(path){
-    const r=await fetch(path,{headers:{'Authorization':'Bearer '+this._token()}});
+    const r=await fetch(this._base()+path,{headers:{'Authorization':'Bearer '+this._token()}});
     if(r.status===401){ prodTokenGate(); throw new Error('unauthorized'); }
     if(!r.ok) throw new Error('api '+r.status+' '+path);
     const j=await r.json(); return j.data!==undefined? j.data : j;
   },
   async _post(path, body){
-    const r=await fetch(path,{method:'POST',
+    const r=await fetch(this._base()+path,{method:'POST',
       headers:{'Authorization':'Bearer '+this._token(),'Content-Type':'application/json'},
       body:JSON.stringify(body||{})});
     if(r.status===401){ prodTokenGate(); throw new Error('unauthorized'); }

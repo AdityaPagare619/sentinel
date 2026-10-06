@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Build the GitHub Pages site from the winning v2 console (Track 8).
+
+One console codebase, environment as structural mode (CONSOLE-PARITY.md):
+
+  /index.html          → production console: <html data-mode="production"
+                            data-backend="<vercel-url>">. Red PRODUCTION
+                            banner, operator token gate, live /api/*.
+  /staging/index.html  → simulated showcase: the v2 file as-is (sim mode).
+                            Violet SIMULATED banner, seed shown.
+  /loadtest/index.html → load-test dashboard (handoff from lane/loadtest-env;
+                            this script reserves the path).
+  /preview-v2/         → KEPT until the production shift (judging artifact).
+
+Usage:
+  python3 deploy/gh-pages/build-v2.py --out /tmp/gh-pages-v2 \
+      --backend https://sentinel-platform-....vercel.app \
+      [--loadtest-dashboard /path/to/dashboard.html]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+V2 = os.path.join(REPO, "platform", "ui-v2", "index.html")
+
+
+def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
+    assert os.path.exists(V2), f"v2 console missing: {V2}"
+    html = open(V2, encoding="utf-8").read()
+
+    # --- / : production console -------------------------------------------
+    prod = html.replace(
+        "<html", '<html data-mode="production" data-backend="' + backend + '"', 1)
+    assert 'data-mode="production"' in prod, "mode injection failed"
+    assert backend in prod, "backend injection failed"
+    # banner contract: production build must carry the PRODUCTION chrome
+    assert "PRODUCTION" in prod and "ProductionAdapter" in prod
+    os.makedirs(out, exist_ok=True)
+    open(os.path.join(out, "index.html"), "w", encoding="utf-8").write(prod)
+    print(f"[v2] /index.html → production (backend={backend})")
+
+    # --- /staging/ : simulated showcase ------------------------------------
+    # The v2 file defaults to sim mode (no data-mode) — ship it verbatim.
+    assert "SIMULATED" in html and "SimAdapter" in html
+    stg = os.path.join(out, "staging")
+    os.makedirs(stg, exist_ok=True)
+    shutil.copy(V2, os.path.join(stg, "index.html"))
+    print("[v2] /staging/index.html → sim showcase (verbatim v2)")
+
+    # --- /loadtest/ : reserved for the load-test lane's dashboard ----------
+    lt = os.path.join(out, "loadtest")
+    os.makedirs(lt, exist_ok=True)
+    if loadtest_dashboard and os.path.exists(loadtest_dashboard):
+        shutil.copy(loadtest_dashboard, os.path.join(lt, "index.html"))
+        print(f"[v2] /loadtest/index.html → dashboard from {loadtest_dashboard}")
+    else:
+        # Placeholder reserves the path; replaced at handoff. Honest label.
+        open(os.path.join(lt, "index.html"), "w", encoding="utf-8").write(
+            "<!doctype html><html><head><meta charset=utf-8>"
+            "<title>Sentinel — load test</title></head><body style='font-family:"
+            "system-ui;background:#141310;color:#f5f2ea;padding:40px'>"
+            "<h1>Load-test environment</h1>"
+            "<p>The millions-scale harness dashboard lands here. "
+            "The load-test lane is running it now.</p></body></html>")
+        print("[v2] /loadtest/ → placeholder (awaiting lane handoff)")
+
+    # --- banner contract verification --------------------------------------
+    for path, must, must_not in [
+        (os.path.join(out, "index.html"), 'data-mode="production"', None),
+        (os.path.join(stg, "index.html"), "SimAdapter", 'data-mode="production"'),
+    ]:
+        blob = open(path, encoding="utf-8").read()
+        assert must in blob, f"{path}: missing {must!r}"
+        if must_not:
+            assert must_not not in blob, f"{path}: leaked {must_not!r}"
+    print("[v2] banner contract verified")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--backend", required=True,
+                    help="production backend base URL (Vercel)")
+    ap.add_argument("--loadtest-dashboard", default=None)
+    args = ap.parse_args()
+    build(args.out, args.backend.rstrip("/"), args.loadtest_dashboard)
+    print("[v2] DONE")
+
+
+if __name__ == "__main__":
+    main()
