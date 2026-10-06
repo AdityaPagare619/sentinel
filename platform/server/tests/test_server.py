@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -17,11 +18,13 @@ import _pkg
 from fixtures import make_decision, make_store_db
 
 _app = _pkg.load("app")
+_auth = _pkg.load("auth")
 _datasets = _pkg.load("datasets")
 _shed = _pkg.load("shed")
 _store = _pkg.load("store")
 
 PlatformApp = _app.PlatformApp
+OperatorTokenStore = _auth.OperatorTokenStore
 DatasetRegistry = _datasets.DatasetRegistry
 AdmissionGate, DegradePolicy = _shed.AdmissionGate, _shed.DegradePolicy
 ReadStore = _store.ReadStore
@@ -57,15 +60,36 @@ class AppCase(unittest.TestCase):
         registry = DatasetRegistry(os.path.join(self.tmp.name, "datasets"))
         gate = AdmissionGate(max_inflight=32)
         degrade = DegradePolicy(shed_load=10 ** 9)  # never shed in tests
+        tok_dir = tempfile.mkdtemp(prefix="sentinel-op-token-")
+        self.addCleanup(shutil.rmtree, tok_dir, ignore_errors=True)
+        tok_store = OperatorTokenStore(
+            os.path.join(tok_dir, "operator_token.json"))
+        # Track 1 (C1): every /api/* request needs the operator bearer
+        # token. The test harness signs every call by default.
+        self._op_token = tok_store.first_boot_token
         args = dict(store=store, registry=registry, gate=gate,
-                    degrade=degrade)
+                    degrade=degrade, operator_token_store=tok_store)
         args.update(kw)
         return PlatformApp(**args)
 
+    def _op_auth(self):
+        """Fresh operator token store + matching bearer headers, for test
+        cases that build PlatformApp directly instead of via make_app."""
+        d = tempfile.mkdtemp(prefix="sentinel-op-token-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        s = OperatorTokenStore(os.path.join(d, "operator_token.json"))
+        self._op_token = s.first_boot_token
+        return s, {"Authorization": f"Bearer {self._op_token}"}
+
     def call(self, app, path, method="GET", query="", body=None,
-             headers=None, sse_seconds=None):
+             headers=None, sse_seconds=None, auth=True):
         """sse_seconds: for /api/stream, consume the infinite generator
-        for at most this many seconds, then close it."""
+        for at most this many seconds, then close it.
+        auth=False skips the default bearer header (for auth tests)."""
+        if auth:
+            headers = dict(headers or {})
+            if not any(k.lower() == "authorization" for k in headers):
+                headers["Authorization"] = f"Bearer {self._op_token}"
         env = _env(path, method, query, body, headers)
         captured = {}
 
@@ -268,7 +292,8 @@ class TestSimulateApi(AppCase):
         self.assertTrue(r["status"].startswith("422"))
 
     def test_bad_json_422(self):
-        env = _env("/api/simulate", method="POST")
+        env = _env("/api/simulate", method="POST",
+                   headers={"Authorization": f"Bearer {self._op_token}"})
         env["wsgi.input"] = io.BytesIO(b"{nope")
         env["CONTENT_LENGTH"] = "5"
         captured = {}
@@ -356,7 +381,8 @@ class TestStream(AppCase):
         from sentinel.audit import AuditLog
         store = ReadStore(self.db)
         head = store.head_id()
-        env = _env("/api/stream", query=f"since_id={head}")
+        env = _env("/api/stream", query=f"since_id={head}",
+                   headers={"Authorization": f"Bearer {self._op_token}"})
         captured = {}
 
         def sr(status, headers):
@@ -385,14 +411,16 @@ class TestStream(AppCase):
 
 class TestSheddingHttp(AppCase):
     def test_admission_shed_503(self):
+        tok_store, auth = self._op_auth()
         gate = AdmissionGate(max_inflight=1)
         store = ReadStore(self.db)
         registry = DatasetRegistry(os.path.join(self.tmp.name, "d2"))
         app = PlatformApp(store=store, registry=registry, gate=gate,
-                          degrade=DegradePolicy(shed_load=10 ** 9))
+                          degrade=DegradePolicy(shed_load=10 ** 9),
+                          operator_token_store=tok_store)
         gate.try_acquire()  # hold the only slot
         try:
-            env = _env("/api/decisions")
+            env = _env("/api/decisions", headers=auth)
             captured = {}
 
             def sr(status, headers):
@@ -407,13 +435,15 @@ class TestSheddingHttp(AppCase):
             gate.release()
 
     def test_hot_box_sheds_expensive_only(self):
+        tok_store, auth = self._op_auth()
         degrade = DegradePolicy(shed_load=0.0)  # always hot
         store = ReadStore(self.db)
         registry = DatasetRegistry(os.path.join(self.tmp.name, "d3"))
         app = PlatformApp(store=store, registry=registry,
                           gate=AdmissionGate(max_inflight=32),
-                          degrade=degrade)
-        env = _env("/api/calibration")
+                          degrade=degrade,
+                          operator_token_store=tok_store)
+        env = _env("/api/calibration", headers=auth)
         captured = {}
 
         def sr(status, headers):

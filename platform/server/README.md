@@ -34,6 +34,29 @@ shadows stdlib `platform`. `_pkg.py` loads the package under the alias
 | `--context-json` | `<state-dir>/platform/context.jsonl` if present | Harness-provided alert-context map (see §alert context). |
 | `--max-inflight` / `SENTINEL_PLATFORM_MAX_INFLIGHT` | 32 | Admission bound (§shedding). |
 | `--shed-load` / `SENTINEL_PLATFORM_SHED_LOAD` | 8.0 | Load/CPU above which expensive endpoints shed (§shedding). |
+| `--cors-origins` / `SENTINEL_CORS_ORIGINS` | `https://AdityaPagare619.github.io` | Comma-separated origins allowed to fetch `/api/*` cross-origin. `"*"` allows any origin — explicit opt-in only, prints a loud startup warning. Empty string = CORS off (reverse proxy owns the policy). |
+| `--token-file` / `SENTINEL_OPERATOR_TOKEN_FILE` | `<state-dir>/operator_token.json` | Operator bearer-token file (§operator auth). |
+
+## Operator auth (Track 1, contract C1)
+
+Every `/api/*` request must carry `Authorization: Bearer <operator-token>`,
+else `401` with the exact body `{"error":"unauthorized"}` — the console's
+"operator sign-in required" state keys off that body verbatim (it is
+deliberately not the standard envelope). The ONLY exemptions are the
+health probes `/api/v1/health/live` and `/api/v1/health/ready`.
+
+- The token is generated once at first boot (`secrets.token_urlsafe(32)`),
+  stored 0600 at `--token-file`, printed ONCE in a first-boot banner, and
+  never logged or returned in any response afterwards.
+- Auth is checked before admission control: unauthenticated floods can't
+  occupy slots, and a 503 never masks a 401.
+- The token store (`platform/server/auth.py`) already carries the
+  rotation seam for Track 4: `{tokens: {primary, secondary}, generation}`
+  with constant-time dual-accept verification.
+- This closed the P0 cross-origin key-takeover: pre-fix, any website the
+  operator visited could POST an attacker-controlled PagerDuty routing
+  key (preflight passed, POST returned 200). Regression tests walk the
+  full attack chain in `platform/server/tests/test_auth.py`.
 
 ## Shedding: dashboard load can never starve the pager
 
@@ -152,7 +175,10 @@ cd platform/server/tests && python3 -m unittest discover -s . -p "test_*.py"
 59 tests: store projections, filters, calibration/noise/flips math,
 WSGI endpoint shapes + error codes, SSE framing + live-write roundtrip,
 admission/load shedding, dataset determinism, and the guards (no Jev
-client import, no paging-write imports, DB read-only).
+client import, no paging-write imports, DB read-only) — plus the Track 1
+auth suite (exploit-chain regression, exact-401 contract, health
+exemptions, token hygiene, dual-accept rotation seam) and CORS allowlist
+tests.
 
 ## Demo-box ports (2026-10-03)
 

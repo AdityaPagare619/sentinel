@@ -38,7 +38,8 @@ def make_decision(audit, *, alert_id, service="web", check="http_5xx",
                   action="page_now", reason="p1p2-mass", sev="p1_critical",
                   confidence=0.9, disp_choice=None, jev_model="system-one",
                   input_sha256=None, latency_ms=800.0):
-    fp = fingerprint_for(service, check, severity_in, region)
+    fp = fingerprint_for(service, check, severity_in, region,
+                       env="test", cluster="test")
     alert = Alert(alert_id=alert_id, received_at="2026-10-03T10:00:00+00:00",
                   fingerprint=fp, service=service, check=check,
                   severity_in=severity_in,

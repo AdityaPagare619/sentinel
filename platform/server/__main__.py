@@ -4,6 +4,8 @@ Run (from the repo root):
     python3 platform/server/__main__.py [--port 8080] [--db ./sentinel.db]
         [--state-dir ./sentinel-state] [--ui platform/ui]
         [--data-source shadow] [--labels-version labels-v3]
+        [--cors-origins https://AdityaPagare619.github.io]
+        [--token-file ./sentinel-state/operator_token.json]
 
 (Note: `python -m platform.server` cannot work — the repo's `platform/`
 dir shadows stdlib `platform`; _pkg.py loads us as `sentinel_platform`.)
@@ -38,11 +40,13 @@ for _p in (_HERE, _SRC):
 import _pkg  # noqa: E402
 
 app_mod = _pkg.load("app")           # noqa: E402
+auth_mod = _pkg.load("auth")         # noqa: E402
 datasets_mod = _pkg.load("datasets")  # noqa: E402
 shed_mod = _pkg.load("shed")         # noqa: E402
 store_mod = _pkg.load("store")       # noqa: E402
 
 PlatformApp = app_mod.PlatformApp
+OperatorTokenStore = auth_mod.OperatorTokenStore
 DatasetRegistry = datasets_mod.DatasetRegistry
 AdmissionGate = shed_mod.AdmissionGate
 DegradePolicy = shed_mod.DegradePolicy
@@ -66,10 +70,15 @@ def build_app(args) -> PlatformApp:
     ui_dir = args.ui
     if ui_dir and not os.path.isabs(ui_dir):
         ui_dir = os.path.join(_REPO, ui_dir)
+    token_file = (args.token_file
+                  or os.environ.get("SENTINEL_OPERATOR_TOKEN_FILE")
+                  or os.path.join(args.state_dir, "operator_token.json"))
+    operator_tokens = OperatorTokenStore(token_file)
     return PlatformApp(store=store, registry=registry, gate=gate,
                        degrade=degrade, data_source=args.data_source,
                        labels_version=args.labels_version, ui_dir=ui_dir,
-                       cors_origins=args.cors_origins)
+                       cors_origins=args.cors_origins,
+                       operator_token_store=operator_tokens)
 
 
 def main(argv=None) -> None:
@@ -95,12 +104,20 @@ def main(argv=None) -> None:
                     default=DEFAULT_MAX_INFLIGHT)
     ap.add_argument("--shed-load", type=float, default=DEFAULT_SHED_LOAD)
     ap.add_argument("--cors-origins",
-                    default=os.environ.get("SENTINEL_CORS_ORIGINS", "*"),
+                    default=os.environ.get("SENTINEL_CORS_ORIGINS",
+                                           "https://AdityaPagare619.github.io"),
                     help="comma-separated origins allowed to fetch /api/* "
-                         "cross-origin (the hosted prod console needs this); "
-                         '"*" (default) allows any origin — restrict it in '
-                         "production, e.g. "
-                         "--cors-origins=https://AdityaPagare619.github.io")
+                         "cross-origin. Default: the hosted prod console "
+                         "only. \"*\" allows any origin — restrict it in "
+                         "production; passing * explicitly prints a loud "
+                         "startup warning. Empty string = CORS off "
+                         "(reverse proxy owns the policy)")
+    ap.add_argument("--token-file", default=None,
+                    help="operator bearer-token file (default: "
+                         "<state-dir>/operator_token.json, or "
+                         "SENTINEL_OPERATOR_TOKEN_FILE). Generated once "
+                         "at first boot (0600), shown ONCE on stdout, "
+                         "never logged again.")
     args = ap.parse_args(argv)
 
     from socketserver import ThreadingMixIn
@@ -115,6 +132,45 @@ def main(argv=None) -> None:
         daemon_threads = True
 
     app = build_app(args)
+
+    # --- first-boot operator token: shown ONCE, never logged again --------
+    boot_token = app.operator_tokens.first_boot_token
+    if app.operator_tokens.ephemeral:
+        print("!" * 70, flush=True)
+        print("[platform] WARNING: operator token store is EPHEMERAL "
+              "(state dir not writable)", flush=True)
+        print("[platform] WARNING: the token below dies with this "
+              "process — set SENTINEL_OPERATOR_TOKEN", flush=True)
+        print("!" * 70, flush=True)
+    if boot_token:
+        print("=" * 70, flush=True)
+        print("[platform] FIRST BOOT — operator token generated "
+              "(shown ONCE, never again)", flush=True)
+        print("[platform]", flush=True)
+        print("[platform]   Paste this token into the console sign-in "
+              "field:", flush=True)
+        print("[platform]", flush=True)
+        print(f"[platform]     {boot_token}", flush=True)
+        print("[platform]", flush=True)
+        print(f"[platform]   Stored (0600) at: "
+              f"{app.operator_tokens.path}", flush=True)
+        print("[platform]   Every /api/* request needs: "
+              "Authorization: Bearer <token>", flush=True)
+        print("[platform]   Health probes stay open: "
+              "/api/v1/health/live, /api/v1/health/ready", flush=True)
+        print("=" * 70, flush=True)
+
+    # --- loud CORS warning: "*" is never silent ---------------------------
+    if (args.cors_origins or "").strip() == "*":
+        print("!" * 70, flush=True)
+        print("[platform] WARNING: --cors-origins=* — ANY website the "
+              "operator visits", flush=True)
+        print("[platform] WARNING: can make their browser SEND requests to "
+              "this API.", flush=True)
+        print("[platform] WARNING: Restrict to your console origin, e.g. "
+              "--cors-origins=https://AdityaPagare619.github.io", flush=True)
+        print("!" * 70, flush=True)
+
     server = make_server(args.host, args.port, app,
                          server_class=ThreadedWSGIServer,
                          handler_class=QuietHandler)

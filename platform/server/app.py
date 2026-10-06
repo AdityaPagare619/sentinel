@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
 from . import simulate as sim
+from . import auth as _authmod
 from .datasets import UnknownDataset
 from .integrations import (
     BadKey,
@@ -41,6 +42,9 @@ from .shed import EXPENSIVE_PATHS
 from .store import MAX_REPLAY, ReadStore
 
 CONTRACT_VERSION = "1.0.0"
+
+# Paths that bypass operator auth (contract C1 — these two and ONLY these).
+_AUTH_EXEMPT = ("/api/v1/health/live", "/api/v1/health/ready")
 
 TEAMS = ("platform", "network", "data", "product_backend", "security",
          "cannot_determine")
@@ -72,7 +76,8 @@ class PlatformApp:
                  data_source: str = "shadow",
                  labels_version: str = "labels-v3",
                  ui_dir: str | None = None,
-                 cors_origins: str = "*"):
+                 cors_origins: str = "https://AdityaPagare619.github.io",
+                 operator_token_store=None):
         self.store = store
         self.registry = registry
         self.gate = gate
@@ -83,11 +88,12 @@ class PlatformApp:
         if self.ui_dir and not os.path.isdir(self.ui_dir):
             self.ui_dir = None
         # CORS for the hosted-console deployment: the GitHub Pages prod
-        # console (or any static host) fetches this API cross-origin, so the
-        # browser demands Access-Control-Allow-Origin on every /api/*
-        # response plus an OPTIONS preflight for POST/DELETE. "*" (default)
-        # keeps the one-command self-host path working; restrict it to your
-        # console origin(s) with --cors-origins in production.
+        # console fetches this API cross-origin, so the browser demands
+        # Access-Control-Allow-Origin on every /api/* response plus an
+        # OPTIONS preflight for POST/DELETE. Default (contract C1) is an
+        # allowlist containing ONLY the hosted prod console — "*" is
+        # available only via an explicit --cors-origins=* and prints a
+        # loud startup warning. "" disables CORS (reverse proxy owns it).
         cors_origins = (cors_origins or "").strip()
         self._cors_off = (cors_origins == "")
         self._cors_star = (cors_origins == "*")
@@ -98,6 +104,10 @@ class PlatformApp:
         # keys only, namespaced under /api/v1/integrations/). Twin of
         # sentinel/integrations.py; same file, same format.
         self.integrations = IntegrationStore()
+        # Per-install operator bearer token (Track 1, C1). Verified on
+        # every /api/* request except the two health probes.
+        self.operator_tokens = (operator_token_store
+                                or _authmod.OperatorTokenStore())
 
     def _cors_headers(self, environ) -> list:
         """CORS headers for this request. "" disables (proxy owns the
@@ -147,14 +157,30 @@ class PlatformApp:
             return [b""]
         start_response = _sr
 
-        # 1. Admission control — fail fast, never queue unboundedly.
+        # 0. Health probes — contract C1's ONLY auth exemption. Answered
+        # BEFORE admission control so orchestrator probes never 503 under
+        # load, and before auth so they stay open by design.
+        if path in _AUTH_EXEMPT:
+            return self._health(start_response, path)
+
+        # 1. Operator auth (Track 1, C1): every /api/* request must carry
+        # `Authorization: Bearer <operator-token>`. Rejects happen BEFORE
+        # admission control — unauthenticated floods must not occupy
+        # slots, and a 503 must never mask a 401.
+        if path.startswith("/api/"):
+            presented = self.operator_tokens.bearer_from_header(
+                environ.get("HTTP_AUTHORIZATION"))
+            if not self.operator_tokens.verify(presented):
+                return self._unauthorized(start_response)
+
+        # 2. Admission control — fail fast, never queue unboundedly.
         if not self.gate.try_acquire():
             return self._error(start_response, 503, "shed_admission",
                                "platform at capacity; retry shortly",
                                retryable=True,
                                headers=[("Retry-After", "2")])
         try:
-            # 2. Load shedding — expensive endpoints shed first.
+            # 3. Load shedding — expensive endpoints shed first.
             shed, reason = self.degrade.should_shed(path)
             if shed:
                 return self._error(start_response, 503, "shed_hot",
@@ -205,6 +231,36 @@ class PlatformApp:
                            f"unknown API path {path}")
 
     # ---------------------------------------------------------- endpoints
+
+    def _health(self, start_response, path):
+        """Liveness/readiness — the ONLY unauthenticated surface (C1)."""
+        if path == "/api/v1/health/live":
+            return self._ok(start_response, {"status": "ok"})
+        # /api/v1/health/ready: the serving path is ready when the read
+        # store answers a cheap query. (store=None only exists in unit
+        # tests that stub the store — there, boot itself is the check.)
+        try:
+            if self.store is not None:
+                self.store.head_id()
+        except Exception as e:  # name the failure class, not internals
+            return self._error(start_response, 503, "not_ready",
+                               f"read store not ready: {type(e).__name__}")
+        return self._ok(start_response, {"status": "ok"})
+
+    def _unauthorized(self, start_response):
+        """401 with the EXACT contract body.
+
+        Contract C1 / Track 8: the console's "operator sign-in required"
+        state keys off this body verbatim — it is intentionally NOT the
+        standard envelope. CORS headers still apply (the cross-origin
+        console must be able to READ the 401 to show the sign-in state).
+        """
+        body = b'{"error":"unauthorized"}'
+        start_response("401 Unauthorized", [
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ])
+        return [body]
 
     def _decisions(self, environ, start_response, q):
         limit = _int_param(q, "limit", 50, lo=1, hi=500)
@@ -607,7 +663,8 @@ class PlatformApp:
         return [body]
 
 
-_STATUS_TEXT = {200: "OK", 400: "Bad Request", 404: "Not Found",
+_STATUS_TEXT = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
+                404: "Not Found",
                 422: "Unprocessable Entity", 501: "Not Implemented",
                 503: "Service Unavailable"}
 

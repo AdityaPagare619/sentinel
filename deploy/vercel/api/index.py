@@ -62,6 +62,15 @@ _platform = app_mod.PlatformApp(
     ui_dir=None,  # Vercel serves the static UI itself
 )
 
+# Track 1 (C1): the platform API needs the operator bearer token even on
+# serverless. Provision it via the SENTINEL_OPERATOR_TOKEN env var (Vercel
+# dashboard) — without it the store is ephemeral and every cold start
+# mints a token nobody holds.
+if _platform.operator_tokens.ephemeral:
+    print("[platform] WARNING: operator token store is EPHEMERAL — set "
+          "SENTINEL_OPERATOR_TOKEN in the Vercel dashboard or the hosted "
+          "console cannot authenticate", flush=True)
+
 _STREAM_REFUSAL = json.dumps({
     "error": {
         "code": "stream_unsupported",
