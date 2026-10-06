@@ -176,19 +176,30 @@ class TestAC4Scale(unittest.TestCase):
 
     def test_4_track6_manifests_probe(self):
         """Probe: are Track 6's named scenario manifests on the branch?"""
-        scen_dir = os.path.join(
-            os.path.dirname(os.path.abspath(common.__file__)),
-            "..", "..", "platform", "server", "scenarios")
-        scen_dir = os.path.normpath(scen_dir)
+        here = os.path.dirname(os.path.abspath(common.__file__))
+        # Track 6's contract C6 location (the original probe looked one
+        # level too high — platform/server/scenarios/ never existed; the
+        # manifests live under platform/server/sim/scenarios/).
+        candidates = [
+            os.path.normpath(os.path.join(here, "..", "..", "platform",
+                                          "server", "sim", "scenarios")),
+            os.path.normpath(os.path.join(here, "..", "..", "platform",
+                                          "server", "scenarios")),
+        ]
         names = ["normal-day", "bad-deploy", "infra-incident", "storm-surge"]
-        found = [n for n in names
-                 if os.path.exists(os.path.join(scen_dir, n + ".json"))]
+        found, scen_dir = [], None
+        for cand in candidates:
+            hit = [n for n in names
+                   if os.path.exists(os.path.join(cand, n + ".json"))]
+            if hit:
+                found, scen_dir = hit, cand
+                break
         if not found:
             self.skipTest(
                 "BLOCKED (Track 6): no scenario manifests under "
-                "platform/server/scenarios/ — running harness-generated "
+                "platform/server/sim/scenarios/ — running harness-generated "
                 "profiles instead")
-        print(f"\n[AC-4] Track 6 manifests present: {found}")
+        print(f"\n[AC-4] Track 6 manifests present at {scen_dir}: {found}")
 
     def test_4_scale_2000_through_real_pipeline(self):
         bodies = list(_profiles(N_PROBLEMS))

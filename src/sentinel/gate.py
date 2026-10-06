@@ -56,8 +56,8 @@ EMISSION CONTRACT).
 Invariants:
   * audit row is ALWAYS written, even on error / passthrough;
   * ANY exception from the client -> passthrough "error:<code>", NEVER raised;
-  * shadow=True logs the would-be disposition (action recorded, reason
-    "shadow") but always returns passthrough.
+  * shadow=True logs the would-be disposition (action recorded, causal reason
+    carried through untouched, mode="shadow") but always returns passthrough.
 """
 
 from __future__ import annotations
