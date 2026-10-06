@@ -44,17 +44,73 @@ TIERS = {
 }
 
 
-def scale_profiles(base: dict, factor: float) -> list[dict]:
-    """Scale steady profile rates to hit the target alert count."""
-    out = []
-    for name, p in base.items():
-        p = dict(p)
-        if p["kind"] == "steady":
-            p["rate_per_min"] = float(p["rate_per_min"]) * factor
-        elif p["kind"] == "storm_burst":
-            p["alerts"] = max(100, int(int(p["alerts"]) * factor))
-        out.append(p)
-    return out
+def tier_profiles(tier: str, seed: int) -> tuple[list[dict], float]:
+    """Profiles compressed into the tier's virtual span.
+
+    Every tier gets the full shape: baseline bulk + bad-deploy window +
+    incident hour + storm burst. Rates are sized so the tier hits its
+    target alert count; the MIX semantics stay identical across tiers.
+    """
+    if tier == "10k":
+        span, tgt = 7200.0, 12_000
+        return ([
+            {"kind": "steady", "name": "baseline", "start_s": 0,
+             "end_s": span, "rate_per_min": 70.0,
+             "mix": {"noise": 0.55, "warning": 0.30,
+                     "sev": 0.10, "deploy": 0.05}},
+            {"kind": "steady", "name": "bad_deploy", "start_s": 3000,
+             "end_s": 4800, "rate_per_min": 60.0,
+             "mix": {"noise": 0.30, "warning": 0.30,
+                     "sev": 0.25, "deploy": 0.15}},
+            {"kind": "steady", "name": "incident", "start_s": 5400,
+             "end_s": 6300, "rate_per_min": 80.0,
+             "mix": {"noise": 0.20, "warning": 0.30,
+                     "sev": 0.40, "deploy": 0.10}},
+            {"kind": "storm_burst", "name": "storm",
+             "start_s": 6600, "window_s": 300,
+             "alerts": 600, "distinct_fingerprints": 400,
+             "severity_in": ["warning", "critical"]},
+        ], span)
+    if tier == "100k":
+        span = 21600.0
+        return ([
+            {"kind": "steady", "name": "baseline", "start_s": 0,
+             "end_s": span, "rate_per_min": 280.0,
+             "mix": {"noise": 0.55, "warning": 0.30,
+                     "sev": 0.10, "deploy": 0.05}},
+            {"kind": "steady", "name": "bad_deploy", "start_s": 9000,
+             "end_s": 12600, "rate_per_min": 240.0,
+             "mix": {"noise": 0.30, "warning": 0.30,
+                     "sev": 0.25, "deploy": 0.15}},
+            {"kind": "steady", "name": "incident", "start_s": 14400,
+             "end_s": 16200, "rate_per_min": 320.0,
+             "mix": {"noise": 0.20, "warning": 0.30,
+                     "sev": 0.40, "deploy": 0.10}},
+            {"kind": "storm_burst", "name": "storm",
+             "start_s": 18000, "window_s": 600,
+             "alerts": 6000, "distinct_fingerprints": 4000,
+             "severity_in": ["warning", "critical"]},
+        ], span)
+    # 1m: full 24h shape at millions/day volume (~1M alerts).
+    span = 86400.0
+    return ([
+        {"kind": "steady", "name": "baseline", "start_s": 0,
+         "end_s": span, "rate_per_min": 640.0,
+         "mix": {"noise": 0.55, "warning": 0.30,
+                 "sev": 0.10, "deploy": 0.05}},
+        {"kind": "steady", "name": "bad_deploy", "start_s": 36000,
+         "end_s": 43200, "rate_per_min": 560.0,
+         "mix": {"noise": 0.30, "warning": 0.30,
+                 "sev": 0.25, "deploy": 0.15}},
+        {"kind": "steady", "name": "incident", "start_s": 57600,
+         "end_s": 61200, "rate_per_min": 750.0,
+         "mix": {"noise": 0.20, "warning": 0.30,
+                 "sev": 0.40, "deploy": 0.10}},
+        {"kind": "storm_burst", "name": "storm",
+         "start_s": 72000, "window_s": 900,
+         "alerts": 60000, "distinct_fingerprints": 20000,
+         "severity_in": ["warning", "critical"]},
+    ], span)
 
 
 def main(argv=None) -> int:
@@ -73,21 +129,7 @@ def main(argv=None) -> int:
 
     target, virtual_span, workers, chunk_s = TIERS[args.tier]
     workers = args.workers or workers
-    profiles = load_profiles()
-    # Estimate: baseline dominates. Scale its rate to hit target.
-    # baseline 694/min over 86400s = ~1M. Compute factor for target.
-    base_total = sum(
-        float(p.get("rate_per_min", 0)) *
-        (float(p.get("end_s", 0)) - float(p.get("start_s", 0))) / 60.0
-        for p in profiles.values() if p["kind"] == "steady")
-    factor = target / base_total if base_total else 1.0
-    profiles = scale_profiles(profiles, factor)
-    # Clip profile windows to this tier's virtual span.
-    for p in profiles:
-        if "end_s" in p:
-            p["end_s"] = min(float(p["end_s"]), virtual_span)
-        if "window_s" in p:
-            p["start_s"] = min(float(p["start_s"]), virtual_span - 1)
+    profiles, virtual_span = tier_profiles(args.tier, args.seed)
 
     start_epoch = 1787952000.0  # fixed virtual epoch (deterministic)
     h = LoadHarness(seed=args.seed, start_epoch=start_epoch,
