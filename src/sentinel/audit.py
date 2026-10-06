@@ -85,6 +85,8 @@ class AuditLog:
                 "q3_confidence": _answer_confidence(rec.q_disposition),
                 "q3_disposition": _answer_choice(rec.q_disposition),
                 "disposition": disp.action,
+                "mode": disp.mode,  # C3: "live" | "shadow" — shadow is a
+                                    # mode, never a reason value
                 "budget_outcome": _budget_outcome(rec),
                 "latency_ms": disp.latency_ms,
                 "timer_fired_at_ms": None,

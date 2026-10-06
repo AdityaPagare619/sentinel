@@ -31,6 +31,7 @@ from urllib.parse import parse_qs
 from . import simulate as sim
 from . import auth as _authmod
 from . import rotation_api as _rotmod
+from . import safety_api
 from .keystore import OPERATOR_TOKEN_NAME
 from .datasets import UnknownDataset
 from .integrations import (
@@ -79,7 +80,9 @@ class PlatformApp:
                  labels_version: str = "labels-v3",
                  ui_dir: str | None = None,
                  cors_origins: str = "https://AdityaPagare619.github.io",
-                 operator_token_store=None):
+                 operator_token_store=None,
+                 kill_switch=None,
+                 drill_dir: str | None = None):
         self.store = store
         self.registry = registry
         self.gate = gate
@@ -87,6 +90,12 @@ class PlatformApp:
         self.data_source = data_source
         self.labels_version = labels_version
         self.ui_dir = os.path.abspath(ui_dir) if ui_dir else None
+        # C3 (Track 3): the kill switch + drill-artifact dir backing the
+        # /api/v1/safety/* endpoints. None → the endpoints 503 with
+        # safety_unavailable (the switch is only meaningful where the
+        # forwarder it halts lives).
+        self.kill_switch = kill_switch
+        self.drill_dir = drill_dir
         if self.ui_dir and not os.path.isdir(self.ui_dir):
             self.ui_dir = None
         # CORS for the hosted-console deployment: the GitHub Pages prod
@@ -110,6 +119,13 @@ class PlatformApp:
         # every /api/* request except the two health probes.
         self.operator_tokens = (operator_token_store
                                 or _authmod.OperatorTokenStore())
+        # Track 3 safety_api seam: install Track 1's real verifier now
+        # that C1 is merged (was fail-closed on the lane branch). The
+        # /api/* middleware above already enforces the bearer token;
+        # this is defense-in-depth inside the safety handlers.
+        _tokens = self.operator_tokens
+        safety_api._safety.set_operator_verifier(
+            lambda token: "operator" if _tokens.verify(token) else None)
         # Rotation ceremony (Track 4, C4) over the canonical keystore.
         # None when the token is env-provisioned or ephemeral — rotation
         # needs a file-backed store; the route then fails honestly.
@@ -238,6 +254,16 @@ class PlatformApp:
             m = re.fullmatch(r"/api/v1/keys/([a-z_]+)/rotate", path)
             if m and method == "POST":
                 return self._keys_rotate(environ, start_response, m.group(1))
+            # C3 safety endpoints (Track 3): kill switch + drill status.
+            # C1 auth enforced in __call__ (every /api/* except the two
+            # health probes); safety_api additionally verifies via the
+            # installed operator verifier (defense in depth).
+            if path == "/api/v1/safety/kill" and method == "POST":
+                return safety_api.handle_kill(self, environ, start_response)
+            if path == "/api/v1/safety/rearm" and method == "POST":
+                return safety_api.handle_rearm(self, environ, start_response)
+            if path == "/api/v1/safety/status" and method == "GET":
+                return safety_api.handle_status(self, environ, start_response)
         except _BadParam as e:
             return self._error(start_response, 400, e.code, str(e))
         return self._error(start_response, 404, "not_found",

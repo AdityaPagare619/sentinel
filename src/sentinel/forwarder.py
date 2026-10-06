@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .eventlog import EventLog, EventLogError, utcnow_iso
+from .safety import KillEngaged  # C3: the kill switch halts this forwarder
 from .integrations import resolve_paging_key, simulated_paging, sanitize_error
 from .pd_sender import (
     DedupKeyInvalid,
@@ -211,7 +212,14 @@ class DurableForwarder:
                  config: ForwarderConfig | None = None,
                  pd_client: PagerDutyClient | None = None,
                  secondary: WebhookSecondary | None = None,
-                 drills: DrillTracker | None = None):
+                 drills: DrillTracker | None = None,
+                 kill_switch=None):
+        """kill_switch: sentinel.safety.KillSwitch or None. When set, the
+        forwarder halts on engage: the scheduler stops claiming, workers
+        stop attempting (claimed rows go back to queued — they resume on
+        re-arm), and one forwarder_halted event is written to the audit
+        log. The kill path never calls Jev and never waits on the race.
+        (Contract C3, Track 3.)"""
         if log.db_path == ":memory:":
             raise ValueError(
                 "DurableForwarder requires a file-backed EventLog "
@@ -238,6 +246,9 @@ class DurableForwarder:
         self._work: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._threads: list = []
+        self._kill = kill_switch
+        self._halt_recorded = False
+        self._halt_lock = threading.Lock()
         self._key_pins: dict = {}   # outbox_id → key pinned at
         self._pins_lock = threading.Lock()    # first attempt (design §4.3)
         self._secondary_tries: dict = {}
@@ -250,9 +261,16 @@ class DurableForwarder:
     # ------------------------------------------------------------ lifecycle
 
     def start(self) -> None:
-        """Start the forwarder: cutover gate → startup scan → threads."""
+        """Start the forwarder: cutover gate → startup scan → threads.
+
+        Restart-safe: a forwarder halted by the kill switch (or stopped by
+        stop()) can be started again — the claim connection is reopened if
+        stop() closed it, and the halted flag resets for the new epoch so a
+        later kill is audited again. (Contract C3: re-arm must resume the
+        pipeline.)"""
         require_drilled_secondary(self.config.stage, self.config.secondary,
                                   self.drills)
+        self._ensure_claim_conn()
         self.startup_scan()
         # Wire the degraded ladder (design §6 F1): the event-log lane left
         # this seam for us. On a commit-watchdog trip the log calls this
@@ -262,6 +280,9 @@ class DurableForwarder:
                   file=sys.stderr)
         self.log.degraded_sender = self._degraded_send
         self._stop.clear()
+        with self._halt_lock:
+            self._halt_recorded = False  # new running epoch: a later kill
+                                         # halt is audited again
         sched = threading.Thread(target=self._scheduler_loop,
                                  name="fwd-scheduler", daemon=True)
         sched.start()
@@ -271,6 +292,19 @@ class DurableForwarder:
                                  name=f"fwd-worker-{i}", daemon=True)
             w.start()
             self._threads.append(w)
+
+    def _ensure_claim_conn(self) -> None:
+        """Reopen the claim connection if stop() closed it (restart path)."""
+        try:
+            self._conn.execute("SELECT 1")
+            return
+        except Exception:
+            pass
+        self._conn = sqlite3.connect(self.log.db_path, timeout=10.0,
+                                     check_same_thread=False,
+                                     isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=10000;")
 
     def stop(self, timeout_s: float = 30.0) -> None:
         self._stop.set()
@@ -332,17 +366,84 @@ class DurableForwarder:
 
     def _scheduler_loop(self) -> None:
         while not self._stop.is_set():
+            if self._kill_halt_check():
+                return  # kill switch engaged: halted, never silently
             try:
                 self.run_once()
             except Exception as exc:  # the scheduler never dies quietly
                 print(f"[sentinel] FORWARDER scheduler error: {exc}",
                       file=sys.stderr)
-            self._stop.wait(self.config.poll_s)
+            self._interruptible_wait(self.config.poll_s)
+
+    def _interruptible_wait(self, timeout_s: float) -> None:
+        """Sleep between scheduler iterations — but wake the instant the
+        kill flips. The forwarder-halt latency is bounded by the 50 ms
+        granularity here, never by poll_s (contract C3: flip → halt <5s,
+        measured — the drill proves it)."""
+        if self._kill is None:
+            self._stop.wait(timeout_s)
+            return
+        end = time.monotonic() + timeout_s
+        while not self._stop.is_set():
+            if self._kill.engaged:
+                return
+            if time.monotonic() >= end:
+                return
+            self._stop.wait(0.05)
+
+    def _kill_halt_check(self) -> bool:
+        """True when the kill switch is engaged: write ONE forwarder_halted
+        event to the audit log, set _stop so the workers wind down, and
+        report halted. Called at the head of every scheduler iteration and
+        of run_once/run_once_sync (the deterministic test seam)."""
+        kill = self._kill
+        if kill is None or not kill.engaged:
+            return False
+        with self._halt_lock:
+            if not self._halt_recorded:
+                self._halt_recorded = True
+                try:
+                    self.log.append_event(
+                        "forwarder_halted", actor="forwarder",
+                        alert_id="forwarder", fingerprint="forwarder",
+                        episode_id="forwarder",
+                        body={"halted_at": utcnow_iso(),
+                              "kill_engaged_at": kill.engaged_at,
+                              "kill_seq": kill.engaged_seq,
+                              "reason": "kill_switch_engaged"})
+                except Exception as exc:  # the halt is real regardless
+                    print(f"[sentinel] FORWARDER halt audit failed: {exc} "
+                          f"— HALTED ANYWAY", file=sys.stderr)
+        self._stop.set()
+        return True
+
+    def _requeue_on_kill(self, row: dict) -> None:
+        """Kill-switch halt for a claimed row: back to queued (resumes on
+        re-arm). Recorded as forward_failed/kill_switch_halt — never
+        silent, never dropped."""
+        try:
+            self.log.record_receipt_and_update(
+                "forward_failed", outbox_id=row["outbox_id"],
+                alert_id=row["alert_id"], fingerprint=row["fingerprint"],
+                episode_id=row["episode_id"],
+                body={"outbox_id": row["outbox_id"], "channel": "forwarder",
+                      "attempt_no": row["attempt_count"],
+                      "error_class": "kill_switch_halt"},
+                scheduler={"status": "queued",
+                           "next_attempt_at": utcnow_iso(),
+                           "last_error": "kill switch engaged — forwarding "
+                                         "halted; row re-queued, resumes on "
+                                         "re-arm"})
+        except Exception as exc:
+            print(f"[sentinel] FORWARDER kill-requeue failed outbox="
+                  f"{row['outbox_id']} err={exc}", file=sys.stderr)
 
     def run_once(self, now_iso: str | None = None) -> int:
         """One scheduler iteration: claim due rows for the workers, then
         the secondary scan, max-age sweep, and drill check. Returns the
         number of rows claimed."""
+        if self._kill_halt_check():
+            return 0
         now_iso = now_iso or utcnow_iso()
         claimed = self.claim_due_rows(now_iso)
         for row in claimed:
@@ -356,11 +457,15 @@ class DurableForwarder:
         """Deterministic driver (tests): claim due rows and attempt each
         INLINE (no worker threads), then the scans. The attempt path is
         identical to the threaded one."""
+        if self._kill_halt_check():
+            return 0
         now_iso = now_iso or utcnow_iso()
         claimed = self.claim_due_rows(now_iso)
         for row in claimed:
             try:
                 self._attempt(row)
+            except KillEngaged:
+                self._requeue_on_kill(row)
             except Exception as exc:
                 self._safe_requeue(row, exc)
         self._secondary_scan(now_iso)
@@ -411,8 +516,22 @@ class DurableForwarder:
             try:
                 if row is None:
                     return
+                if self._kill is not None and self._kill.engaged:
+                    # Kill switch: never attempt a send while engaged. The
+                    # row goes back to queued (resumes on re-arm); the
+                    # worker keeps draining the backlog to the DB and then
+                    # idles — the halted scheduler claims nothing new, and
+                    # exiting here would leave stop()'s sentinels to poison
+                    # the next start()'s workers.
+                    self._requeue_on_kill(row)
+                    continue
                 try:
                     self._attempt(row)
+                except KillEngaged:
+                    # Attempt started just as the kill flipped: the row
+                    # was NOT sent (the check is the first line of
+                    # _attempt) — requeue it and keep draining.
+                    self._requeue_on_kill(row)
                 except Exception as exc:
                     # A worker must never strand a page on an unexpected
                     # exception: requeue loudly, keep the loop alive.
@@ -440,6 +559,10 @@ class DurableForwarder:
 
     def _attempt(self, row: dict) -> None:
         """One delivery attempt for a claimed row: POST + I2 receipt."""
+        if self._kill is not None and self._kill.engaged:
+            # Defense in depth: no send may start while the kill is
+            # engaged, whichever path reached here.
+            raise KillEngaged("kill switch engaged — attempt refused")
         obid = row["outbox_id"]
         n = row["attempt_count"]  # post-claim: this IS attempt n
         dk = row["dedup_key"]
@@ -736,6 +859,13 @@ class DurableForwarder:
 
     def _degraded_send(self, payload: dict) -> None:
         """The EventLog commit-watchdog seam (design §6 F1): never raises."""
+        if self._kill is not None and self._kill.engaged:
+            # The kill switch halts ALL paging, including the degraded
+            # ladder: an operator-engaged kill deliberately stopped paging.
+            # Loud (stderr), never silent — but never sent.
+            print("[sentinel] FORWARDER degraded send ABSORBED by kill "
+                  "switch (engaged) — page not sent", file=sys.stderr)
+            return
         try:
             self.send_direct(payload, reason="commit_watchdog_trip")
         except Exception as exc:  # the degraded path never sinks the hot path

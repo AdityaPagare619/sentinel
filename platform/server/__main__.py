@@ -70,15 +70,32 @@ def build_app(args) -> PlatformApp:
     ui_dir = args.ui
     if ui_dir and not os.path.isabs(ui_dir):
         ui_dir = os.path.join(_REPO, ui_dir)
+<<<<<<< HEAD
     token_file = (args.token_file
                   or os.environ.get("SENTINEL_OPERATOR_TOKEN_FILE")
                   or os.path.join(args.state_dir, "operator_token.json"))
     operator_tokens = OperatorTokenStore(token_file)
+=======
+    # C3 (Track 3): the kill switch behind /api/v1/safety/*. The platform
+    # tier opens the engine DB read-only, so this KillSwitch carries no
+    # audit log of its own here — the flip is shared with the engine /
+    # forwarder process through the state file (0600, atomic writes), and
+    # the forwarder audits its own forwarder_halted observation. Drill and
+    # single-process topologies wire a log-backed KillSwitch directly.
+    from sentinel import safety as _safety
+    kill_switch = _safety.KillSwitch(
+        state_path=os.path.join(args.state_dir, "kill-switch.json"))
+    drill_dir = os.path.join(_REPO, "ops", "drills")
+>>>>>>> dde41be (feat(safety): kill switch + write-once disposition reason (contract C3))
     return PlatformApp(store=store, registry=registry, gate=gate,
                        degrade=degrade, data_source=args.data_source,
                        labels_version=args.labels_version, ui_dir=ui_dir,
                        cors_origins=args.cors_origins,
+<<<<<<< HEAD
                        operator_token_store=operator_tokens)
+=======
+                       kill_switch=kill_switch, drill_dir=drill_dir)
+>>>>>>> dde41be (feat(safety): kill switch + write-once disposition reason (contract C3))
 
 
 def main(argv=None) -> None:

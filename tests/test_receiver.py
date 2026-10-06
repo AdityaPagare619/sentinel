@@ -318,7 +318,9 @@ class TestShadowEndToEnd(ReceiverTestBase):
         rows = self.pipeline.audit.decisions_for_fingerprint(
             fingerprint_for("web", "http_5xx", "critical", "us-east", env="", cluster=""))
         self.assertEqual(rows[0]["action"], "page_now")  # would-be logged
-        self.assertEqual(rows[0]["reason"], "shadow")
+        # Contract C3: the causal reason rides through; mode marks shadow.
+        self.assertEqual(rows[0]["reason"], "threshold")
+        self.assertEqual(rows[0]["mode"], "shadow")
 
 
 if __name__ == "__main__":
