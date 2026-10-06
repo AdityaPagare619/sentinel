@@ -68,6 +68,7 @@ from .forwarder import Forwarder
 from .gate import Gate
 from .health import HealthMonitor
 from .integrations import resolve_jev_key
+from .keystore import WebhookSecretStore
 from .models import Alert, Thresholds
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
@@ -137,6 +138,43 @@ def _webhook_sig_failure_reason(secret, onboarding, headers, body: bytes):
     return "bad_mac"
 
 
+def _webhook_sig_failure_reason_any(candidates, onboarding, headers,
+                                    body: bytes):
+    """Dual-accept wrapper (Track 4, contract C4): the delivery verifies
+    when ANY candidate secret verifies — the rotation overlap (primary +
+    staged secondary) and the env bootstrap fallback. The single-secret
+    check above stays the pure canonical primitive; this only iterates.
+
+    Returns None on success, else the first failure reason (stable for
+    metrics/logging).
+    """
+    cands = [c for c in (candidates or []) if c]
+    if not cands:
+        return _webhook_sig_failure_reason(None, onboarding, headers, body)
+    first_failure = None
+    for cand in cands:
+        reason = _webhook_sig_failure_reason(cand, onboarding, headers, body)
+        if reason is None:
+            return None
+        if first_failure is None:
+            first_failure = reason
+    return first_failure
+
+
+def _webhook_candidates(config) -> list:
+    """Live verifying secrets: rotation store (primary, then secondary),
+    then the env-bootstrapped legacy secret. Order is primary-first so
+    metrics attribute to the canonical secret."""
+    out: list = []
+    store = getattr(config, "webhook_secret_store", None)
+    if store is not None:
+        out.extend(store.verification_candidates())
+    legacy = getattr(config, "webhook_secret", None)
+    if legacy and legacy not in out:
+        out.append(legacy)
+    return out
+
+
 class Unparseable(Exception):
     """The payload could not be normalized to an Alert (fail open)."""
 
@@ -146,6 +184,10 @@ class Unparseable(Exception):
 @dataclass
 class ReceiverConfig:
     webhook_secret: str | None = None
+    # Track 4 (contract C4): rotatable webhook HMAC secrets. When set, its
+    # candidates (primary, then staged secondary) are tried before the
+    # legacy env-bootstrapped webhook_secret above.
+    webhook_secret_store: WebhookSecretStore | None = None
     shadow: bool = False
     # Explicit flagged onboarding mode (SENTINEL_WEBHOOK_ONBOARDING=1):
     # webhook auth MAY fail open (unsigned deliveries and legacy raw-body
@@ -292,8 +334,8 @@ class Pipeline:
         """
         action = data.get("event_action")
         dedup_key = data.get("dedup_key")
-        auth_failure = _webhook_sig_failure_reason(
-            self.config.webhook_secret, False, headers or {}, body)
+        auth_failure = _webhook_sig_failure_reason_any(
+            _webhook_candidates(self.config), False, headers or {}, body)
         if auth_failure is not None:
             self.metrics["resolve_auth_refused"] += 1
             sys.stderr.write(
@@ -843,8 +885,8 @@ class SentinelHandler(BaseHTTPRequestHandler):
         Delegates to the module-level canonical check (D10 wiring extracted
         it so the PD resolve-claim path verifies the identical scheme).
         """
-        return _webhook_sig_failure_reason(
-            self.pipeline.config.webhook_secret,
+        return _webhook_sig_failure_reason_any(
+            _webhook_candidates(self.pipeline.config),
             self.pipeline.config.webhook_onboarding,
             self.headers, body)
 
@@ -1094,6 +1136,17 @@ def build_pipeline_from_env(policy=None,
             "(load thresholds.json via ConfigLoader.load_startup()).")
     webhook_secret = os.environ.get("SENTINEL_WEBHOOK_SECRET")
     onboarding = os.environ.get(ONBOARDING_ENV, "0") == "1"
+    # Track 4 (contract C4): rotatable webhook HMAC secrets. The store
+    # record (primary/secondary/generation) is authoritative when
+    # present; SENTINEL_WEBHOOK_SECRET is the bootstrap fallback and is
+    # imported into the store exactly once (audited as bootstrap).
+    if webhook_secret and len(webhook_secret) < 16:
+        raise SystemExit(
+            "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
+            "refusing to start with a weak webhook secret.")
+
+    webhook_store = WebhookSecretStore()
+    webhook_store.ensure_from_env()
     if onboarding:
         # Unmissable boot-time warning (ADR-005 condition (b)): fail-open
         # auth is permitted ONLY behind this explicit flag, and ONLY this
@@ -1106,19 +1159,17 @@ def build_pipeline_from_env(policy=None,
             "immediately after sender migration. Bypassed deliveries are "
             "counted in webhook_auth_bypassed and the mode is surfaced on "
             "/healthz as webhook_auth_fail_open=true.\n")
-    if not webhook_secret and not onboarding:
+    if not webhook_store.has_secret() and not onboarding:
         # ADR-005 fail-closed (D11): "no secret, no check" turns a deployment
         # mistake into an open endpoint — we turn it into a loud, immediate
         # startup refusal instead (SECURITY.md §2.2 rule 3).
         raise SystemExit(
-            "SENTINEL_WEBHOOK_SECRET is not set: refusing to start with an "
+            "no webhook secret available: refusing to start with an "
             "unauthenticated generic-webhook route (ADR-005 fail-closed). "
-            "Set the secret, or set SENTINEL_WEBHOOK_ONBOARDING=1 for a "
-            "flagged, loudly-warned onboarding window.")
-    if webhook_secret and len(webhook_secret) < 16:
-        raise SystemExit(
-            "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
-            "refusing to start with a weak webhook secret.")
+            "Set SENTINEL_WEBHOOK_SECRET, or rotate one in via the "
+            "webhook_hmac rotation ceremony, or set "
+            "SENTINEL_WEBHOOK_ONBOARDING=1 for a flagged, loudly-warned "
+            "onboarding window.")
     db_path = os.environ.get("SENTINEL_DB", "./sentinel.db")
     audit = AuditLog(db_path)
     shadow = os.environ.get("SENTINEL_SHADOW", "0") == "1"
@@ -1147,6 +1198,7 @@ def build_pipeline_from_env(policy=None,
         webhook_secret=webhook_secret,
         shadow=shadow,
         webhook_onboarding=onboarding,
+        webhook_secret_store=webhook_store,
     )
     pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
                         policy=policy, config_loader=config_loader,
