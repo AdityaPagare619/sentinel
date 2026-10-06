@@ -46,8 +46,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-REPO_ROOT = os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from sentinel.audit import AuditLog  # noqa: E402
@@ -951,7 +951,7 @@ def main(argv=None) -> int:
         description="Track 6 professional simulation: scenario driver + "
                     "FakePD sink over the REAL Sentinel pipeline.")
     ap.add_argument("--scenario", required=True,
-                    help="scenario name under platform/server/scenarios/")
+                    help="scenario name under platform/server/sim/scenarios/")
     ap.add_argument("--judge", default="fake", choices=["fake", "real"],
                     help="fake (default, deterministic, zero spend) or real "
                          "(resolves the Jev key per C2; prints cost warning)")
