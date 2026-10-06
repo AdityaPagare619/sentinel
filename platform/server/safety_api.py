@@ -24,6 +24,7 @@ import io
 import json
 import os
 import sys
+import uuid
 
 try:
     from sentinel import safety as _safety
@@ -36,6 +37,52 @@ except ImportError:  # src/ not on sys.path (unusual) — resolve it ourselves
     from sentinel import safety as _safety
 
 _MAX_BODY = 64 * 1024
+
+# Per-process identity. On serverless the kill-switch state file lives in
+# /tmp, which is PER-INSTANCE: two warm instances can legitimately disagree
+# about engaged state until external flag state exists. Surfacing the
+# instance id in status/health lets the console (and the operator) SEE
+# that divergence instead of assuming a single switch.
+_INSTANCE_ID = uuid.uuid4().hex[:12]
+
+
+def instance_id() -> str:
+    """This process's identity for kill-state divergence detection."""
+    return _INSTANCE_ID
+
+
+def read_body_bytes(environ, max_bytes: int) -> bytes | None:
+    """Read the request body with a bounded, EOF-terminating loop.
+
+    Never trusts a bare ``wsgi.input.read(n)`` to return n bytes: some
+    serverless WSGI bridges deliver short reads or block past EOF, which
+    turns a malformed/short body into a hung safety endpoint instead of a
+    422. We loop until the declared length is satisfied or the stream ends,
+    capped at ``max_bytes``. Returns None when CONTENT_LENGTH exceeds the
+    cap; returns b"" when there is no body. A short read (EOF before the
+    declared length) returns the bytes that arrived — callers JSON-parse
+    and reject, never silently accept.
+    """
+    try:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+    except (ValueError, TypeError):
+        length = 0
+    if length < 0:
+        length = 0
+    if length > max_bytes:
+        return None
+    stream = environ.get("wsgi.input")
+    if stream is None or length == 0:
+        return b""
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining > 0:
+        chunk = stream.read(min(remaining, 65536))
+        if not chunk:
+            break  # EOF before declared length — take what arrived
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 # ------------------------------------------------------------------ helpers
@@ -67,13 +114,9 @@ def _actor_or_401(environ, start_response):
 
 
 def _read_body(environ):
-    try:
-        length = int(environ.get("CONTENT_LENGTH") or 0)
-    except ValueError:
-        length = 0
-    if length > _MAX_BODY:
+    raw = read_body_bytes(environ, _MAX_BODY)
+    if raw is None:
         return None
-    raw = environ["wsgi.input"].read(length) if length else b""
     if not raw:
         return {}
     try:
@@ -168,5 +211,8 @@ def handle_status(app, environ, start_response):
     return _json(start_response, 200, {
         "engaged": st["engaged"],
         "engaged_at": st["engaged_at"],
+        # Per-instance on serverless (/tmp state): the console uses this
+        # to detect cross-instance kill-state divergence.
+        "instance_id": instance_id(),
         "last_drill": _safety.latest_drill(getattr(app, "drill_dir", None)),
     })

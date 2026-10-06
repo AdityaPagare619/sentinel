@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+from . import safety_api as _safety_api
+
 try:
     from sentinel import safety as _safety
 except ImportError:  # pragma: no cover - src/ not on sys.path (unusual)
@@ -119,6 +121,11 @@ def _safety_section(app):
         "kill_switch": {
             "state": "engaged" if st["engaged"] else "armed",
             "engaged_at": st["engaged_at"],
+            # Per-instance on serverless (/tmp state file): instances can
+            # disagree until external flag state exists. The console shows
+            # this id so divergence is visible, never assumed away.
+            "instance_id": _safety_api.instance_id(),
+            "kill_state_scope": "per_instance_tmp",
             "last_drill": _safety.latest_drill(getattr(app, "drill_dir", None)),
         },
         "auth": {"operator_token": "ok"},

@@ -15,7 +15,19 @@ Production limitations (stated honestly, not hidden):
   * Serverless has no persistent disk: the kill-switch state file lives
     in /tmp and is PER-INSTANCE. A single instance honors the switch;
     multi-instance stickiness needs external state (flagged for the
-    production hardening pass).
+    production hardening pass). Hardening in place: /api/v1/safety/status
+    and /api/v1/ops/health both report the serving instance's id
+    (kill_state_scope="per_instance_tmp"), so cross-instance divergence
+    is VISIBLE to the operator instead of assumed away. Residual risk:
+    under multi-instance load, an engage on instance A does not halt
+    instance B until external flag state exists.
+  * Request bodies are read with a bounded, EOF-terminating loop
+    (safety_api.read_body_bytes): a short or blocking wsgi.input from
+    the serverless WSGI bridge degrades to 422, never a hung endpoint.
+    (2026-10-06: all-POST hang observed on Vercel was transient infra —
+    unauthenticated POSTs, which 401 before any body read, hung while
+    GET/OPTIONS worked; no app code path could cause it. The bounded
+    reader removes the one app-level hang vector regardless.)
   * The engine DB is not bundled: ReadStore serves empty state until
     the engine's database is connected. ops/health reports
     engine_db.available=false honestly.
