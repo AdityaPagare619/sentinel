@@ -113,6 +113,73 @@ def tier_profiles(tier: str, seed: int) -> tuple[list[dict], float]:
     ], span)
 
 
+def burst_test(model: str = "jev-1.13.0", rate: float = 40.0,
+             seconds: float = 10.0) -> dict:
+    """Deliberate vendor-bound probe: 40 req/s x 10s of real Jev calls.
+
+    Observes 429/timeout behavior AT the bound. Polite otherwise — this is
+    the only phase that intentionally approaches the limit, and it says so.
+    Spend: ~400 calls x ~0.5K tokens ~= $0.01. Well under any cap.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from mixed_jev import SurrogateJevClient, RatePacer
+
+    client = SurrogateJevClient(model=model)
+    pacer = RatePacer(rate)
+    n = int(rate * seconds)
+    results: list[dict] = []
+    rlock = threading.Lock()
+
+    # Representative alert state (mirrors the live smoke shape).
+    state = {"alert": "p99_latency breach on checkout-api (burst probe)",
+             "service": "checkout-api", "seed": "burst"}
+    questions = {"disposition": {
+        "type": "choice",
+        "instructions": "Should this alert page a human now, or be "
+                        "suppressed as routine noise?",
+        "criteria": {"page": "genuine incident needing human attention",
+                     "suppress": "routine noise",
+                     "cannot_determine": "not enough signal"}}}
+
+    def one(i):
+        pacer.acquire()
+        t0 = time.time()
+        try:
+            resp = client.decide(state, questions)
+            out = {"ok": True,
+                   "latency_ms": round((time.time() - t0) * 1000, 1)}
+        except Exception as exc:  # noqa: BLE001 — this IS the measurement
+            out = {"ok": False, "error": type(exc).__name__,
+                   "latency_ms": round((time.time() - t0) * 1000, 1)}
+        with rlock:
+            results.append(out)
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=48) as pool:
+        list(pool.map(one, range(n)))
+    wall = time.time() - t0
+    oks = [r for r in results if r["ok"]]
+    errs: dict[str, int] = {}
+    for r in results:
+        if not r["ok"]:
+            errs[r["error"]] = errs.get(r["error"], 0) + 1
+    lat = sorted(r["latency_ms"] for r in oks)
+    summary = {
+        "calls": n, "ok": len(oks), "errors": errs,
+        "wall_s": round(wall, 1),
+        "achieved_per_s": round(n / wall, 1) if wall else 0,
+        "latency_ms": {"p50": lat[len(lat) // 2] if lat else 0,
+                       "p99": lat[int(len(lat) * 0.99)] if lat else 0,
+                       "max": lat[-1] if lat else 0},
+        "spend_usd": round(client.spend_usd(), 4),
+    }
+    print(f"[burst] {n} calls at {rate}/s: {summary['ok']} ok, "
+          f"errors={errs}, p99={summary['latency_ms']['p99']}ms, "
+          f"spend=${summary['spend_usd']}")
+    return summary
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Sentinel load-test tiers")
     ap.add_argument("--tier", required=True, choices=sorted(TIERS))
@@ -126,6 +193,11 @@ def main(argv=None) -> int:
     ap.add_argument("--burst-test", action="store_true",
                     help="40 req/s x 10s real-Jev burst at vendor bound")
     args = ap.parse_args(argv)
+
+    burst = None
+    if args.burst_test:
+        print("[tier] running vendor-bound burst probe first (40 req/s x 10s)")
+        burst = burst_test()
 
     target, virtual_span, workers, chunk_s = TIERS[args.tier]
     workers = args.workers or workers
@@ -180,6 +252,8 @@ def main(argv=None) -> int:
         "totals": totals,
         "simulated": True,
     }
+    if burst is not None:
+        report["burst_probe"] = burst
     out = args.out or f"report-{args.tier}-seed{args.seed}.json"
     with open(out, "w") as fh:
         json.dump(report, fh, indent=1, sort_keys=True)
