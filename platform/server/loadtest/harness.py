@@ -47,7 +47,9 @@ class LoadHarness:
                  jev_model: str = "jev-1.13.0", workers: int = 16,
                  batch_virtual_s: float = 60.0,
                  faithful_seed: int | None = None,
-                 fault_profile=None):
+                 fault_profile=None, audit_db_path: str | None = None):
+        # audit_db_path: file-backed audit DB. None => :memory: (fine for
+        # small runs; OOMs at 1M scale — the tier driver passes a path).
         self.seed = seed
         self.start_epoch = start_epoch
         self.workers = workers
@@ -58,6 +60,7 @@ class LoadHarness:
         # (e.g. slow-tail) instead of fault_profile. The harness sets and
         # clears it; the driver decides the window.
         self.pressure_faults = None
+        self.audit_db_path = audit_db_path
         self._alert_seq = 0
         self._seq_lock = threading.Lock()
 
@@ -91,7 +94,8 @@ class LoadHarness:
         judge_tuple = ("mixed-jev", self.mixed, None)
         self.pipeline, self.vclock, self.judge_info = \
             sim.build_sim_pipeline(manifest, judge_tuple,
-                                   self.fakepd.url, self.tmpdir)
+                                   self.fakepd.url, self.tmpdir,
+                                   audit_db_path=self.audit_db_path)
         # Drift detection is intentionally inactive for the load run
         # (mixed judge); the pinned path was validated by the live run.
         print("[loadtest] gate pinned_model=None (drift inactive, loud "

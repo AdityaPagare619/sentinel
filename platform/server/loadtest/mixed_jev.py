@@ -153,7 +153,11 @@ class MixedJevClient:
         self._rng_lock = threading.Lock()
         self._lock = threading.Lock()
         self._faithful_lock = threading.Lock()
-        self.trace: list[dict] = []
+        # Routing counts (not a per-call list: at 1M alerts the list would
+        # hold ~400K dicts). A bounded recent sample stays for debugging.
+        self._route_counts: dict[str, int] = {}
+        self._route_errors: dict[str, int] = {}
+        self.trace: list[dict] = []  # bounded recent sample (<= 1000)
         self.cap_tripped = False
         # Archived per-batch faithful latencies (delegates are swapped and
         # dropped; their timing evidence must survive for the report).
@@ -190,6 +194,19 @@ class MixedJevClient:
         with self._faithful_lock:
             return self.faithful
 
+    def _note_route(self, route: str, error: str | None = None) -> None:
+        """Count a routing decision; keep a bounded recent sample."""
+        with self._lock:
+            self._route_counts[route] = self._route_counts.get(route, 0) + 1
+            if error:
+                self._route_errors[error] = \
+                    self._route_errors.get(error, 0) + 1
+            if len(self.trace) < 1000:
+                rec = {"route": route, "ok": error is None}
+                if error:
+                    rec["error"] = error
+                self.trace.append(rec)
+
     def _draw_real(self) -> bool:
         with self._rng_lock:
             return self._rng.random() < self.sample_rate
@@ -213,17 +230,13 @@ class MixedJevClient:
                 except Exception as exc:
                     # A real-call failure must never kill the run: record it
                     # and fall back to the faithful bulk for THIS call.
-                    with self._lock:
-                        self.trace.append({"route": "real",
-                                           "error": type(exc).__name__})
+                    self._note_route("real", error=type(exc).__name__)
                     return self._current_faithful().decide(state, questions)
-                with self._lock:
-                    self.trace.append({"route": "real", "ok": True})
+                self._note_route("real")
                 return resp
         faithful = self._current_faithful()
         resp = faithful.decide(state, questions)
-        with self._lock:
-            self.trace.append({"route": "faithful", "ok": True})
+        self._note_route("faithful")
         return resp
 
     def summary(self) -> dict:
@@ -232,15 +245,15 @@ class MixedJevClient:
             if self.faithful is not None:
                 self._archive_trace(self.faithful)
         with self._lock:
-            routes = {}
-            for t in self.trace:
-                routes[t["route"]] = routes.get(t["route"], 0) + 1
+            routes = dict(self._route_counts)
+            route_errors = dict(self._route_errors)
         lat = sorted(self.faithful_latencies)
         def q(x):
             return lat[min(int(x * len(lat)), len(lat) - 1)] if lat else 0
         return {
             "sample_rate": self.sample_rate,
             "routed": routes,
+            "route_errors": route_errors,
             "cap_tripped": self.cap_tripped,
             "spend_cap_usd": self.spend_cap_usd,
             "real_spend_usd": round(self.real.spend_usd(), 4),

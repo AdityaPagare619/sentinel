@@ -204,9 +204,15 @@ def main(argv=None) -> int:
     profiles, virtual_span = tier_profiles(args.tier, args.seed)
 
     start_epoch = 1787952000.0  # fixed virtual epoch (deterministic)
+    # File-backed audit DB next to the report: :memory: OOMs at 1M scale
+    # (~7KB/decision retained). On the big disk, not /tmp (tmpfs).
+    out = args.out or f"report-{args.tier}-seed{args.seed}.json"
+    audit_db = os.path.join(os.path.dirname(os.path.abspath(out)),
+                            f"audit-{args.tier}-seed{args.seed}.sqlite3")
     h = LoadHarness(seed=args.seed, start_epoch=start_epoch,
                     sample_rate=args.sample_rate,
-                    spend_cap_usd=args.spend_cap, workers=workers)
+                    spend_cap_usd=args.spend_cap, workers=workers,
+                    audit_db_path=audit_db)
     h.build()
     t_run0 = time.time()
     batches = []
@@ -251,10 +257,10 @@ def main(argv=None) -> int:
         "batches": batches,
         "totals": totals,
         "simulated": True,
+        "audit_db": audit_db,
     }
     if burst is not None:
         report["burst_probe"] = burst
-    out = args.out or f"report-{args.tier}-seed{args.seed}.json"
     with open(out, "w") as fh:
         json.dump(report, fh, indent=1, sort_keys=True)
     print(f"[tier] done: {total_alerts} alerts in {wall_total}s "
