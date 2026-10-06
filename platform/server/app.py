@@ -358,14 +358,13 @@ class PlatformApp:
         return self._ok(start_response, report, data_source="synthetic")
 
     def _simulate(self, environ, start_response):
-        try:
-            length = int(environ.get("CONTENT_LENGTH") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY:
+        # Bounded, EOF-terminating body read (safety_api.read_body_bytes):
+        # never blocks on a short/blocking wsgi.input from a serverless
+        # WSGI bridge — a bad body becomes a 422, never a hung request.
+        raw = safety_api.read_body_bytes(environ, MAX_BODY)
+        if raw is None:
             return self._error(start_response, 422, "body_too_large",
                                f"body exceeds {MAX_BODY} bytes")
-        raw = environ["wsgi.input"].read(length) if length else b""
         try:
             body = json.loads(raw.decode("utf-8")) if raw else None
         except (ValueError, UnicodeDecodeError):
@@ -435,14 +434,11 @@ class PlatformApp:
 
     def _int_body(self, environ, start_response):
         """Parse a small JSON object body. Returns dict or an error response."""
-        try:
-            length = int(environ.get("CONTENT_LENGTH") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY:
+        # Bounded, EOF-terminating body read — see _simulate.
+        raw = safety_api.read_body_bytes(environ, MAX_BODY)
+        if raw is None:
             return None, self._error(start_response, 422, "body_too_large",
                                      f"body exceeds {MAX_BODY} bytes")
-        raw = environ["wsgi.input"].read(length) if length else b""
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError):
