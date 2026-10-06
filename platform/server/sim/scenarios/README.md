@@ -1,6 +1,6 @@
 # Track 6 — scenario manifests (contract C6)
 
-Four versioned scenarios under `platform/server/scenarios/`, consumed by
+Four versioned scenarios under `platform/server/sim/scenarios/`, consumed by
 `../sim_runner.py` (the scenario driver + FakePD sink) and referenced by
 name in Track 7's acceptance (`docs/validation/ACCEPTANCE.md`).
 

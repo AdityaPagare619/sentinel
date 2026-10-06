@@ -19,7 +19,7 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-sys.path.insert(0, os.path.join(REPO_ROOT, "platform", "server"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "platform", "server", "sim"))
 
 import sim_runner as sim  # noqa: E402
 
