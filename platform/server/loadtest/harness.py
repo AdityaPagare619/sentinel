@@ -121,7 +121,6 @@ class LoadHarness:
 
     def run_batch(self, profiles, chunk_idx: int,
                   chunk_start_s: float, chunk_end_s: float) -> dict:
-        from sentinel.state import input_sha256  # noqa
         events, self._alert_seq = generate_chunk(
             profiles, chunk_idx, self.seed, chunk_start_s, chunk_end_s,
             seq_offset=self._alert_seq)
