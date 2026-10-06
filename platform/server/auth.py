@@ -1,29 +1,32 @@
-"""Operator bearer-token store (Track 1, program/full-build contract C1).
+"""Operator bearer-token auth (Track 1, program/full-build contract C1).
 
-Per-install operator token for the platform read API. Generated once at
-first boot with secrets.token_urlsafe(32), persisted to a 0600 file,
-never logged, never returned in any response. Every /api/* request
+Thin adapter over the CANONICAL rotating keystore (Track 4,
+platform/server/keystore.py). This module owns the operator-token UX:
+first-boot banner plumbing, env provisioning, ephemeral degradation, and
+the Authorization header parsing that app.py uses. All secret storage,
+dual-accept verification, generation epochs, audit, and rotation live in
+the keystore — there is exactly one implementation of secret handling.
+
+Per-install operator token for the platform API. Every /api/* request
 (except the two health probes) must carry it as
-`Authorization: Bearer <token>`.
-
-Track 4 (rotation) touchpoint — built in NOW per C4:
-  * the file carries a `generation` counter and a
-    `tokens: {primary, secondary}` pair;
-  * verification dual-accepts: the presented token is compared
-    (constant-time) against primary OR secondary;
-  * rotation = Track 4 adds a secondary -> verifies -> promotes ->
-    retires, each step audit-logged. This module exposes the seam
-    (dual-accept verify + generation) without implementing rotation.
+`Authorization: Bearer <token>`. The plaintext leaves this process
+exactly once (the first-boot setup banner), and is never logged or
+embedded in any HTTP response.
 """
 
 from __future__ import annotations
 
 import hmac
-import json
 import os
 import secrets
-import tempfile
-from datetime import datetime, timezone
+import sys
+
+from .keystore import (
+    OPERATOR_TOKEN_NAME,
+    RotatingKeyStore,
+    ensure_operator_token,
+    operator_token_store,
+)
 
 ENV_TOKEN_FILE = "SENTINEL_OPERATOR_TOKEN_FILE"
 ENV_TOKEN_VALUE = "SENTINEL_OPERATOR_TOKEN"
@@ -39,10 +42,12 @@ def _default_path() -> str:
 
 
 class OperatorTokenStore:
-    """Holds the operator bearer token. Values are write-never-after-boot:
-    the plaintext leaves this process exactly once (the first-boot setup
-    banner printed by __main__), and is never logged or embedded in any
-    HTTP response."""
+    """Operator-token facade over the canonical RotatingKeyStore.
+
+    Public API (used by app.py and __main__.py — do not break):
+      path, ephemeral, first_boot_token, generation,
+      verify(presented) -> bool, bearer_from_header(value).
+    """
 
     def __init__(self, path: str | None = None):
         self.path = path or os.environ.get(ENV_TOKEN_FILE) or _default_path()
@@ -54,76 +59,67 @@ class OperatorTokenStore:
         # token) — the token lives for this process only. Loudly degraded;
         # the operator MUST set SENTINEL_OPERATOR_TOKEN there.
         self.ephemeral = False
+        self._ks: RotatingKeyStore | None = None
+        self._mem: dict | None = None
+
         provisioned = (os.environ.get(ENV_TOKEN_VALUE) or "").strip()
         if provisioned:
             # Hosted/serverless: the operator provisions the token via env
             # (e.g. the Vercel dashboard). No file, no banner — they
             # already hold the value.
-            self._tokens = {"primary": provisioned, "secondary": None}
-            self.generation = 1
+            self._mem = {"primary": provisioned, "secondary": None}
             return
-        data = self._read()
-        if data is None:
-            token = secrets.token_urlsafe(_TOKEN_BYTES)
-            data = {
-                "tokens": {"primary": token, "secondary": None},
-                "generation": 1,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            try:
-                self._write(data)
-            except OSError:
-                self.ephemeral = True
-            else:
-                self.first_boot_token = token
-        self._tokens = data["tokens"]
-        self.generation = int(data.get("generation", 1))
-
-    # ------------------------------------------------------------ plumbing
-
-    def _read(self) -> dict | None:
         try:
-            with open(self.path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (FileNotFoundError, ValueError):
-            return None
-        if (not isinstance(data, dict)
-                or not isinstance(data.get("tokens"), dict)
-                or not data["tokens"].get("primary")):
-            # Corrupt/unrecognised file: treat as missing so the server
-            # self-heals with a fresh token instead of boot-looping.
-            return None
-        return data
+            self._ks = operator_token_store(self.path)
+            token, is_new = ensure_operator_token(self._ks)
+        except OSError:
+            # Unwritable state dir: degrade to an in-memory token rather
+            # than crashing the boot. Loud — the operator must provision
+            # SENTINEL_OPERATOR_TOKEN for a durable install.
+            self.ephemeral = True
+            self._mem = {"primary": secrets.token_urlsafe(_TOKEN_BYTES),
+                         "secondary": None}
+            print("! WARNING: operator token is EPHEMERAL "
+                  "(state dir unwritable) — set SENTINEL_OPERATOR_TOKEN",
+                  file=sys.stderr)
+            return
+        if is_new:
+            self.first_boot_token = token
 
-    def _write(self, data: dict) -> None:
-        parent = os.path.dirname(os.path.abspath(self.path))
-        os.makedirs(parent, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".operator_token")
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, separators=(",", ":"))
-                fh.write("\n")
-            os.replace(tmp, self.path)
-            os.chmod(self.path, 0o600)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    # ------------------------------------------------------------ public
 
-    # ------------------------------------------------------------ verify
+    @property
+    def keystore(self) -> RotatingKeyStore | None:
+        """The canonical store (None in env/ephemeral mode). Track 4's
+        rotation ceremony operates on this object — same file, same truth."""
+        return self._ks
+
+    @property
+    def generation(self) -> int:
+        if self._ks is not None:
+            return self._ks.generation(OPERATOR_TOKEN_NAME) or 1
+        return 1
+
+    @property
+    def _tokens(self) -> dict:
+        """White-box shim (tests): the current {primary, secondary} pair."""
+        if self._ks is not None:
+            rec = self._ks._get_record(OPERATOR_TOKEN_NAME)
+            if rec:
+                return {"primary": rec["primary"],
+                        "secondary": rec["secondary"]}
+            return {"primary": None, "secondary": None}
+        return dict(self._mem or {})
 
     def verify(self, presented: str | None) -> bool:
-        """Dual-accept (C4 seam): accept the primary OR the secondary."""
-        if not presented or not isinstance(presented, str):
-            return False
-        for slot in ("primary", "secondary"):
-            candidate = self._tokens.get(slot)
-            if candidate and hmac.compare_digest(presented, candidate):
-                return True
-        return False
+        """Dual-accept via the canonical keystore (C4): primary OR
+        secondary (post-rotation) verifies. Constant-time compare."""
+        if self._ks is not None:
+            ok, _via = self._ks.verify(OPERATOR_TOKEN_NAME, presented)
+            return bool(ok)
+        cand = (self._mem or {}).get("primary")
+        return (isinstance(presented, str) and bool(presented)
+                and bool(cand) and hmac.compare_digest(presented, cand))
 
     def bearer_from_header(self, value: str | None) -> str | None:
         """Extract the token from an Authorization header value.
