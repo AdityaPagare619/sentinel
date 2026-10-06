@@ -50,6 +50,17 @@ controller. 39/39 C1 unit tests pass; 32k-observation 16-thread hammer clean.
 
 ### Tier 100K (running — with pressure phase)
 
+**Load-test catch #2 (memory, fixed before it bit):** the first 100K
+attempt showed ~43MB/min unbounded RSS growth — the sim pipeline's
+`AuditLog(":memory:")` retains every `decision_made` event (~7KB/decision).
+At 1M alerts that's ~7GB on a 7GB box: a guaranteed OOM. Fixed in commit
+`9dfeb96`: `build_sim_pipeline` takes an `audit_db_path` (file-backed DB
+next to the report, provenance-recorded in the report JSON); the mixed
+judge's per-call trace list became route counters + a bounded 1000-sample.
+Restarted 100K with the fixes; RSS flat at ~67MB where the old code was at
+435MB and climbing. The 10K tier's numbers stand (its absolute scale never
+threatened RAM).
+
 ### Tier 1M
 
 ### Breaking point ✅ (2026-10-06 ~14:00 IST, 2K-alert steady workload, all-faithful)
