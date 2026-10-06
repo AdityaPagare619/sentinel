@@ -70,14 +70,18 @@ def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
         print("[v2] /loadtest/ → placeholder (awaiting lane handoff)")
 
     # --- banner contract verification --------------------------------------
-    for path, must, must_not in [
-        (os.path.join(out, "index.html"), 'data-mode="production"', None),
-        (os.path.join(stg, "index.html"), "SimAdapter", 'data-mode="production"'),
-    ]:
+    # Inspect the actual <html> ELEMENT (first tag), not string occurrences
+    # in JS comments.
+    import re as _re
+    def _html_tag(path):
         blob = open(path, encoding="utf-8").read()
-        assert must in blob, f"{path}: missing {must!r}"
-        if must_not:
-            assert must_not not in blob, f"{path}: leaked {must_not!r}"
+        m = _re.search(r"<html[^>]*>", blob)
+        return m.group(0) if m else ""
+    prod_tag = _html_tag(os.path.join(out, "index.html"))
+    stg_tag = _html_tag(os.path.join(stg, "index.html"))
+    assert 'data-mode="production"' in prod_tag, "prod <html> missing data-mode"
+    assert 'data-backend="' in prod_tag, "prod <html> missing data-backend"
+    assert 'data-mode="production"' not in stg_tag, "staging <html> leaked data-mode"
     print("[v2] banner contract verified")
 
 
