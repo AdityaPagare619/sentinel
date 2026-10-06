@@ -92,6 +92,52 @@ def main(argv=None) -> int:
         f"<li>{html.escape(x.strip())}</li>" for x in args.limits.split(";;")
         if x.strip()) or "<li>None recorded.</li>"
 
+    # Pressure-phase section (control principle under load): for any tier
+    # with pressure-tagged batches, compare timer-wins and suppression
+    # rate pressure vs baseline. Fail-open law: timer-wins MUST rise,
+    # suppression MUST NOT.
+    pressure_html = ""
+    for r in tiers:
+        pb = [b for b in r["batches"] if b.get("pressure")]
+        bb = [b for b in r["batches"] if not b.get("pressure") and b["alerts"]]
+        if not pb or not bb:
+            continue
+        def _tw(bs):
+            return sum(v for b in bs for k, v in b["race_delta"].items()
+                       if "timer_won" in k.lower() or "TIMER_WON" in k)
+        def _sr(bs):
+            s = sum(b["actions"].get("suppress", 0) for b in bs)
+            n = sum(sum(b["actions"].values()) for b in bs)
+            return s / n if n else 0
+        tw_p, tw_b = _tw(pb), _tw(bb)
+        sr_p, sr_b = _sr(pb), _sr(bb)
+        ok_creep = sr_p <= sr_b + 0.02
+        ok_timer = tw_p > tw_b
+        status = "PASS" if (ok_creep and ok_timer) else "FAIL"
+        if ok_timer:
+            timer_note = ("Timer-wins rose under judge pressure "
+                          "(the race is real, not theater). ")
+        else:
+            timer_note = ("TIMER-WINS DID NOT RISE — "
+                          "the race may be theater. ")
+        if ok_creep:
+            creep_note = ("No suppression creep — fail-open holds: "
+                          "slow judge pages, never silences.")
+        else:
+            creep_note = ("SUPPRESSION CREEP DETECTED under pressure — "
+                          "control principle VIOLATED.")
+        pressure_html += (
+            f"<section><h3>Pressure phase — tier {r['tier']} "
+            f"[{status}]</h3>"
+            f"<p>Slow-tail judge attack (15% of judgments at 4.5s, over the "
+            f"2.7s race budget) across the middle third of chunks.</p>"
+            f"<table><tr><th></th><th>Timer-wins</th>"
+            f"<th>Suppression rate</th></tr>"
+            f"<tr><td>Baseline</td><td>{tw_b:,}</td><td>{sr_b:.3f}</td></tr>"
+            f"<tr><td>Under pressure</td><td>{tw_p:,}</td>"
+            f"<td>{sr_p:.3f}</td></tr></table>"
+            f"<p>{timer_note}{creep_note}</p></section>")
+
     page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -120,6 +166,7 @@ judge) → forwarder), virtual-time batches, deterministic seeds.</p>
 <table><tr><th>Tier</th><th>Alerts</th><th>Throughput</th><th>Judgments</th>
 <th>Jev p50/p99</th><th>Race: judge / timer / err</th><th>Cost / 1M alerts</th></tr>
 {"".join(rows)}</table>
+{pressure_html}
 {"".join(cards)}
 <h2>What this test did NOT prove</h2>
 <ul>{limits_html}</ul>
