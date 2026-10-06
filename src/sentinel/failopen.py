@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -236,12 +237,19 @@ class VendorHealthMonitor:
     def __init__(self, clock=None):
         self._now = clock
         self._samples: deque = deque()  # (ts, unhealthy: bool)
+        # The gate is shared across triage threads: record() appends while
+        # timer_win_rate() prunes+iterates. Unsynchronized this raises
+        # "deque mutated during iteration" under concurrent load (caught
+        # live by the millions-scale load test) and silently drops fail-open
+        # observations — the ladder goes blind exactly when it matters.
+        self._lock = threading.Lock()
 
     def _t(self, now):
         return now if now is not None else self._now()
 
     def record(self, unhealthy: bool, now: float | None = None) -> None:
-        self._samples.append((self._t(now), bool(unhealthy)))
+        with self._lock:
+            self._samples.append((self._t(now), bool(unhealthy)))
 
     def timer_win_rate(self, window_s: float,
                        now: float | None = None) -> tuple[float, int]:
@@ -252,9 +260,13 @@ class VendorHealthMonitor:
         wins = n = 0
         # Prune from the left; count the rest. Bounded by construction:
         # entries older than the largest window any caller uses are dropped.
-        while self._samples and self._samples[0][0] < cutoff:
-            self._samples.popleft()
-        for ts, bad in self._samples:
+        # Snapshot under the lock so a concurrent record() cannot mutate
+        # the deque mid-iteration.
+        with self._lock:
+            while self._samples and self._samples[0][0] < cutoff:
+                self._samples.popleft()
+            samples = list(self._samples)
+        for ts, bad in samples:
             if ts >= cutoff:
                 n += 1
                 wins += 1 if bad else 0
@@ -269,21 +281,27 @@ class PageRateMonitor:
     def __init__(self, clock=None):
         self._now = clock
         self._pages: deque = deque()  # ts of page-eligible decisions
+        # Same concurrency contract as VendorHealthMonitor: the gate is
+        # shared across triage threads.
+        self._lock = threading.Lock()
 
     def _t(self, now):
         return now if now is not None else self._now()
 
     def record(self, page_eligible: bool, now: float | None = None) -> None:
         if page_eligible:
-            self._pages.append(self._t(now))
+            with self._lock:
+                self._pages.append(self._t(now))
 
     def page_rate_per_min(self, window_s: float,
                           now: float | None = None) -> float:
         t = self._t(now)
         cutoff = t - window_s
-        while self._pages and self._pages[0] < cutoff:
-            self._pages.popleft()
-        n = sum(1 for ts in self._pages if ts >= cutoff)
+        with self._lock:
+            while self._pages and self._pages[0] < cutoff:
+                self._pages.popleft()
+            pages = list(self._pages)
+        n = sum(1 for ts in pages if ts >= cutoff)
         return n / (window_s / 60.0)
 
 
@@ -508,6 +526,9 @@ class FailopenController:
         self._critical_held = 0
         self._last_digest_emit_held = 0
         self._last_digest_emit_ts = 0.0
+        # Serializes observe(): the gate is shared across triage threads.
+        # RLock because _evaluate paths may re-enter via property reads.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------ plumbing
 
@@ -518,11 +539,13 @@ class FailopenController:
 
     @property
     def current_step(self) -> int:
-        return self._step
+        with self._lock:
+            return self._step
 
     @property
     def step_history(self) -> list[dict]:
-        return list(self._step_history)
+        with self._lock:
+            return list(self._step_history)
 
     def should_canary(self) -> bool:
         """R15: True every canary_every_n-th observation while degraded.
@@ -532,10 +555,11 @@ class FailopenController:
         ONLY (the stepped disposition stands). This is the recovery
         signal — without it, step-1 exit is impossible.
         """
-        if self._step == 0:
-            return False
-        self._canary_count += 1
-        return self._canary_count % self.config.canary_every_n == 0
+        with self._lock:
+            if self._step == 0:
+                return False
+            self._canary_count += 1
+            return self._canary_count % self.config.canary_every_n == 0
 
     def _detector_health(self) -> dict | None:
         if self._detector_health_fn is None:
@@ -560,16 +584,26 @@ class FailopenController:
                 now: float | None = None) -> list[dict]:
         """One observation per gate decision. vendor_outcome: "timer_win" |
         "answered" | "unhealthy_error" | "structural" | "failopen".
-        Returns emission payloads (transitions, banner, digest)."""
-        t = self._t(now)
-        if self.config.enabled:
-            if vendor_outcome in ("timer_win", "unhealthy_error"):
-                self._health.record(True, t)
-            elif vendor_outcome == "answered":
-                self._health.record(False, t)
-            # "structural"/"failopen" never touched the vendor: not samples.
-            self._pages.record(action in _PAGE_ACTIONS, t)
-        return self._evaluate(t)
+        Returns emission payloads (transitions, banner, digest).
+
+        The whole observation is serialized: the ladder keeps step state,
+        sustained-condition timers, dedup maps and digest rankings in plain
+        dicts/deques, and the gate is shared across triage threads. Without
+        this, concurrent decisions corrupt the ladder's state (the deque
+        mutation crash the load test caught was the loud symptom; dict
+        races here would be silent). Observations stay synchronous and
+        deterministic — just atomic.
+        """
+        with self._lock:
+            t = self._t(now)
+            if self.config.enabled:
+                if vendor_outcome in ("timer_win", "unhealthy_error"):
+                    self._health.record(True, t)
+                elif vendor_outcome == "answered":
+                    self._health.record(False, t)
+                # "structural"/"failopen" never touched the vendor: not samples.
+                self._pages.record(action in _PAGE_ACTIONS, t)
+            return self._evaluate(t)
 
     # ------------------------------------------------------------ the ladder
 

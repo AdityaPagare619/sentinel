@@ -68,9 +68,15 @@ def main(path: str) -> None:
           f"cap_tripped={judge['cap_tripped']}")
     print(f"real Jev latency: n={len(real_lat)} "
           f"p50={pct(real_lat,.5):.0f}ms p99={pct(real_lat,.99):.0f}ms")
-    print(f"faithful latency: p50={judge['faithful_latency_p50_ms']}ms "
-          f"p99={judge['faithful_latency_p99_ms']}ms "
-          f"faults={judge['faithful_faults']}")
+    # Older tier reports (pre latency-evidence commit) lack the faithful
+    # percentile keys — degrade gracefully rather than crashing.
+    fp50 = judge.get("faithful_latency_p50_ms")
+    fp99 = judge.get("faithful_latency_p99_ms")
+    ff = judge.get("faithful_faults")
+    if fp50 is None and "faithful_latency_ms" in judge:
+        fl = judge["faithful_latency_ms"]
+        fp50, fp99 = round(pct(fl, .5), 1), round(pct(fl, .99), 1)
+    print(f"faithful latency: p50={fp50}ms p99={fp99}ms faults={ff}")
     print(f"spend: ${judge['real_spend_usd']} "
           f"(${judge['real_spend_usd']/max(r['total_alerts'],1)*1e6:.2f}/M alerts)")
     print(f"FakePD pages: {t['fakepd_pages']:,} "
