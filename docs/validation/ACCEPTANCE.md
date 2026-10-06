@@ -293,13 +293,29 @@ Rules:
    discover -s tests/validation` + `python3 tests/validation/run.py
    --report` reproduces the sign-off report locally, stdlib only.
 
-## Current status (2026-10-06, program/full-build @ aee5f33)
+## Current status (2026-10-06, program/full-build @ aee5f33 — harness baseline)
 
-- AC-1: BLOCKED (Track 3)
-- AC-2: PARTIAL — 2a–2d + backstop executable against `race.py`; 2e, 2f, `source` field BLOCKED (Track 2)
-- AC-3: EXECUTABLE (baseline run in progress)
-- AC-4: PARTIAL — drivable with harness profiles; by-name Track 6 scenarios BLOCKED (Track 6); 4e needs Track 8
-- AC-5: BLOCKED (Track 1)
-- AC-6: BLOCKED (Track 3)
-- AC-7: DEFERRED (Track 8)
-- AC-8: EXECUTABLE (API copy now; console copy when Track 8 lands)
+Full harness run: `python3 tests/validation/run.py --report`.
+Evidence: `docs/validation/evidence/2026-10-06-4b61528/`.
+
+- AC-1: BLOCKED (Track 3 — no kill endpoint, no `mode` field, no drill script)
+- AC-2: BLOCKED — 6/8 executable checks PASS (judge-wins suppress 12.6 ms;
+  timer-wins fired_at=502 ms vs 500 ms budget; error passthrough 6.0 ms;
+  overload shed 8.0 ms; dead-scheduler backstop 1007 ms; late answer
+  shadow-only). 2e, 2f BLOCKED (Track 2).
+- AC-3: PASS (9/9 — 12/12 driven suppressions audited: conjunction,
+  kernel agreement, named corroboration, D9 receipt, causal reason,
+  confidence floor, sha recompute, audit-log consistency)
+- AC-4: BLOCKED — scale test itself PASSES (2000 problems, 60/s, zero
+  loss, seq contiguous; p99s: receiver 2.35 ms, correlator 3.12 ms,
+  gate 26.08 ms, forwarder 61.23 ms, end-to-end 65.94 ms — all within
+  budget). By-name Track 6 scenario manifests BLOCKED (Track 6).
+- AC-5: BLOCKED (Track 1 — no operator auth on /api/* yet)
+- AC-6: BLOCKED (Track 3 — no `mode` field yet)
+- AC-7: DEFERRED (Track 8 — falsifiers apply to the shipped console;
+  Track 7 confirms via docs/validation/T8_CONSOLE)
+- AC-8: PASS (5/5 — SIMULATED labels, no fake-real numbers, confidence
+  ordinal, key never in responses/logs/status)
+
+**Sign-off: WITHHELD — red criteria present (AC-1, AC-2, AC-4, AC-5,
+AC-6 BLOCKED; AC-7 DEFERRED).** Track 7 re-runs as tracks merge.
