@@ -509,8 +509,11 @@ class TestReadOnlyProof(unittest.TestCase):
         would_suppress = [o for o in store.observations
                           if o.gate_would == "suppress"]
         self.assertEqual(len(would_suppress), 50)
-        # ...and every one of them was RECORDED as a shadow observation.
-        self.assertTrue(all(o.gate_reason == "shadow" for o in would_suppress))
+        # ...and every one of them was RECORDED as a shadow observation —
+        # carrying the CAUSAL reason ("allowlist"), never reason="shadow"
+        # (contract C3: shadow is a mode, not a reason).
+        self.assertTrue(all(o.gate_reason == "allowlist"
+                            for o in would_suppress))
 
     def test_shadow_exception_never_falls_through_to_page(self):
         pipeline, base, write_path = self._build(

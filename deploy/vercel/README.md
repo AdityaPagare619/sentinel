@@ -51,3 +51,12 @@ Current status (2026-10-04): Vercel OAuth is connected, but the
 `deployments.publish` mutation needs an interactive egress approval that
 could not be obtained (Aditya is dark). The bundle is built and tested;
 deploying is one approval tap + one command away — see the lane PR.
+
+## Operator auth on serverless (Track 1, 2026-10-06)
+
+The platform API now requires the operator bearer token on every `/api/*`
+request (contract C1). Serverless has no writable state dir, so provision
+the token via the **`SENTINEL_OPERATOR_TOKEN`** env var (Vercel dashboard →
+project → Settings → Environment Variables). Without it the store is
+ephemeral — every cold start mints a token nobody holds and the console
+cannot authenticate (the function logs a loud warning in that case).

@@ -404,16 +404,23 @@ class SettingsApiTest(unittest.TestCase):
 
     def _app(self):
         # minimal app: store/registry are None (integrations paths never touch them)
-        return self.appmod.PlatformApp(
+        app = self.appmod.PlatformApp(
             store=None, registry=None,
             gate=self.shedmod.AdmissionGate(max_inflight=64),
             degrade=self.shedmod.DegradePolicy())
+        # Track 1 (C1): every /api/* request needs the operator bearer
+        # token. The fresh tmp state dir means first boot, so the token
+        # is exposed exactly once here for the test harness.
+        self._op_token = app.operator_tokens.first_boot_token
+        return app
 
-    def _call(self, app, method, path, body=None):
+    def _call(self, app, method, path, body=None, auth=True):
         raw = json.dumps(body).encode() if body is not None else b""
         env = {"REQUEST_METHOD": method, "PATH_INFO": path,
                "CONTENT_LENGTH": str(len(raw)),
                "wsgi.input": io.BytesIO(raw)}
+        if auth:
+            env["HTTP_AUTHORIZATION"] = f"Bearer {self._op_token}"
         captured = {}
 
         def start_response(status, headers):

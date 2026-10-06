@@ -62,10 +62,17 @@ class TestRiver(unittest.TestCase):
         self.assertTrue(all(i["disposition"] == "suppress" for i in items))
 
     def test_filter_time_range(self):
-        items = self.store.decisions(since="2026-10-01T00:00:00Z",
-                                     until="2026-10-05T00:00:00Z", limit=500)
+        # The decisions view's received_at is the audit record time (wall
+        # clock), so the filter window must be relative to now — a
+        # hardcoded window rots as the clock moves past it.
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        fmt = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        items = self.store.decisions(
+            since=fmt(now - timedelta(days=30)),
+            until=fmt(now + timedelta(days=1)), limit=500)
         self.assertTrue(items)
-        empty = self.store.decisions(since="2030-01-01T00:00:00Z")
+        empty = self.store.decisions(since=fmt(now + timedelta(days=365)))
         self.assertEqual(empty, [])
 
     def test_summary_shape(self):
@@ -91,11 +98,12 @@ class TestRiver(unittest.TestCase):
         self.assertAlmostEqual(probs["p1_critical"], 0.90, places=6)
 
     def test_shadow_flag(self):
+        # C3: "shadow" is a mode, not a reason — the flag derives from mode.
         items = self.store.decisions(action="passthrough", limit=500)
-        shadows = [i for i in items if i["reason"] == "shadow"]
+        shadows = [i for i in items if i["mode"] == "shadow"]
         self.assertTrue(shadows)
         self.assertTrue(all(i["shadow"] for i in shadows))
-        nons = [i for i in items if i["reason"] != "shadow"]
+        nons = [i for i in items if i["mode"] != "shadow"]
         self.assertTrue(all(not i["shadow"] for i in nons))
 
     def test_has_older(self):

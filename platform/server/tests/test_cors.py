@@ -60,22 +60,36 @@ def _call(app, path, method="GET", origin=None):
 
 
 class TestCors(unittest.TestCase):
-    def test_get_has_allow_origin_star_by_default(self):
-        # /api/nope -> 404 exercises _error through the CORS wrapper
-        # without needing a store.
-        r = _call(_make_app(), "/api/nope", origin="https://x.example")
-        self.assertEqual(r["status"].split()[0], "404")
-        self.assertEqual(r["headers"].get("access-control-allow-origin"), "*")
+    def test_default_cors_is_allowlist_not_star(self):
+        # Contract C1 (Track 1): the DEFAULT allowlist contains ONLY the
+        # hosted prod console. Arbitrary origins get no ACAO header —
+        # their browsers cannot read /api/* responses.
+        app = _make_app()
+        r = _call(app, "/api/nope",
+                  origin="https://AdityaPagare619.github.io")
+        self.assertEqual(r["headers"].get("access-control-allow-origin"),
+                         "https://AdityaPagare619.github.io")
+        r2 = _call(app, "/api/nope", origin="https://evil.example.com")
+        self.assertNotIn("access-control-allow-origin", r2["headers"])
 
     def test_options_preflight_answered(self):
         r = _call(_make_app(), "/api/simulate", method="OPTIONS",
                   origin="https://AdityaPagare619.github.io")
         self.assertEqual(r["status"].split()[0], "204")
         h = r["headers"]
-        self.assertEqual(h.get("access-control-allow-origin"), "*")
+        self.assertEqual(h.get("access-control-allow-origin"),
+                         "https://AdityaPagare619.github.io")
         self.assertIn("POST", h.get("access-control-allow-methods", ""))
         self.assertIn("content-type",
                       h.get("access-control-allow-headers", "").lower())
+
+    def test_explicit_star_is_opt_in(self):
+        # "*" is available ONLY via an explicit opt-in (__main__ prints a
+        # loud warning in that case).
+        r = _call(_make_app(cors_origins="*"), "/api/nope",
+                  origin="https://evil.example.com")
+        self.assertEqual(r["headers"].get("access-control-allow-origin"),
+                         "*")
 
     def test_allowlist_echoes_listed_origin_only(self):
         app = _make_app(cors_origins="https://AdityaPagare619.github.io")

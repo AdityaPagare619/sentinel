@@ -68,9 +68,12 @@ from .forwarder import Forwarder
 from .gate import Gate
 from .health import HealthMonitor
 from .integrations import resolve_jev_key
+from .keystore import WebhookSecretStore
 from .models import Alert, Thresholds
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
+# Track 2 (C2): the sim judge adapter — real Jev in simulation.
+from . import sim_judge
 from .state import build_state
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -137,6 +140,43 @@ def _webhook_sig_failure_reason(secret, onboarding, headers, body: bytes):
     return "bad_mac"
 
 
+def _webhook_sig_failure_reason_any(candidates, onboarding, headers,
+                                    body: bytes):
+    """Dual-accept wrapper (Track 4, contract C4): the delivery verifies
+    when ANY candidate secret verifies — the rotation overlap (primary +
+    staged secondary) and the env bootstrap fallback. The single-secret
+    check above stays the pure canonical primitive; this only iterates.
+
+    Returns None on success, else the first failure reason (stable for
+    metrics/logging).
+    """
+    cands = [c for c in (candidates or []) if c]
+    if not cands:
+        return _webhook_sig_failure_reason(None, onboarding, headers, body)
+    first_failure = None
+    for cand in cands:
+        reason = _webhook_sig_failure_reason(cand, onboarding, headers, body)
+        if reason is None:
+            return None
+        if first_failure is None:
+            first_failure = reason
+    return first_failure
+
+
+def _webhook_candidates(config) -> list:
+    """Live verifying secrets: rotation store (primary, then secondary),
+    then the env-bootstrapped legacy secret. Order is primary-first so
+    metrics attribute to the canonical secret."""
+    out: list = []
+    store = getattr(config, "webhook_secret_store", None)
+    if store is not None:
+        out.extend(store.verification_candidates())
+    legacy = getattr(config, "webhook_secret", None)
+    if legacy and legacy not in out:
+        out.append(legacy)
+    return out
+
+
 class Unparseable(Exception):
     """The payload could not be normalized to an Alert (fail open)."""
 
@@ -146,6 +186,10 @@ class Unparseable(Exception):
 @dataclass
 class ReceiverConfig:
     webhook_secret: str | None = None
+    # Track 4 (contract C4): rotatable webhook HMAC secrets. When set, its
+    # candidates (primary, then staged secondary) are tried before the
+    # legacy env-bootstrapped webhook_secret above.
+    webhook_secret_store: WebhookSecretStore | None = None
     shadow: bool = False
     # Explicit flagged onboarding mode (SENTINEL_WEBHOOK_ONBOARDING=1):
     # webhook auth MAY fail open (unsigned deliveries and legacy raw-body
@@ -180,6 +224,12 @@ class Pipeline:
         # The shadow pipeline's object graph contains no paging/write
         # path — see sentinel/shadow.py.
         self.shadow_pipeline: ShadowPipeline | None = None
+        # Track 2 (C2): the sim Jev spend tracker + judge mode. Attached
+        # by build_pipeline_from_env() when SENTINEL_SIM=1; None /
+        # "unconfigured" otherwise (production/mock paths never spend).
+        # The tracker holds amounts and counts only — never key material.
+        self.jev_tracker = None
+        self.jev_judge_mode = "unconfigured"
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -292,8 +342,8 @@ class Pipeline:
         """
         action = data.get("event_action")
         dedup_key = data.get("dedup_key")
-        auth_failure = _webhook_sig_failure_reason(
-            self.config.webhook_secret, False, headers or {}, body)
+        auth_failure = _webhook_sig_failure_reason_any(
+            _webhook_candidates(self.config), False, headers or {}, body)
         if auth_failure is not None:
             self.metrics["resolve_auth_refused"] += 1
             sys.stderr.write(
@@ -601,6 +651,24 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 return
             code, body = self.pipeline.health.check()
             self._send_json(code, body)
+        elif path == "/api/v1/jev/spend":
+            # Track 2 (C2): the sim Jev spend meter. Read-only; carries
+            # amounts, counts, and the blocked flag — NEVER key material.
+            # C1: covered by the operator bearer token (same
+            # SENTINEL_OPERATOR_TOKEN the platform server uses), following
+            # the _health_auth_ok pattern. Binds 127.0.0.1 by default
+            # (operator-local only) as defense in depth.
+            if not self._spend_auth_ok():
+                self._send_json(401, {"status": "error",
+                                      "message": "unauthorized"})
+                return
+            tracker = getattr(self.pipeline, "jev_tracker", None)
+            if tracker is None:
+                self._send_json(200, {"session_usd": 0.0,
+                                      "budget_usd": 0.0,
+                                      "calls": 0, "blocked": False})
+            else:
+                self._send_json(200, tracker.snapshot())
         else:
             self._send_json(404, {"status": "error", "message": "not found"})
 
@@ -843,8 +911,8 @@ class SentinelHandler(BaseHTTPRequestHandler):
         Delegates to the module-level canonical check (D10 wiring extracted
         it so the PD resolve-claim path verifies the identical scheme).
         """
-        return _webhook_sig_failure_reason(
-            self.pipeline.config.webhook_secret,
+        return _webhook_sig_failure_reason_any(
+            _webhook_candidates(self.pipeline.config),
             self.pipeline.config.webhook_onboarding,
             self.headers, body)
 
@@ -856,6 +924,21 @@ class SentinelHandler(BaseHTTPRequestHandler):
         is open (documented; set the token in production).
         """
         token = os.environ.get("SENTINEL_HEALTH_TOKEN")
+        if not token:
+            return True
+        presented = self.headers.get("Authorization") or ""
+        return hmac.compare_digest(presented, f"Bearer {token}")
+
+    def _spend_auth_ok(self) -> bool:
+        """Bearer <redacted> for GET /api/v1/jev/spend (C1).
+
+        Same SENTINEL_OPERATOR_TOKEN the platform server's C1 middleware
+        uses, so one operator token covers both surfaces. Follows the
+        _health_auth_ok pattern: when the env var is unset the meter is
+        open (documented; the process binds 127.0.0.1 by default, and
+        production sets the token).
+        """
+        token = os.environ.get("SENTINEL_OPERATOR_TOKEN", "")
         if not token:
             return True
         presented = self.headers.get("Authorization") or ""
@@ -1044,12 +1127,17 @@ def _legacy_allowlist_from_env() -> tuple[dict[str, str], str | None]:
 
 def build_pipeline_from_env(policy=None,
                             config_loader: ConfigLoader | None = None,
-                            state_dir: str | None = None) -> Pipeline:
+                            state_dir: str | None = None,
+                            jev_budget_usd: float | None = None) -> Pipeline:
     """Wire correlator/audit/gate/forwarder from environment (§8).
 
     `policy` must be a validated PolicyConfig from ConfigLoader.load_startup()
     (or a reload). Fail-closed: without one we refuse to build a pipeline —
     Sentinel never supervises paging with an unvalidated policy.
+
+    `jev_budget_usd`: the sim Jev spend budget (``--jev-budget-usd``);
+    None resolves via SENTINEL_JEV_BUDGET_USD, default 0.50. Only read
+    when SENTINEL_SIM=1.
     """
     # BYOK: the operator's own Jev key (Integrations settings) takes
     # precedence over the platform key. The source is safe to log; the
@@ -1065,35 +1153,59 @@ def build_pipeline_from_env(policy=None,
     # floating default — the opt-out below is explicit and loudly warned,
     # never a quiet default.
     pinned_model = _model_pin_from_env()
-    if os.environ.get("SENTINEL_MOCK", "0") == "1":
-        # Local dev/demo: mock client with no scripted answers. Every decide()
-        # raises JevError inside the mock, which the gate converts to
-        # passthrough (fail-open) — the full pipeline runs, nothing is ever
-        # suppressed, and no network call is made.
-        client = MockSystemOneClient()
-    elif not api_key:
-        raise SystemExit(
-            "TYPESAFE_API_KEY is not set. Export it before starting the receiver "
-            "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
-    elif pinned_model:
-        client = SystemOneClient(api_key=api_key, model=pinned_model)
-        sys.stderr.write(
-            f"[sentinel] Jev model pinned: {pinned_model} (ADR-015); the "
-            "client never floats 'jev-latest'.\n")
+    # Track 2 (C2): SENTINEL_SIM=1 selects the sim judge — the REAL Jev
+    # judge in simulation. It resolves the real key (user store →
+    # TYPESAFE_API_KEY env) and runs the real race, spend-capped; absent
+    # key → FakeJev ("simulated judge"), honestly labeled. Takes
+    # precedence over SENTINEL_MOCK (explicit new mode beats legacy dev
+    # mock). PagerDuty stays FakePD in sim — the forwarder wiring below
+    # is untouched.
+    sim_mode = os.environ.get(sim_judge.SIM_MODE_ENV, "0") == "1"
+    if sim_mode:
+        client, jev_tracker, jev_judge_mode = sim_judge.build_sim_judge(
+            budget_usd=jev_budget_usd)
     else:
-        sys.stderr.write(
-            "[sentinel] WARNING: no model pin available (SENTINEL_FRESHNESS_BUNDLE "
-            "unset or pinning.json unreadable) — the Jev client floats "
-            "'jev-latest' as an EXPLICIT, loudly-warned opt-out (ADR-015); "
-            "model_drift detection is INACTIVE and a silent vendor remap "
-            "will NOT be caught. Set the bundle before cutover.\n")
-        client = SystemOneClient(api_key=api_key, allow_floating_model=True)
+        jev_tracker, jev_judge_mode = None, "unconfigured"
+        if os.environ.get("SENTINEL_MOCK", "0") == "1":
+            # Local dev/demo: mock client with no scripted answers. Every decide()
+            # raises JevError inside the mock, which the gate converts to
+            # passthrough (fail-open) — the full pipeline runs, nothing is ever
+            # suppressed, and no network call is made.
+            client = MockSystemOneClient()
+        elif not api_key:
+            raise SystemExit(
+                "TYPESAFE_API_KEY is not set. Export it before starting the receiver "
+                "(or set SENTINEL_MOCK=1 for local dev with a mock client).")
+        elif pinned_model:
+            client = SystemOneClient(api_key=api_key, model=pinned_model)
+            sys.stderr.write(
+                f"[sentinel] Jev model pinned: {pinned_model} (ADR-015); the "
+                "client never floats 'jev-latest'.\n")
+        else:
+            sys.stderr.write(
+                "[sentinel] WARNING: no model pin available (SENTINEL_FRESHNESS_BUNDLE "
+                "unset or pinning.json unreadable) — the Jev client floats "
+                "'jev-latest' as an EXPLICIT, loudly-warned opt-out (ADR-015); "
+                "model_drift detection is INACTIVE and a silent vendor remap "
+                "will NOT be caught. Set the bundle before cutover.\n")
+            client = SystemOneClient(api_key=api_key, allow_floating_model=True)
     if policy is None:
         raise SystemExit(
             "no validated policy config: refusing to start without one "
             "(load thresholds.json via ConfigLoader.load_startup()).")
     webhook_secret = os.environ.get("SENTINEL_WEBHOOK_SECRET")
     onboarding = os.environ.get(ONBOARDING_ENV, "0") == "1"
+    # Track 4 (contract C4): rotatable webhook HMAC secrets. The store
+    # record (primary/secondary/generation) is authoritative when
+    # present; SENTINEL_WEBHOOK_SECRET is the bootstrap fallback and is
+    # imported into the store exactly once (audited as bootstrap).
+    if webhook_secret and len(webhook_secret) < 16:
+        raise SystemExit(
+            "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
+            "refusing to start with a weak webhook secret.")
+
+    webhook_store = WebhookSecretStore()
+    webhook_store.ensure_from_env()
     if onboarding:
         # Unmissable boot-time warning (ADR-005 condition (b)): fail-open
         # auth is permitted ONLY behind this explicit flag, and ONLY this
@@ -1106,19 +1218,17 @@ def build_pipeline_from_env(policy=None,
             "immediately after sender migration. Bypassed deliveries are "
             "counted in webhook_auth_bypassed and the mode is surfaced on "
             "/healthz as webhook_auth_fail_open=true.\n")
-    if not webhook_secret and not onboarding:
+    if not webhook_store.has_secret() and not onboarding:
         # ADR-005 fail-closed (D11): "no secret, no check" turns a deployment
         # mistake into an open endpoint — we turn it into a loud, immediate
         # startup refusal instead (SECURITY.md §2.2 rule 3).
         raise SystemExit(
-            "SENTINEL_WEBHOOK_SECRET is not set: refusing to start with an "
+            "no webhook secret available: refusing to start with an "
             "unauthenticated generic-webhook route (ADR-005 fail-closed). "
-            "Set the secret, or set SENTINEL_WEBHOOK_ONBOARDING=1 for a "
-            "flagged, loudly-warned onboarding window.")
-    if webhook_secret and len(webhook_secret) < 16:
-        raise SystemExit(
-            "SENTINEL_WEBHOOK_SECRET is set but shorter than 16 characters: "
-            "refusing to start with a weak webhook secret.")
+            "Set SENTINEL_WEBHOOK_SECRET, or rotate one in via the "
+            "webhook_hmac rotation ceremony, or set "
+            "SENTINEL_WEBHOOK_ONBOARDING=1 for a flagged, loudly-warned "
+            "onboarding window.")
     db_path = os.environ.get("SENTINEL_DB", "./sentinel.db")
     audit = AuditLog(db_path)
     shadow = os.environ.get("SENTINEL_SHADOW", "0") == "1"
@@ -1137,7 +1247,11 @@ def build_pipeline_from_env(policy=None,
                 freshness_monitor=freshness_monitor,
                 pinned_model=pinned_model,
                 legacy_allowlist=legacy_map,
-                legacy_window_ends_at=legacy_window_ends_at)
+                legacy_window_ends_at=legacy_window_ends_at,
+                # Track 2 (C2): the sim Jev spend tracker; None outside
+                # sim mode. Lets the gate attach the contract JudgeResult
+                # (who decided, at what cost) to decision payloads.
+                jev_tracker=jev_tracker)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
@@ -1147,10 +1261,15 @@ def build_pipeline_from_env(policy=None,
         webhook_secret=webhook_secret,
         shadow=shadow,
         webhook_onboarding=onboarding,
+        webhook_secret_store=webhook_store,
     )
     pipeline = Pipeline(Correlator(), gate, forwarder, audit, config,
                         policy=policy, config_loader=config_loader,
                         state_dir=state_dir)
+    # Track 2 (C2): sim judge state for the spend meter
+    # (GET /api/v1/jev/spend). Amounts and counts only — never key material.
+    pipeline.jev_tracker = jev_tracker
+    pipeline.jev_judge_mode = jev_judge_mode
     # Stage-0 read-only tap (design 06 §a): attached only when
     # SENTINEL_SHADOW_TAP=1. Runs on the validated policy's thresholds —
     # the fail-closed gate above already refused to boot without one.
@@ -1226,6 +1345,10 @@ def main(argv=None) -> None:
     parser.add_argument("--state-dir", default=os.environ.get(
         "SENTINEL_STATE_DIR", "./sentinel-state"),
         help="writable state dir (generations, restarts, events)")
+    parser.add_argument("--jev-budget-usd", type=float,
+                        default=sim_judge.budget_usd_from_env(),
+                        help="sim Jev spend budget in USD (SENTINEL_SIM=1 "
+                             "only; default 0.50; 0 disables all Jev calls)")
     args = parser.parse_args(argv)
 
     # Fail-closed config gate (design 05, §4): invalid config with no
@@ -1239,7 +1362,8 @@ def main(argv=None) -> None:
         raise SystemExit(2)
 
     pipeline = build_pipeline_from_env(policy=policy, config_loader=loader,
-                                       state_dir=args.state_dir)
+                                       state_dir=args.state_dir,
+                                       jev_budget_usd=args.jev_budget_usd)
     print(f"[sentinel] serving policy generation {policy.generation}",
           file=sys.stderr)
     record_restart(args.state_dir)

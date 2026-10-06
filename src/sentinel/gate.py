@@ -56,8 +56,8 @@ EMISSION CONTRACT).
 Invariants:
   * audit row is ALWAYS written, even on error / passthrough;
   * ANY exception from the client -> passthrough "error:<code>", NEVER raised;
-  * shadow=True logs the would-be disposition (action recorded, reason
-    "shadow") but always returns passthrough.
+  * shadow=True logs the would-be disposition (action recorded, causal reason
+    carried through untouched, mode="shadow") but always returns passthrough.
 """
 
 from __future__ import annotations
@@ -66,11 +66,13 @@ import datetime as _dt
 import logging
 import re
 import sys
+import threading
 import time
 
 from . import firewall
 from . import corroboration
 from . import race
+from . import sim_judge
 from .client import JevError
 from .correlator import legacy_fingerprint_of
 from .counterfactual import (CounterfactualInputs,
@@ -329,7 +331,12 @@ class Gate:
                  # compiled-in default severity routing.
                  failopen_config: FailopenConfig | None = None,
                  correlator=None,
-                 failover_policy: FailoverPolicy | None = None):
+                 failover_policy: FailoverPolicy | None = None,
+                 # Track 2 (C2): the sim Jev spend tracker. None outside
+                 # sim mode (SENTINEL_SIM=1) — when None, no JudgeResult is
+                 # attached to decision payloads and nothing about the
+                 # decision path changes.
+                 jev_tracker=None):
         """policy_gate: optional ADR-022/D8 enforcement hook with
         ``can_suppress(policy_id) -> (bool, reason)``. When present and the
         verdict is suppress, a False answer downgrades to passthrough — the
@@ -440,6 +447,12 @@ class Gate:
             zscore_fn=(correlator.fingerprint_level_shift_zscore
                        if correlator is not None else None),
             failover_policy=failover_policy)
+        # Track 2 (C2): sim spend accounting. The per-decision cost delta
+        # is best-effort under concurrency (a shared session meter); the
+        # meter itself (GET /api/v1/jev/spend) is exact.
+        self._jev_tracker = jev_tracker
+        self._jev_spend_lock = threading.Lock()
+        self._jev_spend_mark = 0.0
 
     # --------------------------------- ADR-017/D4 legacy-fingerprint window
 
@@ -556,13 +569,14 @@ class Gate:
             self._note("unhealthy_error", "passthrough")
 
         if self.shadow:
+            # Contract C3: the shadow path NEVER rewrites reason. The causal
+            # reason from the decisioning path rides through untouched; the
+            # only thing the shadow path writes is mode="shadow"
+            # (Disposition.as_shadow / as_shadow_shell — any direct
+            # `reason=` assignment here would raise ReasonRewriteError).
             would_be = disp
-            audit_disp = Disposition(
-                action=would_be.action, reason="shadow", team=would_be.team,
-                confidence=would_be.confidence, latency_ms=would_be.latency_ms)
-            disp = Disposition(
-                action="passthrough", reason="shadow", team=would_be.team,
-                confidence=would_be.confidence, latency_ms=would_be.latency_ms)
+            audit_disp = would_be.as_shadow()
+            disp = would_be.as_shadow_shell()
         else:
             audit_disp = disp
 
@@ -931,6 +945,59 @@ class Gate:
                     action, reason = "page_now", "uncorroborated"
         return action, reason, verdict, corro, used_inputs
 
+    # --------------------------------- Track 2 (C2): JudgeResult records
+
+    def _judge_spend_delta(self) -> float:
+        """USD billed since the last judge record (best-effort under
+        concurrency — the shared session meter, not this delta, is the
+        exact accounting). 0.0 when no tracker is wired."""
+        t = self._jev_tracker
+        if t is None:
+            return 0.0
+        with self._jev_spend_lock:
+            now = t.session_usd
+            delta = max(now - self._jev_spend_mark, 0.0)
+            self._jev_spend_mark = now
+        return round(delta, 6)
+
+    def _client_model_label(self) -> str:
+        """Honest model label for the judge record: the real pinned id,
+        the FakeJev id, or the mock id — never invented."""
+        return (getattr(self.client, "model", None)
+                or getattr(self.client, "judge_label", None)
+                or "unknown")
+
+    def _judge_record(self, *, judgment: str, confidence: float,
+                      latency_ms: float, source: str,
+                      model_version: str | None = None,
+                      cost_usd: float = 0.0) -> dict | None:
+        """Build the contract ``JudgeResult`` for a decision payload body.
+
+        Returns None outside sim mode (no tracker wired) — the decision
+        path is then byte-identical to before. The record is
+        observability, never load-bearing: a build failure logs loudly
+        and yields None rather than sinking the decision.
+        """
+        if self._jev_tracker is None:
+            return None
+        try:
+            return sim_judge.judge_result(
+                judgment=judgment, confidence=confidence,
+                latency_ms=latency_ms, source=source,
+                model_version=(model_version if model_version is not None
+                               else self._client_model_label()),
+                cost_usd=cost_usd)
+        except Exception:
+            logger.warning("[sentinel] judge record build failed",
+                           exc_info=True)
+            return None
+
+    def _attach_judge(self, payload: dict, record: dict | None) -> None:
+        """Attach the JudgeResult to a decision payload body (additive —
+        extra body keys are permitted by the event-log validator)."""
+        if record is not None:
+            payload["body"]["judge"] = record
+
     def _decide(self, alert, state, history, context, correlation):
         in_sha = input_sha256(state)
         budget_ms = self._runner.config.budget_ms
@@ -1047,6 +1114,12 @@ class Gate:
             budget_ms=budget_ms, latency_ms=disp.latency_ms,
             lock_evaluation=empty_lock_evaluation())
         payload["body"]["mode"] = f"failopen_step{step}"
+        # Track 2 (C2): no Jev call, no race — the deterministic degraded
+        # disposition owns this page.
+        self._attach_judge(payload, self._judge_record(
+            judgment="page", confidence=1.0,
+            latency_ms=disp.latency_ms or 0.0, source="deterministic",
+            cost_usd=0.0))
         self._emit(payload)
         self._note("failopen", disp.action, now)
         return disp, _empty_answers()
@@ -1082,12 +1155,21 @@ class Gate:
                                reason=f"error:{_error_code(err)}",
                                team=None, confidence=None, latency_ms=latency)
             self._note("unhealthy_error", "passthrough")
-            self._emit(decision_made_payload(
+            payload = decision_made_payload(
                 alert=alert, input_sha256=in_sha,
                 disposition=disp.action,
                 budget_outcome=race.ERROR_PASSTHROUGH, budget_ms=budget_ms,
                 latency_ms=latency,
-                lock_evaluation=empty_lock_evaluation()))
+                lock_evaluation=empty_lock_evaluation())
+            # Track 2 (C2): the judge failed — the DETERMINISTIC fail-open
+            # owns this page (source "deterministic", confidence 1.0: the
+            # rule fired, no model uncertainty). A JevBudgetExhausted here
+            # surfaces as reason error:budget_exhausted ("Jev budget
+            # exhausted — deterministic mode").
+            self._attach_judge(payload, self._judge_record(
+                judgment="page", confidence=1.0, latency_ms=latency,
+                source="deterministic", cost_usd=0.0))
+            self._emit(payload)
             return disp, _empty_answers()
 
         resp = res.response
@@ -1133,13 +1215,20 @@ class Gate:
                                reason=f"error:{_error_code(exc)}",
                                team=None, confidence=None,
                                latency_ms=res.latency_ms)
-            self._emit(decision_made_payload(
+            payload = decision_made_payload(
                 alert=alert, input_sha256=in_sha,
                 disposition=disp.action,
                 budget_outcome=race.ERROR_PASSTHROUGH, budget_ms=budget_ms,
                 jev_model=getattr(resp, "model", None),
                 latency_ms=res.latency_ms,
-                lock_evaluation=empty_lock_evaluation()))
+                lock_evaluation=empty_lock_evaluation())
+            # Track 2 (C2): untrustworthy answer — deterministic fail-open.
+            self._attach_judge(payload, self._judge_record(
+                judgment="page", confidence=1.0,
+                latency_ms=res.latency_ms, source="deterministic",
+                model_version=getattr(resp, "model", None),
+                cost_usd=0.0))
+            self._emit(payload)
             return disp, _empty_answers()
 
         disp = Disposition(action=action, reason=reason,
@@ -1189,7 +1278,7 @@ class Gate:
                     "counterfactual receipt failed for alert %s; emitting "
                     "null receipt", alert.alert_id)
                 counterfactual = None
-        self._emit(decision_made_payload(
+        payload = decision_made_payload(
             alert=alert, input_sha256=in_sha,
             disposition=disp.action,
             budget_outcome=race.ANSWERED_IN_TIME, budget_ms=budget_ms,
@@ -1199,7 +1288,23 @@ class Gate:
             latency_ms=res.latency_ms,
             lock_evaluation=verdict.lock_evaluation,
             corroboration=corro_body,
-            threshold_counterfactual=counterfactual))
+            threshold_counterfactual=counterfactual)
+        # Track 2 (C2): who decided, at what cost. confidence is the
+        # kernel's ordinal q3 confidence; 0.0 = "no confidence signal
+        # reported" (never an invented probability). source is "jev" ONLY
+        # for a real vendor client — a FakeJev "win" is deterministic
+        # (never fake-real).
+        real_vendor = sim_judge.is_real_vendor_client(self.client)
+        self._attach_judge(payload, self._judge_record(
+            judgment="suppress" if disp.action == "suppress" else "page",
+            confidence=(disp.confidence
+                        if disp.confidence is not None else 0.0),
+            latency_ms=res.latency_ms,
+            source="jev" if real_vendor else "deterministic",
+            model_version=getattr(resp, "model", None),
+            cost_usd=(self._judge_spend_delta()
+                      if real_vendor else 0.0)))
+        self._emit(payload)
         self._note("answered", disp.action)
         return disp, {"jev_model": verdict.jev_model,
                       "q_severity": q_sev,
@@ -1218,14 +1323,21 @@ class Gate:
         disp = Disposition(action="passthrough", reason=reason,
                            team=None, confidence=None, latency_ms=latency)
         self._note("timer_win", "passthrough")
-        self._emit(decision_made_payload(
+        payload = decision_made_payload(
             alert=alert, input_sha256=in_sha,
             disposition=disp.action,
             budget_outcome=outcome.budget_outcome, budget_ms=budget_ms,
             latency_ms=None,  # null unless answered_in_time (schema §2.3)
             timer_fired_at_ms=outcome.timer_fired_at_ms,
             backstop_claimed=outcome.backstop_claimed,
-            lock_evaluation=empty_lock_evaluation()))
+            lock_evaluation=empty_lock_evaluation())
+        # Track 2 (C2): the timer won — the page happened BECAUSE the judge
+        # was too slow (source "timer"). The late Jev answer is powerless:
+        # it becomes shadow evidence inside the race, never an override.
+        self._attach_judge(payload, self._judge_record(
+            judgment="page", confidence=1.0, latency_ms=latency,
+            source="timer", cost_usd=0.0))
+        self._emit(payload)
         return disp, _empty_answers()
 
     def _on_late_answer(self, late: race.LateAnswer) -> None:

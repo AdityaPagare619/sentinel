@@ -73,6 +73,14 @@ EVENT_TYPES = frozenset({
     # history. Governance events, never routing decisions.
     "failopen_step_entered",
     "failopen_recovered",
+    # C3 (kill switch, Track 3): every flip and re-arm is a named,
+    # actor-attributed governance event — never silent, never a bare flag.
+    # forwarder_halted is the forwarder's own observation of the kill: the
+    # drill measures flip → halt from these two events' timestamps.
+    # Governance events, never routing decisions.
+    "kill_switch_engaged",
+    "kill_switch_rearmed",
+    "forwarder_halted",
 })
 
 ACTORS = frozenset({
@@ -158,6 +166,18 @@ _BODY_REQUIRED = {
                               "detector_health"),
     "failopen_recovered": ("recovered_at", "step_history",
                            "total_degraded_s"),
+    # C3 (kill switch, Track 3): the kill audit triple. engaged/rearmed
+    # carry actor attribution in the body (actor_id — the C1 operator
+    # identity; the event's actor column stays in the closed ACTORS
+    # vocabulary as "operator"). forwarder_halted is the forwarder's own
+    # observation of the kill — the drill measures flip → halt from the
+    # engaged/halted events' ts columns. Governance events, never routing
+    # decisions.
+    "kill_switch_engaged": ("engaged_at", "previous_engaged", "reason",
+                            "actor_id"),
+    "kill_switch_rearmed": ("rearmed_at", "previous_engaged", "confirmed",
+                            "actor_id"),
+    "forwarder_halted": ("halted_at", "kill_engaged_at", "kill_seq"),
 }
 
 # Type 2 tunables.
@@ -332,6 +352,8 @@ CREATE TABLE IF NOT EXISTS outcomes (
 # tests keep working through the migration window. The compat namespace
 # lives under body.v01_compat — the design's top-level body vocabulary is
 # untouched; only this disposable VIEW reaches into the compat corner.
+# C3 adds one top-level projection: body.mode ("live"|"shadow") — the audit
+# disposition's mode, so readers never infer shadow-ness from reason again.
 _DECISIONS_VIEW = """
 DROP VIEW IF EXISTS decisions;
 CREATE VIEW decisions AS
@@ -350,6 +372,7 @@ SELECT seq        AS id,
        row_hash,
        json_extract(body, '$.disposition')        AS action,
        json_extract(body, '$.v01_compat.reason')  AS reason,
+       json_extract(body, '$.mode')               AS mode,
        json_extract(body, '$.input_sha256')       AS input_sha256,
        json_extract(body, '$.jev_model')          AS jev_model,
        json_extract(body, '$.v01_compat.q1_choice') AS q1_severity,
@@ -666,6 +689,15 @@ class EventLog:
             if body.get("budget_outcome") not in BUDGET_OUTCOMES:
                 raise EventLogError(
                     f"bad budget_outcome: {body.get('budget_outcome')!r}")
+            # C3: mode is "live"|"shadow" — shadow is never smuggled in as
+            # a reason value anymore.
+            if "mode" in body and body["mode"] not in ("live", "shadow"):
+                raise EventLogError(f"bad mode: {body['mode']!r}")
+            reason = (body.get("v01_compat") or {}).get("reason")
+            if reason == "shadow":
+                raise EventLogError(
+                    "bad reason: 'shadow' is a mode, not a reason "
+                    "(contract C3 — set body.mode='shadow' instead)")
         if event_type in ("mute_applied", "mute_appealed", "mute_lifted"):
             # D12 (ADR-007 condition c — no auto-mute, ever): the attestor on
             # a mute transition must be a named human. Automated actors are
@@ -762,6 +794,20 @@ class EventLog:
                 "received_ts": received_ts or utcnow_iso(),
                 "raw_payload_bytes": raw_payload_bytes,
             })
+
+    def events_by_type(self, event_type: str, limit: int = 100) -> list[dict]:
+        """Read-only scan of one event type, newest first. (C3: the kill
+        drill and Track 7 acceptance read kill_switch_engaged /
+        forwarder_halted through here.)"""
+        if event_type not in EVENT_TYPES:
+            raise EventLogError(f"unknown event type: {event_type!r}")
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT seq, event_id, ts, actor, type, alert_id, "
+                "fingerprint, episode_id, outbox_id, body "
+                "FROM events WHERE type = ? ORDER BY seq DESC LIMIT ?",
+                (event_type, limit))
+            return [dict(r) for r in cur.fetchall()]
 
     def store_raw_payload(self, input_sha256: str, payload: str) -> None:
         """Side table for inbound payloads (design §2.2, Type 2)."""
