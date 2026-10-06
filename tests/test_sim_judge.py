@@ -25,7 +25,9 @@ import json
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.request
+import urllib.error
 
 from sentinel import race as race_mod
 from sentinel import sim_judge
@@ -577,6 +579,63 @@ class TestSpendEndpoint(unittest.TestCase):
         base = self._serve(tracker)
         _code, body = self._get(base, "/api/v1/jev/spend")
         self.assertTrue(body["blocked"])
+
+
+class TestSpendEndpointAuth(unittest.TestCase):
+    """C1: the spend meter requires the operator bearer token when
+    SENTINEL_OPERATOR_TOKEN is set (same token as the platform server)."""
+
+    def _serve(self, tracker):
+        audit = AuditLog(":memory:")
+        gate = Gate(sim_judge.FakeJev(), Thresholds(), [], audit)
+        self.addCleanup(gate._runner.close)
+        forwarder = Forwarder(pd_events_url="http://127.0.0.1:1/",
+                              default_routing_key="rk-test")
+        pipeline = Pipeline(Correlator(), gate, forwarder, audit,
+                            ReceiverConfig())
+        pipeline.jev_tracker = tracker
+        server = make_server(0, pipeline)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _get(self, base, path, token=None):
+        req = urllib.request.Request(base + path)
+        if token is not None:
+            req.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode() or "{}")
+
+    def test_spend_unauthenticated_401_when_token_set(self):
+        with unittest.mock.patch.dict(os.environ,
+                                      {"SENTINEL_OPERATOR_TOKEN": "op-secret"}):
+            base = self._serve(sim_judge.JevSpendTracker(0.50))
+            code, body = self._get(base, "/api/v1/jev/spend")
+            self.assertEqual(code, 401)
+            self.assertEqual(body["message"], "unauthorized")
+
+    def test_spend_bogus_bearer_401(self):
+        with unittest.mock.patch.dict(os.environ,
+                                      {"SENTINEL_OPERATOR_TOKEN": "op-secret"}):
+            base = self._serve(sim_judge.JevSpendTracker(0.50))
+            code, _body = self._get(base, "/api/v1/jev/spend",
+                                    token="wrong-token")
+            self.assertEqual(code, 401)
+
+    def test_spend_correct_bearer_200(self):
+        with unittest.mock.patch.dict(os.environ,
+                                      {"SENTINEL_OPERATOR_TOKEN": "op-secret"}):
+            base = self._serve(sim_judge.JevSpendTracker(0.50))
+            code, body = self._get(base, "/api/v1/jev/spend",
+                                   token="op-secret")
+            self.assertEqual(code, 200)
+            self.assertEqual(body["budget_usd"], 0.50)
 
 
 if __name__ == "__main__":

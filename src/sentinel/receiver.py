@@ -654,10 +654,14 @@ class SentinelHandler(BaseHTTPRequestHandler):
         elif path == "/api/v1/jev/spend":
             # Track 2 (C2): the sim Jev spend meter. Read-only; carries
             # amounts, counts, and the blocked flag — NEVER key material.
-            # NOTE (merge): Track 1's operator auth (C1) must cover this
-            # route when it lands — every /api/* request requires the
-            # bearer token. Until then this process binds 127.0.0.1 by
-            # default (operator-local only).
+            # C1: covered by the operator bearer token (same
+            # SENTINEL_OPERATOR_TOKEN the platform server uses), following
+            # the _health_auth_ok pattern. Binds 127.0.0.1 by default
+            # (operator-local only) as defense in depth.
+            if not self._spend_auth_ok():
+                self._send_json(401, {"status": "error",
+                                      "message": "unauthorized"})
+                return
             tracker = getattr(self.pipeline, "jev_tracker", None)
             if tracker is None:
                 self._send_json(200, {"session_usd": 0.0,
@@ -920,6 +924,21 @@ class SentinelHandler(BaseHTTPRequestHandler):
         is open (documented; set the token in production).
         """
         token = os.environ.get("SENTINEL_HEALTH_TOKEN")
+        if not token:
+            return True
+        presented = self.headers.get("Authorization") or ""
+        return hmac.compare_digest(presented, f"Bearer {token}")
+
+    def _spend_auth_ok(self) -> bool:
+        """Bearer <redacted> for GET /api/v1/jev/spend (C1).
+
+        Same SENTINEL_OPERATOR_TOKEN the platform server's C1 middleware
+        uses, so one operator token covers both surfaces. Follows the
+        _health_auth_ok pattern: when the env var is unset the meter is
+        open (documented; the process binds 127.0.0.1 by default, and
+        production sets the token).
+        """
+        token = os.environ.get("SENTINEL_OPERATOR_TOKEN", "")
         if not token:
             return True
         presented = self.headers.get("Authorization") or ""
