@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel — SRE decision console</title>
+<!--
+  SENTINEL CONSOLE v2 — single-file build.
+  SIMULATED SHOWCASE: every number on this screen is produced by a seeded
+  synthetic pipeline (seed 20261006) running locally in this file.
+  Nothing here pages anyone. No data leaves this page.
+  Research notes: docs/planning/research/UI-V2-NOTES.md
+-->
+<style>
+/* ============ THE QUIET INSTRUMENT — design tokens ============
+   Hierarchy through spacing and weight, never color alone.
+   Color is spent only where human attention is spent. */
+:root{
+  --paper:#F6F6F3; --surface:#FFFFFF; --surface-2:#FBFBF9;
+  --ink:#1C1B17; --ink-2:#57534A; --ink-3:#8B8578;
+  --line:#E4E1D6; --line-soft:#EDEBE2;
+  --blue:#1F4FBE; --blue-soft:#E8EEFB;
+  --red:#BE2C1D; --red-soft:#FBEDEA; --red-edge:#D8A49B;
+  --amber:#9A5B0B; --amber-soft:#FAF0DF;
+  --quiet:#5D6771; --quiet-soft:#EFF1F4;
+  --green:#2E7D4E; --green-soft:#E9F4ED;
+  --radius:7px;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  font-family:var(--font); background:var(--paper); color:var(--ink);
+  font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
+}
+.num{font-variant-numeric:tabular-nums lining-nums}
+button{font-family:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+
+/* ============ simulated band — in-band, unmissable, honest ============ */
+.sim-band{
+  background:var(--ink); color:#fff; font-size:12px;
+  padding:7px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+}
+.sim-band .tag{background:#fff;color:var(--ink);font-weight:700;font-size:11px;
+  letter-spacing:.06em;padding:2px 8px;border-radius:4px}
+.sim-band .dim{color:#B9B4A8}
+.sim-band button{background:none;border:1px solid #6B665C;color:#fff;border-radius:4px;
+  font-size:11px;padding:2px 8px}
+
+/* ============ header rail ============ */
+.rail{
+  display:flex;align-items:center;gap:14px;padding:10px 16px;
+  background:var(--surface);border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:40;
+}
+.wordmark{font-weight:700;font-size:15px;letter-spacing:-.01em;white-space:nowrap}
+.wordmark span{color:var(--ink-3);font-weight:500}
+.pulse{display:flex;align-items:center;gap:0;font-size:11px;color:var(--ink-2);
+  border:1px solid var(--line);border-radius:99px;padding:3px 4px 3px 10px;background:var(--surface-2)}
+.pulse .dot{width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:7px;
+  animation:beat 2s infinite}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
+.pulse .st{display:flex;align-items:center;gap:5px;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.pulse .st + .st{border-left:1px solid var(--line)}
+.rail .spacer{flex:1}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:99px;
+  font-size:12px;padding:5px 11px;color:var(--ink-2);display:inline-flex;gap:7px;align-items:center;white-space:nowrap}
+.chip b{color:var(--ink);font-weight:600}
+.chip.ok b{color:var(--green)}
+.chip.warn{border-color:var(--red-edge);background:var(--red-soft);color:var(--red)}
+.chip.warn b{color:var(--red)}
+button.chip:hover{border-color:var(--ink-3)}
+.kill{border:1px solid var(--line);border-radius:99px;background:var(--surface);
+  font-size:12px;font-weight:600;padding:6px 13px;display:inline-flex;gap:8px;align-items:center}
+.kill .lamp{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.kill.armed{border-color:var(--red-edge);background:var(--red-soft);color:var(--red)}
+.kill.armed .lamp{background:var(--red);animation:beat 1.2s infinite}
+.kill.confirm{background:var(--red);border-color:var(--red);color:#fff}
+.kill.confirm .lamp{background:#fff}
+
+/* one-line state of the world */
+.state-line{background:var(--surface);border-bottom:1px solid var(--line);
+  padding:9px 16px;font-size:13px;color:var(--ink-2);display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.state-line strong{color:var(--ink);font-weight:650}
+.state-line .sep{color:var(--line)}
+
+/* ============ main layout — fixed geometry ============ */
+.workspace{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(300px,.9fr);
+  gap:14px;padding:14px 16px 40px;max-width:1560px;margin:0 auto;align-items:start}
+.col-h{display:flex;align-items:baseline;gap:10px;margin:2px 2px 10px}
+.col-h h2{font-size:13px;font-weight:650;letter-spacing:.02em}
+.col-h .count{font-size:12px;color:var(--ink-3)}
+.col-h .note{margin-left:auto;font-size:12px;color:var(--ink-3)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+
+/* ============ triage queue — rows never jump ============ */
+.queue{position:relative}
+.qrow{display:grid;grid-template-columns:4px minmax(0,1fr) auto;gap:0;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  margin-bottom:8px;overflow:hidden;transition:transform .25s ease,opacity .25s ease,border-color .15s}
+.qrow:hover{border-color:#C9C4B4}
+.qrow .edge{background:var(--line-soft)}
+.qrow.sev1 .edge{background:var(--red)}
+.qrow.sev2 .edge{background:var(--amber)}
+.qrow .body{padding:10px 12px;min-width:0}
+.qrow.sev1 .body{padding-top:12px;padding-bottom:12px}
+.qrow .title{font-weight:650;font-size:13.5px;letter-spacing:-.005em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qrow.sev1 .title{font-size:15px}
+.qrow .meta{font-size:12px;color:var(--ink-2);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+.qrow .meta .k{color:var(--ink-3)}
+.qrow .side{padding:10px 12px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;
+  border-left:1px solid var(--line-soft);min-width:172px}
+.mcall{font-size:12px;color:var(--ink-2);text-align:right}
+.mcall b{color:var(--ink)}
+.ord{display:inline-flex;align-items:center;gap:6px}
+.ord .band{position:relative;width:64px;height:5px;background:var(--line-soft);border-radius:3px}
+.ord .band i{position:absolute;top:0;bottom:0;border-radius:3px;background:var(--quiet)}
+.ord .band.sev i{background:var(--red)}
+.ord .v{font-size:11.5px;color:var(--ink-2)}
+.rowact{display:flex;gap:6px}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;
+  font-size:12px;font-weight:600;padding:5px 11px;color:var(--ink)}
+.btn:hover{border-color:var(--ink-3);background:var(--surface-2)}
+.btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}
+.btn.primary:hover{background:#000}
+.btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+.btn.ghost{border-color:transparent;color:var(--blue);font-weight:600}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.qrow.fresh{animation:arrive 1.6s ease}
+@keyframes arrive{0%{background:#FFF7E6}100%{background:var(--surface)}}
+.qrow.acked{opacity:.55}
+.qrow.acked .title{text-decoration:line-through;text-decoration-color:var(--ink-3)}
+.qfoot{font-size:12px;color:var(--ink-3);padding:8px 2px;display:flex;gap:12px;flex-wrap:wrap}
+.stream-hold{background:var(--amber-soft);border:1px solid #E7D3AC;color:#7A4A08;
+  border-radius:6px;font-size:12px;padding:6px 10px;margin-bottom:8px;display:none;align-items:center;gap:8px}
+.stream-hold.on{display:flex}
+
+/* storm card — compression, not a list */
+.storm{background:#1C1B17;color:#F4F2EC;border-radius:var(--radius);padding:16px;
+  margin-bottom:10px;border:1px solid #1C1B17}
+.storm .k{font-size:11px;letter-spacing:.08em;color:#B9B4A8;font-weight:700}
+.storm h3{font-size:17px;font-weight:700;margin:6px 0 4px;letter-spacing:-.01em}
+.storm .big{font-size:30px;font-weight:750;letter-spacing:-.02em;margin:8px 0 2px}
+.storm .sub{font-size:12.5px;color:#C9C4B6}
+.storm canvas{display:block;width:100%;height:44px;margin:10px 0 4px}
+.storm .row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center}
+.storm .btn{background:#F4F2EC;border-color:#F4F2EC;color:#1C1B17}
+.storm .ghostbtn{background:none;border:1px solid #5A564C;color:#F4F2EC;border-radius:6px;
+  font-size:12px;font-weight:600;padding:5px 11px}
+
+/* ============ handled quietly — grouped silence ============ */
+.qgroups{display:flex;flex-direction:column;gap:8px}
+.qgroup{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px 14px;text-align:left;width:100%;display:grid;
+  grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center}
+.qgroup:hover{border-color:#C9C4B4}
+.qgroup .n{font-size:24px;font-weight:700;letter-spacing:-.02em}
+.qgroup .lbl{font-size:13px;font-weight:600}
+.qgroup .why{font-size:12px;color:var(--ink-2);grid-column:1/-1}
+.qgroup .bar{grid-column:1/-1;height:4px;background:var(--line-soft);border-radius:2px;overflow:hidden}
+.qgroup .bar i{display:block;height:100%;background:var(--quiet)}
+.quiet-note{font-size:12px;color:var(--ink-3);padding:2px}
+
+/* ============ trace affordance — the skeptic's layout as behavior ============ */
+.trace{border-bottom:1px dotted var(--blue);color:inherit;cursor:help;text-decoration:none}
+button.trace{background:none;border:none;border-bottom:1px dotted var(--blue);padding:0;font-size:inherit;color:inherit}
+.pop{position:fixed;z-index:100;max-width:340px;background:var(--ink);color:#F4F2EC;
+  border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.5;
+  box-shadow:0 12px 32px rgba(0,0,0,.25);display:none}
+.pop.on{display:block}
+.pop .t{font-weight:700;margin-bottom:4px;font-size:12px;letter-spacing:.04em;color:#B9B4A8}
+.pop .src{color:#8f8a7d;margin-top:6px;font-size:11.5px}
+
+/* ============ drawers ============ */
+.scrim{position:fixed;inset:0;background:rgba(28,27,23,.32);z-index:60;display:none}
+.scrim.on{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(520px,94vw);background:var(--surface);
+  z-index:61;box-shadow:-16px 0 40px rgba(0,0,0,.14);display:none;flex-direction:column;
+  border-left:1px solid var(--line)}
+.drawer.on{display:flex}
+.drawer header{display:flex;align-items:flex-start;gap:10px;padding:16px 18px 12px;
+  border-bottom:1px solid var(--line)}
+.drawer header .tt{flex:1;min-width:0}
+.drawer header h3{font-size:16px;font-weight:700;letter-spacing:-.01em}
+.drawer header .sub{font-size:12px;color:var(--ink-2);margin-top:2px}
+.drawer .x{border:1px solid var(--line);background:var(--surface);border-radius:6px;
+  font-size:13px;padding:4px 10px;color:var(--ink-2)}
+.drawer .dbody{overflow-y:auto;padding:16px 18px 32px;flex:1}
+.dsec{margin-bottom:22px}
+.dsec > h4{font-size:11px;letter-spacing:.07em;color:var(--ink-3);font-weight:700;margin-bottom:8px}
+.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:5px 12px;font-size:13px}
+.kv dt{color:var(--ink-3)} .kv dd{color:var(--ink)}
+.frozen{border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;background:var(--surface-2)}
+.frozen .flabel{font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--ink-2);margin-bottom:8px;
+  display:flex;align-items:center;gap:8px}
+.frozen .flabel::after{content:"";flex:1;height:1px;background:var(--line)}
+.live-log{border-left:2px solid var(--blue);padding-left:14px;margin-top:4px}
+.tl{list-style:none}
+.tl li{font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line-soft);display:flex;gap:10px}
+.tl li:last-child{border-bottom:none}
+.tl .when{color:var(--ink-3);white-space:nowrap;min-width:64px}
+.tl .who{font-weight:600}
+.cost{background:var(--red-soft);border:1px solid var(--red-edge);border-radius:var(--radius);
+  padding:10px 12px;font-size:13px;margin-bottom:14px}
+.cost .k{font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--red);margin-bottom:2px}
+.dactions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;
+  font-family:inherit;font-size:13px;margin-top:8px;resize:vertical;min-height:56px}
+
+/* safety drawer sections */
+.srow{border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;background:var(--surface)}
+.srow h5{font-size:13px;font-weight:650;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.srow p{font-size:12.5px;color:var(--ink-2)}
+.srow .proof{font-size:12px;color:var(--ink-3);margin-top:6px}
+.pillok{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;
+  background:var(--green-soft);color:var(--green)}
+.pillbad{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;
+  background:var(--red-soft);color:var(--red)}
+.contract{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;
+  padding:10px 12px;font-size:12.5px;color:var(--ink-2);margin-top:8px}
+
+/* ============ evaluator harness — clearly NOT the operator's console ============ */
+.evalbar{position:fixed;left:0;right:0;bottom:0;z-index:55;background:#232220;color:#D8D4C8;
+  font-size:12px;padding:8px 16px;display:none;gap:14px;align-items:center;flex-wrap:wrap;
+  border-top:2px dashed #8B8578}
+.evalbar.on{display:flex}
+.evalbar .lab{font-weight:700;letter-spacing:.06em;font-size:11px;color:#F0B429}
+.evalbar button{background:#3A3833;border:1px solid #5A564C;color:#F4F2EC;border-radius:5px;
+  font-size:12px;padding:4px 10px}
+.evalbar button.on{background:#F0B429;border-color:#F0B429;color:#232220;font-weight:700}
+.evalbar .sep{width:1px;height:18px;background:#5A564C}
+
+/* toast */
+.toast{position:fixed;bottom:56px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--ink);color:#fff;font-size:13px;padding:10px 16px;border-radius:8px;
+  opacity:0;transition:all .25s;z-index:120;pointer-events:none;max-width:90vw}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+.empty{padding:26px 18px;text-align:center;color:var(--ink-3);font-size:13px;
+  border:1px dashed var(--line);border-radius:var(--radius);background:var(--surface)}
+
+@media (max-width:1080px){
+  .workspace{grid-template-columns:minmax(0,1fr)}
+  .pulse .st.hide-m{display:none}
+}
+@media (max-width:640px){
+  .rail{flex-wrap:wrap}
+  .qrow .side{min-width:0;border-left:none;border-top:1px solid var(--line-soft);
+    flex-direction:row;align-items:center;justify-content:space-between}
+  .qrow{grid-template-columns:4px minmax(0,1fr)}
+  .qrow .side{grid-column:2}
+  .mcall{text-align:left}
+  .kv{grid-template-columns:120px minmax(0,1fr)}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<!-- SIMULATED band: in-band, unmissable, on every surface -->
+<div class="sim-band" role="note" aria-label="Simulated mode">
+  <span class="tag">SIMULATED</span>
+  <span>Synthetic pipeline running locally in this file — <span class="dim">seed <span class="num">20261006</span> · every number traceable · nothing here pages anyone · <button class="trace" data-why="sim" style="border-color:#8B8578;color:#fff">why these numbers?</button></span></span>
+</div>
+
+<!-- header rail: pipeline pulse + safety, reachable within seconds -->
+<div class="rail">
+  <div class="wordmark">Sentinel <span>decision console</span></div>
+  <div class="pulse num" id="pulse" aria-label="Pipeline health">
+    <span class="dot" id="pulseDot"></span>
+    <span class="st"><button class="trace" data-why="recv" id="stRecv">0</button>&nbsp;in</span>
+    <span class="st hide-m"><button class="trace" data-why="corr" id="stCorr">0</button>&nbsp;grouped</span>
+    <span class="st"><button class="trace" data-why="race" id="stRace">0</button>&nbsp;raced</span>
+    <span class="st hide-m"><button class="trace" data-why="gate" id="stGate">0</button>&nbsp;decided</span>
+    <span class="st"><button class="trace" data-why="fwd" id="stFwd">0</button>&nbsp;sent</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="chip ok" id="chipPolicy" title="Policy governance">policy <b>v2026.10.06-r3</b></button>
+  <button class="chip ok" id="chipAuth" title="Auth status">auth <b>2/3 locked</b></button>
+  <button class="chip" id="chipRace" title="AI vs timer">race <b class="num">—</b></button>
+  <button class="kill" id="killBtn" aria-label="Kill switch: suppression is currently on">
+    <span class="lamp"></span><span id="killLabel">Suppressing</span>
+  </button>
+</div>
+
+<!-- one-line state of the world -->
+<div class="state-line num" id="stateLine" aria-live="polite"></div>
+
+<!-- degraded banner: says what the machine STOPPED doing -->
+<div id="degradedSlot"></div>
+
+<main class="workspace">
+  <section aria-label="Needs you">
+    <div class="col-h">
+      <h2>Needs you</h2>
+      <span class="count num" id="needCount"></span>
+      <span class="note">risk-ordered · rows stay put while you read</span>
+    </div>
+    <div class="stream-hold" id="streamHold">
+      <span>Stream held — <b class="num" id="heldCount">0</b> new arrivals waiting.</span>
+      <button class="btn" id="releaseStream" style="padding:3px 10px">Release</button>
+    </div>
+    <div id="stormSlot"></div>
+    <div class="queue" id="queue" aria-live="off"></div>
+    <div class="qfoot num" id="queueFoot"></div>
+  </section>
+
+  <section aria-label="Handled quietly">
+    <div class="col-h">
+      <h2>Handled quietly</h2>
+      <span class="count num" id="quietCount"></span>
+      <span class="note">grouped by reason — never listed raw</span>
+    </div>
+    <div class="qgroups" id="quietGroups"></div>
+    <p class="quiet-note" style="margin-top:10px">Least-sure decisions first inside each group. <button class="trace" data-why="quiet" style="font-size:12px">Why grouped?</button></p>
+  </section>
+</main>
+
+<!-- drawers -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="detailDrawer" aria-label="Problem detail"></aside>
+<aside class="drawer" id="safetyDrawer" aria-label="Safety machinery"></aside>
+<aside class="drawer" id="ledgerDrawer" aria-label="Proof ledger"></aside>
+
+<div class="pop" id="pop" role="tooltip"></div>
+<div class="toast" id="toast" role="status"></div>
+
+<!-- evaluator harness: separate from the operator's console -->
+<div class="evalbar" id="evalbar">
+  <span class="lab">EVALUATOR HARNESS — not the operator's console</span>
+  <span>scenario</span>
+  <button data-sc="normal" class="on">Normal</button>
+  <button data-sc="storm">Inject storm</button>
+  <button data-sc="judgedown">AI judge down</button>
+  <span class="sep"></span>
+  <span>load</span>
+  <button data-load="40" class="on">40</button>
+  <button data-load="150">150</button>
+  <button data-load="400">400</button>
+  <span class="sep"></span>
+  <button id="evalReset">Reset sim</button>
+  <button id="evalClose" style="margin-left:auto">Hide harness</button>
+</div>
+
+<script>
+"use strict";
+/* ================================================================
+   PART 1 — utilities, semantic constants, the living pipeline
+   ================================================================ */
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const pick=(r,arr)=>arr[Math.floor(r()*arr.length)];
+
+/* Semantic constants — fixed before pixels (round-1 drift: 0.55/0.60/0.70).
+   Confidence is ORDINAL: the judge's reported score ranks decisions; it is
+   never a calibrated probability. The gate pages on doubt. */
+const SEM = {
+  seed: 20261006,
+  judgeTimerMs: 3000,        // the race: judge must answer within this
+  judgeP50ms: 520, judgeP95ms: 2400,   // long tail: ~5% of answers lose the race
+  doubtBand: 0.09,           // score ± band overlapping the doubt region → PAGE
+  suppressBar: 0.60,         // internal gate bar; never displayed as a product constant
+  flapWindowMin: 10, stormRatePerMin: 55,
+  tickMs: 1600,
+};
+/* Stable rule identity — cited on every suppression, never decorative. */
+const RULES = {
+  'R-07': {name:'Duplicate of open problem', plain:'this is already being handled as an open problem'},
+  'R-11': {name:'Flap debounce', plain:'firing then clearing repeatedly — held until it settles'},
+  'R-14': {name:'Deploy churn', plain:'known noise from a recent deploy, watched not paged'},
+  'R-19': {name:'Self-clear', plain:'cleared on its own before a human was needed'},
+  'R-27': {name:'Low blast radius', plain:'narrow impact, ticketed for the owning team'},
+};
+const SERVICES = [
+  {id:'checkout', owner:'team-checkout'}, {id:'payments', owner:'team-payments'},
+  {id:'auth', owner:'team-identity'}, {id:'search', owner:'team-search'},
+  {id:'queue/workers', owner:'team-platform'}, {id:'db-primary', owner:'team-data'},
+  {id:'edge-cache', owner:'team-platform'}, {id:'billing', owner:'team-billing'},
+];
+const TEMPLATES = [
+  {id:'err-spike', title:'Error rate spike', sev:1, cost:p=>`Checkout failing for ~${8+Math.floor(p.r()*9)}% of requests. Every minute costs on the order of $${(900+p.r()*900|0).toLocaleString()} in abandoned carts.`},
+  {id:'lat-p99', title:'Latency p99 above SLO', sev:2, cost:()=>`p99 latency ${(1.2+Math.random()*0.8).toFixed(1)}s vs 800ms SLO. Slow pages convert worse; tail users are churning now.`},
+  {id:'db-failover', title:'Database failover in progress', sev:1, cost:()=>`Writes paused during failover. Every minute of extended failover risks order loss and replica lag that takes an hour to heal.`},
+  {id:'cpu-sat', title:'CPU saturation', sev:3, cost:()=>`Headroom gone on this pool. No user impact yet; the next traffic bump becomes user impact.`},
+  {id:'queue-backlog', title:'Queue backlog growing', sev:2, cost:()=>`Background jobs delayed ${(5+Math.floor(Math.random()*40))} min. Notifications, webhooks and reports arriving late.`},
+  {id:'cert-expiry', title:'Certificate expiring soon', sev:2, cost:()=>`TLS certificate expires in under 72h. If it lapses, every client connection fails at once.`},
+  {id:'deploy-churn', title:'Deploy churn', sev:3, rule:'R-14', cost:()=>`Elevated restarts during a deploy window. Expected noise; watched, not paged.`},
+  {id:'downstream-5xx', title:'Downstream 5xx from partner', sev:2, cost:()=>`Partner API returning 5xx. Retries holding; prolonged outage degrades dependent features.`},
+];
+
+/* ---------------- the store: one source of truth ---------------- */
+const S = {
+  t: 0,                       // sim seconds elapsed
+  problems: new Map(),        // id -> problem (open, racing, decided)
+  ledger: [],                 // suppression records (append-only)
+  timeline: [],               // global append-only event log
+  counts: {recv:0, corr:0, race:0, gate:0, fwd:0},
+  race: {judge:0, timer:0, lat:[]},
+  kill: {engaged:false, armed:false, flips:[], drillMs:null},
+  judgeDown: false, storm: null,
+  stormHist: [],              // signals/min history for the sparkline
+  arrivals: [],               // timestamps of problem arrivals (storm detection)
+  humanLog: [],
+  policy: {version:'v2026.10.06-r3', signers:['Aditya (platform)','Maya (sre-lead)'], expiresH:47, rules:5},
+  auth: [
+    {src:'datadog-webhook', state:'HMAC verified', key:'••••4821'},
+    {src:'prometheus', state:'HMAC verified', key:'••••7719'},
+    {src:'email-gateway', state:'no key — blocked', key:'—'},
+  ],
+  seq: 0,
+};
+const R = mulberry32(SEM.seed);   // the single seeded stream: every synthetic number traces here
+
+/* ---------------- the pipeline ---------------- */
+function fingerprint(svc, tpl){ return svc.id+'|'+tpl.id; }
+
+function newProblem(){
+  const svc = pick(R, SERVICES), tpl = pick(R, TEMPLATES);
+  const fp = fingerprint(svc, tpl);
+  S.counts.recv++;
+  // correlator: fold duplicates into the open problem
+  for(const p of S.problems.values()){
+    if(p.state!=='resolved' && p.fp===fp){
+      p.signals++; p.lastSeen=S.t; S.counts.corr++;
+      log('machine', `${p.id}: ${p.signals} signals folded (${RULES['R-07'].name})`);
+      return null;
+    }
+  }
+  // flap: same fingerprint cleared recently → debounce
+  const recent = [...S.problems.values()].find(p=>p.fp===fp && p.state==='resolved' && (S.t-p.resolvedAt)<SEM.flapWindowMin*60);
+  const id = 'P-'+(++S.seq);
+  const p = {
+    id, fp, svc, tpl, sev: tpl.sev, state:'racing', signals:1,
+    createdAt:S.t, lastSeen:S.t, ackedBy:null, owner:null, escalated:false,
+    cost: tpl.cost({r:R}), blast: blastFor(svc), changed: changedFor(R),
+    flap: !!recent,
+    judge:{latency:null, score:null, winner:null},
+    decision:null,
+  };
+  S.problems.set(id,p); S.counts.corr++;
+  S.arrivals.push(S.t);
+  race(p);
+  return p;
+}
+function blastFor(svc){
+  return pick(R,[
+    `${svc.id} only — single service`,
+    `${svc.id} + 2 dependents`,
+    `${3+Math.floor(R()*9)} services via shared dependency`,
+  ]);
+}
+function changedFor(r){
+  return pick(r,[
+    'Deploy #4821 shipped 18 min ago by team-platform',
+    'Config flag checkout.retry_budget flipped 42 min ago',
+    'No deploys in the last 6h — organic failure',
+    'Traffic +34% vs same hour yesterday (sale event)',
+  ]);
+}
+/* the race: judge vs timer. Late answers are powerless. */
+function race(p){
+  S.counts.race++;
+  const slow = R();
+  const latency = S.judgeDown ? Infinity
+    : Math.round(150 + Math.pow(slow,3.2) * 3400);   // p50 ~520ms, long tail: ~5% lose the race
+  if(latency <= SEM.judgeTimerMs){
+    p._resolveAt = S.t + latency/1000;
+    p._score = +(0.35 + R()*0.6).toFixed(2);          // ordinal score, not a probability
+  } else {
+    p._resolveAt = S.t + SEM.judgeTimerMs/1000;       // timer wins
+    p._score = null;
+  }
+}
+/* the gate: owns every decision. Doubt → page. */
+function gate(p){
+  S.counts.gate++;
+  const j = p.judge;
+  if(S.kill.engaged) return decide(p,'PAGE','kill-switch','Kill switch engaged — all suppression paused');
+  if(j.winner==='timer') return decide(p,'PAGE','timer-win','Judge too slow — the human gets paged, the late answer is powerless');
+  const s=j.score, band=SEM.doubtBand;
+  if(s - band < SEM.suppressBar)
+    return decide(p,'PAGE','doubt','Score inside the doubt band — paging on uncertainty');
+  if(p.flap) return decide(p,'SUPPRESS','R-11',RULES['R-11'].plain);
+  if(p.tpl.rule) return decide(p,'SUPPRESS',p.tpl.rule,RULES[p.tpl.rule].plain);
+  if(R()<0.45){ const rid=pick(R,['R-07','R-11','R-14','R-19']);
+    return decide(p,'SUPPRESS',rid,RULES[rid].plain); }
+  if(p.sev>=3 && R()<0.5) return decide(p,'TICKET','R-27',RULES['R-27'].plain);
+  return decide(p,'PAGE','no-rule','No suppression rule matched — paging');
+}
+function decide(p, disp, ruleId, plain){
+  p.state = disp==='PAGE' ? 'open' : 'decided';
+  p.decision = {
+    disp, ruleId, plain, at:S.t,
+    score:p.judge.score, winner:p.judge.winner, latencyMs:p.judge.latency,
+    frozen:{ signals:p.signals, sev:p.sev, owner:p.svc.owner,
+      evidence:['alert stream (seeded)', 'deploy feed', 'topology map'],
+      considered: consideredNotDone(p, disp) },
+  };
+  S.counts.fwd++;
+  if(disp==='PAGE'){
+    p.expiresAt = null;
+    log('machine', `${p.id}: PAGE — ${plain}`);
+  } else {
+    const mins = disp==='SUPPRESS' ? 15+Math.floor(R()*45) : 240;
+    p.expiresAt = S.t + mins*60;
+    S.ledger.push({pid:p.id, at:S.t, disp, ruleId, plain,
+      score:p.judge.score, sev:p.sev, owner:p.svc.owner,
+      expiresAt:p.expiresAt, appealed:null, title:p.tpl.title, svc:p.svc.id});
+    log('machine', `${p.id}: ${disp} via ${ruleId} — expires in ${mins}m`);
+  }
+  if(disp==='PAGE') S.humanLog.push({t:S.t, kind:'page', text:`${p.id} paged (${ruleId})`});
+}
+function consideredNotDone(p, disp){
+  // the nearest rejected alternative — provenance depth, not decoration
+  if(disp==='PAGE') return `Considered suppressing via R-19 self-clear: rejected — signals still arriving.`;
+  return `Considered paging (R-22 always-page SEV1/2): rejected — suppression rule ${p.decision?p.decision.ruleId:''} matched with fresh evidence.`;
+}
+function log(who, text){ S.timeline.push({t:S.t, who, text}); if(S.timeline.length>400) S.timeline.shift(); }
+
+/* self-clear + expiry re-evaluation: time passes, things resolve */
+function ageWorld(dt){
+  for(const p of S.problems.values()){
+    if(p.state==='racing' && S.t>=p._resolveAt){
+      const won = p._score!=null;
+      p.judge = won
+        ? {winner:'judge', latency:Math.round((p._resolveAt-p.createdAt)*1000), score:p._score}
+        : {winner:'timer', latency:SEM.judgeTimerMs, score:null};
+      if(won){ S.race.judge++; S.race.lat.push(p.judge.latency); }
+      else S.race.timer++;
+      gate(p);
+    }
+    if(p.state==='open' && !p.ackedBy && R()<dt*0.004) resolve(p,'self-clear');
+    if(p.state==='decided' && p.expiresAt && S.t>=p.expiresAt){
+      // suppression expired → re-evaluated, not silently dropped
+      const rec=S.ledger.find(l=>l.pid===p.id && !l.appealed);
+      log('machine', `${p.id}: suppression expired — re-evaluated as a live problem`);
+      p.state='open'; p.expiresAt=null; p.decision.disp='PAGE';
+      p.decision.plain='Suppression expired — re-evaluated, paging';
+    }
+  }
+  // storm detection: arrival rate over the last 60s
+  S.arrivals = S.arrivals.filter(t=>S.t-t<120);
+  const rate = S.arrivals.filter(t=>S.t-t<60).length;
+  S.stormHist.push(rate); if(S.stormHist.length>40) S.stormHist.shift();
+  const wasStorm = !!S.storm;
+  if(!S.storm && rate>=10){ S.storm={startedAt:S.t, peak:rate}; log('machine',`storm declared: ${rate} problems/min`); }
+  if(S.storm){
+    S.storm.peak=Math.max(S.storm.peak,rate);
+    if(rate<3 && S.t-S.storm.startedAt>120){ log('machine','storm ended: arrival rate back under 3/min'); S.storm=null; }
+  }
+}
+function resolve(p, how){ p.state='resolved'; p.resolvedAt=S.t; log('machine',`${p.id}: resolved (${how})`); }
+
+/* operator actions — ack needs a deliberate gesture; appeal annotates */
+function ackProblem(id, by){
+  const p=S.problems.get(id); if(!p||p.state!=='open') return;
+  p.ackedBy=by||'you'; p.ackAt=S.t;
+  S.humanLog.push({t:S.t,kind:'ack',text:`${id} acknowledged by ${p.ackedBy}`});
+  log('you', `${id}: acknowledged — escalation stopped`);
+}
+function ownProblem(id, by){
+  const p=S.problems.get(id); if(!p) return;
+  p.owner=by||'you';
+  S.humanLog.push({t:S.t,kind:'own',text:`${id} ownership → ${p.owner}`});
+  log('you', `${id}: ownership taken by ${p.owner}`);
+}
+function appealSuppression(pid, reason){
+  const rec=S.ledger.find(l=>l.pid===pid); if(!rec||rec.appealed) return;
+  rec.appealed={by:'you', at:S.t, reason:reason||'operator override'};
+  const p=S.problems.get(pid);
+  if(p){ p.state='open'; p.decision.disp='PAGE'; p.decision.plain='Appealed by operator — paging (original suppression preserved below)'; }
+  // the row STAYS in the ledger, marked appealed — history is append-only
+  S.humanLog.push({t:S.t,kind:'appeal',text:`${pid} suppression appealed — paged`});
+  log('you', `${pid}: appealed — "${rec.appealed.reason}". Original decision preserved in ledger.`);
+}
+/* ================================================================
+   PART 2 — the adapter: contracts, not coupling.
+   Today: LocalSim (seeded, in-file). The interface below is what the
+   real-Jev and platform-auth tracks implement — the UI never changes.
+   ================================================================ */
+const DataAdapter = {
+  name: 'local-sim',
+  version: '1.0',
+  /* lifecycle */
+  start(onEvent){ this._onEvent=onEvent; bootSim(); },
+  stop(){ clearInterval(this._iv); },
+  /* reads — every number the UI shows comes through here */
+  getPulse(){ return {...S.counts, dataAgeSec: 2}; },
+  getStateLine(){ return stateLineData(); },
+  getQueue(){ return queueData(); },
+  getQuietGroups(){ return quietGroups(); },
+  getProblem(id){ return S.problems.get(id); },
+  getLedger(filter){ return ledgerData(filter); },
+  getSafety(){ return safetyData(); },
+  getStorm(){ return S.storm ? {...S.storm, hist:[...S.stormHist]} : null; },
+  getJudgeDown(){ return S.judgeDown; },
+  /* writes — operator intent; the adapter owns side effects */
+  ack(id, by){ ackProblem(id, by); },
+  takeOwnership(id, by){ ownProblem(id, by); },
+  appeal(pid, reason){ appealSuppression(pid, reason); },
+  /* kill switch: two-step lives in the UI; the adapter executes.
+     FUTURE (real backend): POST /api/v1/safety/kill with the operator
+     bearer token; response carries the executing system's confirmation
+     including the measured propagation ms. */
+  engageKill(){ const t0=performance.now(); S.kill.engaged=true;
+    S.kill.flips.push({t:S.t, dir:'engage', ms:null});
+    const ms=performance.now()-t0; S.kill.flips.at(-1).ms=ms; S.kill.drillMs=ms;
+    log('you','kill switch ENGAGED — all suppression paused'); return ms; },
+  disengageKill(){ const t0=performance.now(); S.kill.engaged=false;
+    S.kill.flips.push({t:S.t, dir:'disengage', ms:null});
+    const ms=performance.now()-t0; S.kill.flips.at(-1).ms=ms;
+    log('you','kill switch disengaged — gating resumed'); return ms; },
+  /* evaluator-only; never in the operator's control plane */
+  eval:{ setScenario(sc){ setScenario(sc); }, setLoad(n){ LOAD.target=n; }, reset(){ resetSim(); } },
+};
+/* FUTURE ADAPTER: real-jev-sim
+   - judge(problem): POST /api/v1/sim/judge {problem} with operator token;
+     returns {score, latencyMs} — real Jev judgment, cost-capped server-side.
+   - spend meter: GET /api/v1/sim/spend → {usedUsd, capUsd}; UI freezes the
+     judge (timer-wins, fail-open) when the cap is hit — never silently.
+   - PagerDuty stays FakePD in sim: the forwarder mock is unchanged. */
+
+/* ---------------- the living loop ---------------- */
+const LOAD = {target: 40};
+let holdSorting = false, heldNew = 0;
+function bootSim(){
+  // pre-fill: the console opens mid-shift, not at t=0
+  for(let i=0;i<26;i++){ newProblem(); S.t += 20+R()*40; ageWorld(30); }
+  // rebase the clock to 0, preserving relative ages (expiry stays live)
+  const T=S.t; S.t=0;
+  for(const p of S.problems.values()){
+    p.createdAt-=T; if(p.expiresAt) p.expiresAt-=T; if(p.resolvedAt) p.resolvedAt-=T;
+  }
+  for(const l of S.ledger){ l.at-=T; if(l.expiresAt) l.expiresAt-=T; }
+  S.timeline.length=0; S.arrivals=[]; S.stormHist=[];
+  log('machine','console opened mid-shift — synthetic history warmed (seed 20261006)');
+  DataAdapter._iv = setInterval(tick, SEM.tickMs);
+  render();
+}
+function resetSim(){
+  S.problems.clear(); S.ledger.length=0; S.timeline.length=0; S.seq=0;
+  S.counts={recv:0,corr:0,race:0,gate:0,fwd:0}; S.race={judge:0,timer:0,lat:[]};
+  S.kill={engaged:false,armed:false,flips:[],drillMs:null}; S.judgeDown=false;
+  S.storm=null; S.stormHist=[]; S.arrivals=[]; S.humanLog=[];
+  bootSim(); toast('Simulation reset — fresh seeded world');
+}
+function setScenario(sc){
+  $$('#evalbar [data-sc]').forEach(b=>b.classList.toggle('on', b.dataset.sc===sc));
+  if(sc==='storm'){ // inject a real storm: 120 problems over ~40s
+    let n=0; const iv=setInterval(()=>{ for(let i=0;i<6;i++) newProblem();
+      if(++n>20){clearInterval(iv);} }, 2000);
+    toast('Storm injected — watch the console compensate');
+  }
+  if(sc==='judgedown'){ S.judgeDown=true; toast('AI judge unreachable — suppression paused, everything pages'); }
+  if(sc==='normal'){ S.judgeDown=false; }
+  render();
+}
+function tick(){
+  const dt = SEM.tickMs/1000; S.t += dt;
+  // arrivals: hold ~LOAD.target open problems, poisson-ish
+  const open = [...S.problems.values()].filter(p=>p.state==='open'||p.state==='racing').length;
+  const want = Math.max(0, LOAD.target - open);
+  const lam = want*dt/30;
+  let n = 0; if(R()<lam) n=1; if(R()<lam*lam) n=2;
+  for(let i=0;i<n;i++){ const p=newProblem(); if(p&&holdSorting) heldNew++; }
+  ageWorld(dt);
+  render();
+}
+
+/* ---------------- risk ordering (least-sure, most-severe first) ---------------- */
+function riskOf(p){
+  return (5-p.sev)*1000 + (p.ackedBy?0:400) + (p.state==='racing'?150:0)
+    + (p.judge.score!=null ? (1-p.judge.score)*100 : 200) - p.createdAt*0.01;
+}
+function queueData(){
+  const open=[...S.problems.values()].filter(p=>p.state==='open'||p.state==='racing');
+  open.sort((a,b)=>riskOf(b)-riskOf(a));
+  return {rows:open.slice(0,80), total:open.length};
+}
+function quietGroups(){
+  const by={};
+  for(const l of S.ledger){
+    const p=S.problems.get(l.pid); if(p && p.state!=='decided') continue;
+    (by[l.ruleId]=by[l.ruleId]||{ruleId:l.ruleId, n:0, scores:[]});
+    by[l.ruleId].n++; if(l.score!=null) by[l.ruleId].scores.push(l.score);
+  }
+  return Object.values(by).map(g=>({...g,
+    plain:RULES[g.ruleId]?RULES[g.ruleId].plain:'',
+    leastSure: g.scores.length? Math.min(...g.scores): null,
+  })).sort((a,b)=>b.n-a.n);
+}
+function ledgerData(filter){
+  // the ledger is history: every suppression ever, live or expired — append-only
+  const liveOf=l=>{const p=S.problems.get(l.pid);return !!(p&&p.state==='decided'&&!l.appealed);};
+  let rows=S.ledger.slice();
+  if(filter&&filter.ruleId) rows=rows.filter(l=>l.ruleId===filter.ruleId);
+  if(filter&&filter.mode==='expiring') rows=rows.filter(l=>liveOf(l)&&l.expiresAt-S.t<900);
+  if(filter&&filter.mode==='appealed') rows=rows.filter(l=>l.appealed);
+  // least-sure first: borderline calls deserve human eyes
+  rows.sort((a,b)=>(a.score??1)-(b.score??1));
+  return {rows:rows.slice(0,100).map(l=>Object.assign({live:liveOf(l)},l)), total:rows.length};
+}
+function stateLineData(){
+  const q=queueData(), open=q.total;
+  const quiet=S.ledger.filter(l=>{const p=S.problems.get(l.pid);return p&&p.state==='decided';}).length;
+  const unacked=q.rows.filter(p=>!p.ackedBy&&p.state==='open').length;
+  return {open, quiet, unacked};
+}
+function safetyData(){
+  const lat=S.race.lat.slice().sort((a,b)=>a-b);
+  return {
+    kill:S.kill, policy:S.policy, auth:S.auth, judgeDown:S.judgeDown,
+    race:{judge:S.race.judge, timer:S.race.timer,
+      p50: lat.length? lat[Math.floor(lat.length/2)] : null},
+    human:S.humanLog.slice(-12).reverse(),
+  };
+}
+function fmtAge(s){
+  if(s<60) return Math.floor(s)+'s';
+  if(s<3600) return Math.floor(s/60)+'m';
+  return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m';
+}
+/* ================================================================
+   PART 3 — renderers. Derived views compute from the same rows
+   as the detail (P10): summaries never disagree with the ledger.
+   ================================================================ */
+const rowEls = new Map();   // problem id -> row element (fixed geometry)
+let lastQueueIds = [];
+
+function render(){
+  renderHeader(); renderStateLine(); renderDegraded();
+  renderStorm(); renderQueue(); renderQuiet();
+  // soft re-renders preserve operator context: scroll + in-progress input
+  const savedReason = $('#appealReason') ? $('#appealReason').value : null;
+  const scrolls = {};
+  $$('.drawer.on .dbody').forEach(b=>scrolls[b.parentElement.id]=b.scrollTop);
+  if($('#detailDrawer').classList.contains('on') && detailId) renderDetail(detailId, true);
+  if($('#ledgerDrawer').classList.contains('on')) renderLedger(true);
+  if($('#safetyDrawer').classList.contains('on')) renderSafety(true);
+  if(savedReason && $('#appealReason')) $('#appealReason').value = savedReason;
+  for(const id in scrolls){ const b=$('#'+id+' .dbody'); if(b) b.scrollTop=scrolls[id]; }
+}
+function renderHeader(){
+  const c=S.counts;
+  $('#stRecv').textContent=c.recv; $('#stCorr').textContent=c.corr;
+  $('#stRace').textContent=c.race; $('#stGate').textContent=c.gate; $('#stFwd').textContent=c.fwd;
+  const r=S.race, tot=r.judge+r.timer;
+  $('#chipRace').innerHTML = `race <b class="num">${tot? r.judge+'/'+tot+' judge' : '—'}</b>`;
+  const kb=$('#killBtn');
+  kb.classList.toggle('armed', S.kill.engaged);
+  $('#killLabel').textContent = S.kill.engaged ? 'Suppression OFF' : 'Suppressing';
+  kb.setAttribute('aria-label', S.kill.engaged
+    ? 'Kill switch ENGAGED: suppression paused. Activate to resume.'
+    : 'Kill switch: suppression is on. Activate to stop all suppression.');
+  const badAuth=S.auth.some(a=>a.state.includes('blocked'));
+  const ca=$('#chipAuth');
+  ca.className='chip'+(badAuth?' warn':' ok');
+  ca.innerHTML=`auth <b>${S.auth.filter(a=>!a.state.includes('blocked')).length}/${S.auth.length} locked</b>`;
+  $('#pulseDot').style.background = S.judgeDown||S.kill.engaged ? 'var(--amber)' : 'var(--green)';
+}
+function renderStateLine(){
+  const d=stateLineData();
+  $('#stateLine').innerHTML =
+    `<strong class="num">${d.unacked} need you</strong><span class="sep">·</span>`+
+    `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
+    `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems never alerts</span>`+
+    (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
+    (S.judgeDown?`<span class="sep">·</span><strong style="color:var(--amber)">judge down — suppression paused</strong>`:'');
+  $('#needCount').textContent = d.open+' open';
+  $('#quietCount').textContent = d.quiet+' silenced';
+}
+function renderDegraded(){
+  const el=$('#degradedSlot');
+  if(S.judgeDown){
+    el.innerHTML=`<div style="background:var(--amber-soft);border-bottom:1px solid #E7D3AC;padding:9px 16px;font-size:13px;color:#7A4A08">`+
+      `<b>Degraded:</b> the AI judge is unreachable — <b>suppression is paused</b>. `+
+      `Every problem pages a human until the judge recovers. <button class="trace" data-why="degraded">What stopped?</button></div>`;
+  } else if(S.kill.engaged){
+    const wouldBe = S.ledger.filter(l=>{const p=S.problems.get(l.pid);return p&&p.state==='decided';}).length;
+    el.innerHTML=`<div style="background:var(--red-soft);border-bottom:1px solid var(--red-edge);padding:9px 16px;font-size:13px;color:var(--red)">`+
+      `<b>Kill switch engaged</b> — suppression paused. Problems that would have been silenced now page. `+
+      `Flipped <button class="trace num" data-why="killms">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'—'}</button> ago (measured, not asserted).</div>`;
+  } else el.innerHTML='';
+}
+
+/* storm card: compression, not a list. Grouped is not silenced. */
+function renderStorm(){
+  const slot=$('#stormSlot'), st=S.storm;
+  if(!st){ slot.innerHTML=''; return; }
+  const hist=S.stormHist, perMin = hist[hist.length-1]||0;
+  const trend = hist.length>3 ? (perMin - hist[hist.length-4]) : 0;
+  slot.innerHTML =
+   `<div class="storm" role="alert">
+      <div class="k">STORM — COMPRESSED VIEW</div>
+      <h3>Many signals, one problem family</h3>
+      <div class="big num">${st.peak}<span style="font-size:14px;font-weight:600;color:#B9B4A8"> problems/min at peak</span></div>
+      <div class="sub">Grouped by change id · group ends after 10 min of quiet · <b style="color:#F4F2EC">grouped is not silenced</b> — one human paged, the rest held with proof.</div>
+      <canvas id="stormCv" width="600" height="44" aria-label="arrival rate trend"></canvas>
+      <div class="sub num">now ${perMin}/min · trend ${trend>0?'▲ rising':trend<0?'▼ easing':'— steady'} · one page issued, rest held</div>
+      <div class="row">
+        <button class="btn" id="stormMitigate">Page the owning team once</button>
+        <button class="ghostbtn" id="stormProof">See what's held &amp; why</button>
+      </div>
+    </div>`;
+  const cv=$('#stormCv'), ctx=cv.getContext('2d'), h=hist;
+  ctx.strokeStyle='#F0B429'; ctx.lineWidth=2; ctx.beginPath();
+  h.forEach((v,i)=>{ const x=i/(h.length-1||1)*600, y=44-Math.min(1,v/60)*40;
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+  $('#stormMitigate').onclick=()=>{ S.humanLog.push({t:S.t,kind:'storm',text:'storm: owning team paged once'});
+    log('you','storm: single mitigation page issued'); toast('Owning team paged once — the storm stays compressed'); };
+  $('#stormProof').onclick=()=>openLedger({});
+}
+
+/* queue: keyed rows, in-place updates, gestural pause */
+function renderQueue(){
+  const q=$('#queue');
+  if(!holdSorting){
+    const d=queueData(), ids=d.rows.map(p=>p.id);
+    // remove resolved
+    for(const [id,el] of rowEls) if(!ids.includes(id)){ el.remove(); rowEls.delete(id); }
+    // create/update in risk order
+    d.rows.forEach(p=>{
+      let el=rowEls.get(p.id);
+      if(!el){ el=document.createElement('div'); el.className='qrow fresh'; el.dataset.id=p.id;
+        el.innerHTML=`<div class="edge"></div><div class="body"></div><div class="side"></div>`;
+        el.querySelector('.body').onclick=()=>openDetail(p.id);
+        rowEls.set(p.id,el); }
+      paintRow(el,p);
+      q.appendChild(el);   // reorder in place — position is navigation
+    });
+    lastQueueIds=ids;
+    const hidden=d.total-d.rows.length;
+    $('#queueFoot').innerHTML = hidden>0
+      ? `Showing the <b>${d.rows.length} riskiest</b> of <button class="trace num" data-why="open-n">${d.total}</button> open problems — `+
+        `the other ${hidden} are SEV3+ below the risk line. Refine, don't scroll: risk order is the navigation.`
+      : `${d.total} open problems — all shown, risk-ordered.`;
+    if(heldNew>0){ heldNew=0; $('#streamHold').classList.remove('on'); }
+  } else {
+    $('#heldCount').textContent=heldNew;
+  }
+}
+function paintRow(el,p){
+  const was=el.dataset.sig, sig=[p.state,p.ackedBy,p.signals,p.judge.winner,p.judge.score,p.sev].join('|');
+  el.classList.toggle('sev1',p.sev===1); el.classList.toggle('sev2',p.sev===2);
+  el.classList.toggle('acked',!!p.ackedBy);
+  if(was===sig) return; el.dataset.sig=sig;
+  const racing=p.state==='racing';
+  const mc = racing ? `<span style="color:var(--ink-3)">judging… race in progress</span>`
+    : p.decision ? `<b>${p.decision.disp}</b> · ${esc(p.decision.plain)}` : '';
+  const score = p.judge.score!=null
+    ? `<span class="ord"><span class="band${p.sev===1?' sev':''}"><i style="left:${Math.max(0,(p.judge.score-0.09)*100)}%;width:${18}%"></i></span><span class="v num">${p.judge.score.toFixed(2)}</span></span>`
+    : (p.judge.winner==='timer' ? `<span class="v">timer won</span>` : '');
+  el.querySelector('.body').innerHTML =
+    `<div class="title">${esc(p.tpl.title)} <span style="color:var(--ink-3);font-weight:500">— ${esc(p.svc.id)}</span></div>
+     <div class="meta"><span><span class="k">SEV</span>${p.sev}</span>
+     <span><span class="k">owner</span> ${esc(p.owner||p.svc.owner)}</span>
+     <span class="num"><span class="k">signals</span> ${p.signals}</span>
+     <span class="num"><span class="k">open</span> ${fmtAge(S.t-p.createdAt)}</span>
+     ${p.ackedBy?`<span><span class="k">acked by</span> ${esc(p.ackedBy)}</span>`:''}</div>`;
+  el.querySelector('.side').innerHTML =
+    `<div class="mcall">${mc}<br>${score}</div>
+     <div class="rowact">
+       ${p.state==='open'&&!p.ackedBy?`<button class="btn" data-act="ack">Ack</button>`:''}
+       ${p.state==='open'?`<button class="btn" data-act="own">Own</button>`:''}
+     </div>`;
+  el.querySelectorAll('[data-act]').forEach(b=>b.onclick=e=>{e.stopPropagation();actOn(p,b.dataset.act);});
+}
+function actOn(p, act){
+  if(act==='ack'){
+    // deliberate gesture: confirm inline (B-7 — no fat-finger ack at 3 AM)
+    if(!confirm(`Acknowledge ${p.id} — "${p.tpl.title}"?\n\nAck stops escalation. This is undoable for 60 seconds.`)) return;
+    DataAdapter.ack(p.id,'you'); toast(`${p.id} acknowledged — escalation stopped (undo in Safety log)`);
+  }
+  if(act==='own'){ DataAdapter.takeOwnership(p.id,'you'); toast(`${p.id} — you own it now`); }
+  render();
+}
+
+/* handled quietly: groups, never a raw list */
+function renderQuiet(){
+  const g=DataAdapter.getQuietGroups(), el=$('#quietGroups');
+  if(!g.length){ el.innerHTML=`<div class="empty">Nothing silenced yet.<br>The machine hasn't decided you could sleep on anything.</div>`; return; }
+  const max=Math.max(...g.map(x=>x.n));
+  el.innerHTML=g.map(x=>
+   `<button class="qgroup" data-rule="${x.ruleId}">
+      <span class="lbl">${esc(RULES[x.ruleId]?RULES[x.ruleId].name:x.ruleId)}</span>
+      <span class="n num">${x.n}</span>
+      <span class="why">${esc(x.plain)}${x.leastSure!=null?` · least sure: <span class="num">${x.leastSure.toFixed(2)}</span>`:''}</span>
+      <span class="bar"><i style="width:${Math.round(x.n/max*100)}%"></i></span>
+    </button>`).join('');
+  el.querySelectorAll('.qgroup').forEach(b=>b.onclick=()=>openLedger({ruleId:b.dataset.rule}));
+}
+/* ================================================================
+   PART 4 — drawers: detail, safety, ledger. Trace popovers.
+   ================================================================ */
+let detailId=null;
+function openDrawer(which){
+  $('#scrim').classList.add('on');
+  ['detailDrawer','safetyDrawer','ledgerDrawer'].forEach(id=>$('#'+id).classList.remove('on'));
+  $('#'+which).classList.add('on');
+}
+function closeDrawers(){
+  $('#scrim').classList.remove('on');
+  $$('.drawer').forEach(d=>d.classList.remove('on')); detailId=null;
+}
+$('#scrim').onclick=closeDrawers;
+
+/* ---- detail: REQ-5 order — what broke → primary action → evidence ---- */
+function openDetail(id){ detailId=id; renderDetail(id); openDrawer('detailDrawer'); }
+function renderDetail(id, soft){
+  const p=S.problems.get(id); if(!p) return;
+  const d=$('#detailDrawer'), dec=p.decision;
+  const racing=p.state==='racing';
+  d.innerHTML=
+  `<header><div class="tt">
+     <h3>${esc(p.tpl.title)}</h3>
+     <div class="sub num">${p.id} · SEV${p.sev} · ${esc(p.owner||p.svc.owner)} · open ${fmtAge(S.t-p.createdAt)} · ${p.signals} signals</div>
+   </div><button class="x" onclick="closeDrawers()">Close</button></header>
+   <div class="dbody">
+    <div class="cost"><div class="k">COST OF INACTION</div>${esc(p.cost)}</div>
+    <div class="dactions">
+      ${p.state==='open'&&!p.ackedBy?`<button class="btn primary" id="dAck">Acknowledge — stop escalation</button>`:''}
+      ${p.state==='open'?`<button class="btn" id="dOwn">Take ownership</button>
+      <button class="btn" id="dEsc">Escalate</button>`:''}
+    </div>
+    <div class="dsec"><h4>MACHINE'S CALL</h4>
+      ${racing?`<p style="font-size:13px;color:var(--ink-2)">The race is running: the judge and the ${SEM.judgeTimerMs/1000}s timer. A late answer is powerless.</p>`
+      :`<dl class="kv">
+        <dt>Decision</dt><dd><b>${dec.disp}</b> — ${esc(dec.plain)}</dd>
+        <dt>Judge score</dt><dd>${dec.score!=null
+          ? `<span class="num">${dec.score.toFixed(2)}</span> <span style="color:var(--ink-3)">±${SEM.doubtBand} — ordinal: ranks decisions, not a probability</span>`
+          : `— <span style="color:var(--ink-3)">timer won; no score was used</span>`}</dd>
+        <dt>Considered, not done</dt><dd style="color:var(--ink-2)">${esc(dec.frozen.considered)}</dd>
+        <dt>Rule</dt><dd style="font-family:var(--mono);font-size:12px">${dec.ruleId}</dd>
+      </dl>`}
+    </div>
+    <div class="dsec"><h4>CONTEXT — PRE-ATTACHED, NOT LINKED</h4>
+      <dl class="kv">
+        <dt>Blast radius</dt><dd>${esc(p.blast)}</dd>
+        <dt>What changed</dt><dd>${esc(p.changed)}</dd>
+        <dt>Service owner</dt><dd>${esc(p.svc.owner)}</dd>
+      </dl>
+    </div>
+    ${dec?`<div class="dsec"><h4>WHAT THE MACHINE KNEW — FROZEN AT DECISION</h4>
+      <div class="frozen"><div class="flabel">IMMUTABLE RECORD</div>
+      <dl class="kv">
+        <dt>Decided at</dt><dd class="num">${fmtAge(S.t-dec.at)} ago</dd>
+        <dt>Signals seen</dt><dd class="num">${dec.frozen.signals}</dd>
+        <dt>Evidence</dt><dd>${dec.frozen.evidence.map(esc).join(' · ')}</dd>
+        <dt>Evidence age</dt><dd class="num">fresh at decision (stale evidence can never justify silence)</dd>
+      </dl></div>
+      <div class="live-log" style="margin-top:10px"><div class="flabel" style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--ink-2);margin-bottom:6px">SINCE THEN — LIVE</div>
+      <ul class="tl">${S.timeline.filter(t=>t.text.includes(p.id)).slice(-8).map(t=>
+        `<li><span class="when num">${fmtAge(S.t-t.t)} ago</span><span><span class="who">${esc(t.who)}:</span> ${esc(t.text)}</span></li>`).join('')||'<li>No later events.</li>'}</ul></div>
+    </div>`:''}
+    ${p.state==='decided'?`<div class="dsec"><h4>APPEAL — PAGE ME ANYWAY</h4>
+      <p style="font-size:12.5px;color:var(--ink-2)">Overriding pages a human now. The suppression stays in the ledger, marked appealed — history is append-only.</p>
+      <textarea class="reason" id="appealReason" placeholder="Why override? (optional, recorded)"></textarea>
+      <div class="dactions"><button class="btn danger" id="dAppeal">Page me anyway</button></div>
+    </div>`:''}
+    <div class="dsec"><h4>RECORD</h4>
+      <div class="dactions"><button class="btn" id="dExport">Export timeline for postmortem</button></div>
+    </div>
+   </div>`;
+  if($('#dAck')) $('#dAck').onclick=()=>{actOn(p,'ack');renderDetail(id,true);};
+  if($('#dOwn')) $('#dOwn').onclick=()=>{actOn(p,'own');renderDetail(id,true);};
+  if($('#dEsc')) $('#dEsc').onclick=()=>{p.escalated=true;log('you',`${p.id}: escalated`);S.humanLog.push({t:S.t,kind:'esc',text:`${p.id} escalated`});toast('Escalated');render();};
+  if($('#dAppeal')) $('#dAppeal').onclick=()=>{
+    DataAdapter.appeal(p.id,$('#appealReason').value); toast('Paged — suppression preserved in the ledger, marked appealed'); render(); };
+  if($('#dExport')) $('#dExport').onclick=()=>{
+    const txt=S.timeline.filter(t=>t.text.includes(p.id)).map(t=>`[${fmtAge(S.t-t.t)} ago] ${t.who}: ${t.text}`).join('\n');
+    navigator.clipboard?.writeText(`${p.id} — ${p.tpl.title}\n${txt}`).then(()=>toast('Timeline copied for postmortem'));
+  };
+}
+
+/* ---- safety: the machinery, visible and first-class ---- */
+function openSafety(){ renderSafety(); openDrawer('safetyDrawer'); }
+function renderSafety(soft){
+  const s=safetyData(), d=$('#safetyDrawer');
+  d.innerHTML=
+  `<header><div class="tt"><h3>Safety machinery</h3>
+    <div class="sub">Visible, inspectable, first-class. Never a settings page.</div></div>
+    <button class="x" onclick="closeDrawers()">Close</button></header>
+   <div class="dbody">
+    <div class="srow"><h5>Kill switch ${S.kill.engaged?'<span class="pillbad">ENGAGED</span>':'<span class="pillok">ARMED</span>'}</h5>
+      <p>One control that stops <b>all</b> suppression. Everything pages until it is turned off.</p>
+      <div class="contract"><b>The contract, in plain language:</b> engaging does not page everyone at once — it stops the machine from staying silent. In-flight races resolve as pages (fail-open). Re-arming resumes gating. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
+      <div class="dactions"><button class="btn ${S.kill.engaged?'':'danger'}" id="sKill">${S.kill.armed?'Confirm: stop all suppression':S.kill.engaged?'Resume suppression':'Engage kill switch'}</button></div>
+    </div>
+    <div class="srow"><h5>Policy governance</h5>
+      <dl class="kv"><dt>Live version</dt><dd style="font-family:var(--mono);font-size:12px">${s.policy.version}</dd>
+      <dt>Signed by</dt><dd>${s.policy.signers.map(esc).join(' · ')} <span class="pillok">2-of-2</span></dd>
+      <dt>Expires in</dt><dd class="num">${s.policy.expiresH}h — then the gate refuses to run on it</dd>
+      <dt>Rules</dt><dd class="num">${s.policy.rules} suppression rules, stable IDs</dd></dl>
+      <div class="proof">The gate runs only on the signed version. An unsigned policy is a paging policy.</div>
+    </div>
+    <div class="srow"><h5>Auth status</h5>
+      ${s.auth.map(a=>`<p style="margin:4px 0"><b>${esc(a.src)}</b> — ${a.state.includes('blocked')?'<span class="pillbad">'+esc(a.state)+'</span>':'<span class="pillok">'+esc(a.state)+'</span>'} <span class="num" style="color:var(--ink-3)">${esc(a.key)}</span></p>`).join('')}
+      <div class="proof">Key values never shown — last four only. The email gateway has no key, so it is blocked, not trusted.</div>
+    </div>
+    <div class="srow"><h5>The race — judge vs timer</h5>
+      <dl class="kv"><dt>Judge answered</dt><dd class="num">${s.race.judge}</dd>
+      <dt>Timer won</dt><dd class="num">${s.race.timer} — each one paged a human</dd>
+      <dt>Judge p50</dt><dd class="num">${s.race.p50!=null?s.race.p50+' ms':'—'}</dd></dl>
+      <div class="proof">A late answer is powerless: when the timer wins, the judge's score is never used.</div>
+    </div>
+    ${s.judgeDown?`<div class="srow"><h5><span class="pillbad">DEGRADED</span> — what stopped</h5>
+      <p>The AI judge is unreachable. <b>Suppression is paused</b>: every problem pages. The machine stopped deciding you could sleep — it did not stop watching.</p></div>`:''}
+    <div class="srow"><h5>Human actions — this session</h5>
+      ${s.human.length?`<ul class="tl">${s.human.map(h=>`<li><span class="when num">${fmtAge(S.t-h.t)} ago</span><span>${esc(h.text)}</span></li>`).join('')}</ul>`
+      :'<p>No human overrides yet this session.</p>'}
+      <div class="proof">Accountability runs both ways: the machine's decisions and your overrides share one record.</div>
+    </div>
+   </div>`;
+  $('#sKill').onclick=()=>{
+    if(!S.kill.engaged && !S.kill.armed){
+      S.kill.armed=true; renderSafety(true);
+      toast('Kill switch armed — press once more to stop all suppression');
+      setTimeout(()=>{ if(S.kill.armed&&!S.kill.engaged){S.kill.armed=false;render();} },8000);
+      return;
+    }
+    if(!S.kill.engaged && S.kill.armed){
+      S.kill.armed=false;
+      const ms=DataAdapter.engageKill(); toast(`Suppression paused in ${ms.toFixed(1)} ms — measured`);
+    } else {
+      if(!confirm('Resume suppression?\n\nThe machine will decide silence again, with proof.')) return;
+      const ms=DataAdapter.disengageKill(); toast(`Gating resumed (${ms.toFixed(1)} ms)`);
+    }
+    render();
+  };
+}
+$('#killBtn').onclick=()=>openSafety();
+$('#chipPolicy').onclick=()=>openSafety();
+$('#chipAuth').onclick=()=>openSafety();
+$('#chipRace').onclick=()=>openSafety();
+
+/* ---- ledger: grouped silence, risk-first, jump — never pagination ---- */
+let ledgerFilter={};
+function openLedger(f){ ledgerFilter=f||{}; renderLedger(); openDrawer('ledgerDrawer'); }
+function renderLedger(soft){
+  const d=DataAdapter.getLedger(ledgerFilter), el=$('#ledgerDrawer');
+  const title=ledgerFilter.ruleId?`Silenced — ${RULES[ledgerFilter.ruleId].name}`:'Proof ledger';
+  el.innerHTML=
+  `<header><div class="tt"><h3>${esc(title)}</h3>
+    <div class="sub num">${d.total} suppressions · least-sure first — borderline calls deserve human eyes</div></div>
+    <button class="x" onclick="closeDrawers()">Close</button></header>
+   <div class="dbody">
+    <div class="dactions" style="margin-top:0">
+      <button class="btn" data-j="sure">Jump to least sure</button>
+      <button class="btn" data-j="exp">Expiring within 15 min</button>
+      <button class="btn" data-j="app">Appealed</button>
+      <button class="btn ghost" data-j="all">Clear</button>
+    </div>
+    ${d.rows.map(l=>`
+    <div class="srow">
+      <h5>${esc(l.title)} <span style="color:var(--ink-3);font-weight:500">— ${esc(l.svc)}</span>
+        ${l.appealed?'<span class="pillbad">APPEALED — paged</span>':l.live?'<span class="pillok">LIVE</span>':'<span class="pillok" style="background:var(--quiet-soft);color:var(--quiet)">EXPIRED — re-evaluated</span>'}</h5>
+      <dl class="kv">
+        <dt>Decision</dt><dd><b>${l.disp}</b> via <span style="font-family:var(--mono);font-size:12px">${l.ruleId}</span> — ${esc(l.plain)}</dd>
+        <dt>Judge score</dt><dd>${l.score!=null?`<span class="num">${l.score.toFixed(2)}</span> <span style="color:var(--ink-3)">ordinal, not a probability</span>`:'timer won — no score'}</dd>
+        <dt>Expires</dt><dd class="num">${fmtAge(l.expiresAt-S.t)} — then re-evaluated, never silently dropped</dd>
+        ${l.appealed?`<dt>Appeal</dt><dd>${esc(l.appealed.by)}, ${fmtAge(S.t-l.appealed.at)} ago — "${esc(l.appealed.reason)}". Original decision above, preserved.</dd>`:''}
+      </dl>
+      ${!l.appealed?`<div class="dactions"><button class="btn" data-appeal="${l.pid}">Page me anyway</button>
+        <button class="btn ghost" data-open="${l.pid}">Open problem</button></div>`:''}
+    </div>`).join('')||'<div class="empty">No suppressions match.</div>'}
+    ${d.total>d.rows.length?`<p class="quiet-note num">${d.total-d.rows.length} more below the risk line — use the jumps, not scrolling.</p>`:''}
+   </div>`;
+  el.querySelectorAll('[data-j]').forEach(b=>b.onclick=()=>{
+    const j=b.dataset.j;
+    ledgerFilter = j==='all'?{}: j==='sure'?{ruleId:ledgerFilter.ruleId} : j==='exp'?{mode:'expiring'} : {mode:'appealed'};
+    if(j==='sure') ledgerFilter={ruleId:ledgerFilter.ruleId};
+    renderLedger(true);
+  });
+  el.querySelectorAll('[data-appeal]').forEach(b=>b.onclick=()=>{
+    const r=prompt('Why override? (recorded)');
+    DataAdapter.appeal(b.dataset.appeal, r||undefined); toast('Paged — suppression preserved, marked appealed'); render();
+  });
+  el.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openDetail(b.dataset.open));
+}
+
+/* ---- trace popovers: every number answers "why this number?" ---- */
+const WHY={
+  sim:['Why these numbers?','Every number on this screen is produced by a seeded synthetic pipeline running locally in this file — services, incidents, a correlator, a judge-vs-timer race, and a deterministic gate.','source: mulberry32 stream · seed 20261006 · no network, no backend'],
+  recv:['Alerts in','Raw signals received from the (simulated) monitoring tools this session.','source: sim generator'],
+  corr:['Grouped','Problems after the correlator folded duplicates and flaps. The unit of attention is the problem, never the alert.','source: correlator (fingerprint = service + incident)'],
+  race:['Raced','Problems that ran the judge-vs-timer race. A late judge answer is powerless.','source: race harness'],
+  gate:['Decided','Final page-or-suppress decisions owned by the deterministic gate. Doubt pages.','source: gate'],
+  fwd:['Sent','Decisions delivered: pages to the (mock) pager, suppressions to the proof ledger.','source: forwarder mock'],
+  'quiet-n':['Handled quietly','Suppressions currently live, grouped by rule. Open-ended silences are forbidden — each expires.','source: proof ledger'],
+  'open-n':['Open problems','Problems needing a human, counted as problems never alerts.','source: queue'],
+  quiet:['Why grouped?','10,000 silences are never listed raw. They are counted by reason; the ledger is one click away, least-sure first.','source: ledger aggregation'],
+  degraded:['What stopped?','The AI judge is unreachable. Suppression paused: every problem pages. The machine stopped deciding silence — it did not stop watching.','source: health monitor'],
+  killms:['Measured, not asserted','Milliseconds from flip to forwarder halt, measured with performance.now() on this machine, this session.','source: kill-switch harness'],
+};
+const pop=$('#pop');
+document.addEventListener('click',e=>{
+  const t=e.target.closest('.trace');
+  if(t){ e.stopPropagation();
+    const w=WHY[t.dataset.why]; if(!w) return;
+    pop.innerHTML=`<div class="t">${esc(w[0])}</div>${esc(w[1])}<div class="src">${esc(w[2])}</div>`;
+    pop.classList.add('on');
+    const r=t.getBoundingClientRect();
+    pop.style.left=Math.min(innerWidth-360,Math.max(8,r.left-20))+'px';
+    pop.style.top=(r.bottom+8)+'px';
+    return;
+  }
+  pop.classList.remove('on');
+});
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('on');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),2600); }
+
+/* stream hold: hover the queue to borrow a still frame (P7) */
+$('#queue').addEventListener('mouseenter',()=>{ holdSorting=true; $('#streamHold').classList.add('on'); });
+$('#queue').addEventListener('mouseleave',()=>{ holdSorting=false; $('#streamHold').classList.remove('on'); heldNew=0; render(); });
+$('#releaseStream').onclick=()=>{ holdSorting=false; $('#streamHold').classList.remove('on'); heldNew=0; render(); };
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){ closeDrawers(); pop.classList.remove('on'); }
+  if(e.key==='e'&&e.shiftKey){ $('#evalbar').classList.toggle('on'); }
+});
+/* ================================================================
+   PART 5 — evaluator wiring, boot
+   ================================================================ */
+$$('#evalbar [data-sc]').forEach(b=>b.onclick=()=>DataAdapter.eval.setScenario(b.dataset.sc));
+$$('#evalbar [data-load]').forEach(b=>b.onclick=()=>{
+  $$('#evalbar [data-load]').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  DataAdapter.eval.setLoad(+b.dataset.load); toast(`Load target: ${b.dataset.load} open problems — watch the queue compensate`);
+});
+$('#evalReset').onclick=()=>DataAdapter.eval.reset();
+$('#evalClose').onclick=()=>$('#evalbar').classList.remove('on');
+
+/* boot: press Shift+E anywhere to reveal the evaluator harness */
+DataAdapter.start();
+</script>
+</body>
+</html>
