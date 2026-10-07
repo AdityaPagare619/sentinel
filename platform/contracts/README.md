@@ -66,7 +66,7 @@ carries the `contract_version` it was generated against.
 | GET | `/api/decisions` | Decision river feed (newest first) | `limit` (1–500, default 50), `since_id` |
 | GET | `/api/decisions` | Audit explorer search | `fingerprint`, `team`, `action`, `from`, `to` |
 | GET | `/api/decision/<id>` | Full decision record | — |
-| GET | `/api/calibration` | Reliability bins, ECE, coverage@τ, flip rate | `team` |
+| GET | `/api/calibration` | Ordinal rank-fidelity (AUC), rank deciles, coverage@τ, flip rate | `team` |
 | POST | `/api/simulate` | Threshold projection (pure recompute) | body: `thresholds`, `cost_model`, `dataset_version` |
 | GET | `/api/analytics/noise` | Top checks, team load, suppression breakdown | `window` (`24h` default) |
 | GET | `/api/analytics/flips` | Flip-audit records (same input, different call) | `window` (`7d` default) |

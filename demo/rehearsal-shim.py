@@ -219,15 +219,21 @@ class Handler(BaseHTTPRequestHandler):
                 }))
             elif u.path == "/api/calibration":
                 # Honest provisional: a synthetic storm joins no outcome
-                # labels, so ECE/coverage cannot be computed. n=0 ON the
+                # labels, so rank-fidelity cannot be computed. n=0 ON the
                 # card, per the denominator contract.
                 self._send(200, envelope({
                     "status": "provisional",
                     "n_labeled": 0,
                     "note": ("no outcome labels joined in this synthetic "
-                             "storm — calibration requires the Ledger "
+                             "storm — rank-fidelity requires the Ledger "
                              "outcomes join over real incident history"),
-                    "bins": [], "ece": None, "coverage": {},
+                    "rank_fidelity": {"auc": None, "auc_ci95": [None, None],
+                                      "n": 0},
+                    "deciles": [], "coverage": {},
+                    "interpretation": {
+                        "p1_semantics": "ordinal",
+                        "statement": ("p1 is an ORDINAL severity score, "
+                                      "never a probability.")},
                 }))
             elif u.path == "/api/stream":
                 self._sse(since_id=q.get("since_id", [None])[0])

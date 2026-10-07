@@ -120,9 +120,13 @@ paths:
   /api/calibration:
     get:
       tags: [calibration]
-      summary: Per-team calibration report
+      summary: Per-team judgment rank-fidelity report
       description: |
-        Reliability bins (predicted vs observed), ECE with N and 95% CI,
+        Ordinality law (AC-8c): p1 is an ORDINAL severity score in [0,1],
+        never a probability. This endpoint therefore measures only
+        RANK-ORDER fidelity — AUC of p1 ranks vs SEV1/2 outcomes with a
+        seeded 95% CI — plus equal-count rank deciles with descriptive
+        observed outcome fractions (never predicted probabilities),
         coverage@τ for τ ∈ {0.7, 0.8, 0.9}, and the flip rate. Joins
         decisions ⨝ outcomes; unlabeled decisions are excluded and the
         denominator is always reported (Oracle's law: no chart without a
@@ -419,30 +423,37 @@ components:
                 received_at: {type: string, format: date-time}
                 created_at: {type: string, format: date-time}
 
-    CalibrationBin:
+    RankDecile:
       type: object
-      required: [bin, predicted_lo, predicted_hi, n, observed_rate]
+      description: Equal-count rank group over ordinal p1 — ranks only, never probabilities
+      required: [decile, rank_lo, rank_hi, n, observed_sev12_rate]
       properties:
-        bin: {type: integer, description: 1-based bin index}
-        predicted_lo: {type: number}
-        predicted_hi: {type: number}
-        n: {type: integer, description: Decisions in this bin (denominator)}
-        observed_rate: {type: number, description: Fraction that became SEV1/2}
+        decile: {type: integer, description: 1-based decile index (1 = lowest p1 ranks)}
+        rank_lo: {type: number, description: Lower rank percentile of this group}
+        rank_hi: {type: number, description: Upper rank percentile of this group}
+        n: {type: integer, description: Decisions in this decile (denominator)}
+        observed_sev12_rate: {type: number, description: Descriptive fraction that became SEV1/2 — an outcome fact, not a predicted probability}
         ci95_lo: {type: number}
         ci95_hi: {type: number}
 
     CalibrationReport:
       type: object
-      required: [team, window, dataset_version, n_decisions, n_labeled, bins, ece, coverage]
+      description: Ordinal rank-fidelity report. p1 is an ordinal severity score, never a probability.
+      required: [team, window, dataset_version, n_decisions, n_labeled, rank_fidelity, deciles, coverage, interpretation]
       properties:
         team: {type: string, description: Team name or "all"}
         window: {type: string, example: 7d}
         dataset_version: {type: string, description: Label set version (e.g. labels-v3)}
         n_decisions: {type: integer}
         n_labeled: {type: integer, description: Decisions with an outcome label — every chart's denominator}
-        bins: {type: array, items: {$ref: '#/components/schemas/CalibrationBin'}}
-        ece: {type: number, description: Expected calibration error}
-        ece_ci95: {type: array, items: {type: number}, minItems: 2, maxItems: 2}
+        rank_fidelity:
+          type: object
+          description: Rank-order agreement between p1 ranks and SEV1/2 outcomes (Mann-Whitney U AUC; 0.5 = chance, 1.0 = perfect ranking). Order only — never treats p1 as a probability.
+          properties:
+            auc: {type: number, nullable: true, description: Rank concordance; null when unscorable (no positives or no negatives)}
+            auc_ci95: {type: array, description: Seeded bootstrap 95% CI (replay-stable); nulls when unscorable}
+            n: {type: integer, description: Items carrying a p1 score}
+        deciles: {type: array, items: {$ref: '#/components/schemas/RankDecile'}}
         coverage:
           type: object
           description: Fraction of labeled decisions with Q3 confidence ≥ τ
@@ -452,6 +463,12 @@ components:
             '0.9': {type: number}
         flip_rate: {type: number, description: Fraction of repeated inputs that flipped}
         flips_n: {type: integer}
+        interpretation:
+          type: object
+          description: Explicit ordinality statement every consumer must honor
+          properties:
+            p1_semantics: {type: string, example: ordinal}
+            statement: {type: string}
 
     ThresholdSet:
       type: object

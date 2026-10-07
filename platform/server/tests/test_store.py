@@ -148,18 +148,28 @@ class TestCalibration(unittest.TestCase):
     def test_report_shape_and_denominators(self):
         rep = self.store.calibration()
         for key in ("team", "window", "dataset_version", "n_decisions",
-                    "n_labeled", "bins", "ece", "coverage"):
+                    "n_labeled", "rank_fidelity", "deciles", "coverage",
+                    "interpretation"):
             self.assertIn(key, rep)
-        self.assertEqual(len(rep["bins"]), 10)
+        self.assertEqual(len(rep["deciles"]), 10)
         self.assertEqual(rep["team"], "all")
         self.assertGreater(rep["n_labeled"], 0)
         self.assertLessEqual(rep["n_labeled"], rep["n_decisions"])
-        self.assertGreaterEqual(rep["ece"], 0.0)
-        self.assertLessEqual(rep["ece"], 1.0)
-        self.assertEqual(set(rep["coverage"]), {"0.7", "0.8", "0.9"})
-        lo, hi = rep["ece_ci95"]
-        self.assertLessEqual(lo, rep["ece"] + 1e-9)
-        self.assertGreaterEqual(hi, rep["ece"] - 1e-9)
+        rf = rep["rank_fidelity"]
+        self.assertIsNotNone(rf["auc"])
+        self.assertGreaterEqual(rf["auc"], 0.0)
+        self.assertLessEqual(rf["auc"], 1.0)
+        self.assertEqual(rf["n"], sum(d["n"] for d in rep["deciles"]))
+        lo, hi = rf["auc_ci95"]
+        self.assertLessEqual(lo, rf["auc"] + 1e-9)
+        self.assertGreaterEqual(hi, rf["auc"] - 1e-9)
+        for d in rep["deciles"]:
+            for k in ("decile", "rank_lo", "rank_hi", "n",
+                      "observed_sev12_rate", "ci95_lo", "ci95_hi"):
+                self.assertIn(k, d)
+        self.assertEqual(rep["interpretation"]["p1_semantics"], "ordinal")
+        self.assertNotIn("ece", rep)
+        self.assertNotIn("bins", rep)
 
     def test_team_scope(self):
         rep = self.store.calibration(team="data")
@@ -176,7 +186,9 @@ class TestCalibration(unittest.TestCase):
         conn.close()
         rep = ReadStore(tmp.name).calibration()
         self.assertEqual(rep["n_labeled"], 0)
-        self.assertEqual(rep["ece"], 0.0)
+        self.assertIsNone(rep["rank_fidelity"]["auc"])
+        self.assertEqual(rep["rank_fidelity"]["n"], 0)
+        self.assertEqual(len(rep["deciles"]), 10)
 
 
 class TestNoise(unittest.TestCase):
