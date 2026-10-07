@@ -63,6 +63,7 @@ from sentinel.integrations import resolve_jev_key  # noqa: E402
 from sentinel.models import Alert, Thresholds  # noqa: E402
 from sentinel.quantized import AllowlistEntry, Attestation  # noqa: E402
 from sentinel.receiver import Pipeline, ReceiverConfig  # noqa: E402
+from sentinel.safety import KillSwitch  # noqa: E402
 from sentinel.state import build_state, input_sha256  # noqa: E402
 
 SCENARIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -960,15 +961,27 @@ def build_sim_pipeline(manifest: dict, judge, fakepd_url: str,
                 freshness_monitor=mon, pinned_model=pinned,
                 clock=vclock.as_datetime)
 
+    # Contract C3 (RFC engine-kill-coverage): the sim exercises the EXACT
+    # kill-wired forwarder production uses — topological fidelity is the
+    # sim's purpose. The sim's switch is in-process (no state file: batch
+    # runs have no cross-process operator); engaged absorbs every send to
+    # the FakePD sink, re-arm resumes. The sink stays loopback-only —
+    # kill wiring changes nothing about sim PD safety (asserts above).
+    sim_kill = KillSwitch(log=audit.log)
     forwarder = Forwarder(
         pd_events_url=fakepd_url, timeout_s=5.0,
         default_routing_key=FAKE_PD_KEY,
         # Takes precedence over the user store AND the env: even a real
         # PD_ROUTING_KEY in the operator's environment cannot reach a sim.
-        key_resolver=lambda: (FAKE_PD_KEY, "sim"))
+        key_resolver=lambda: (FAKE_PD_KEY, "sim"),
+        kill_switch=sim_kill)
 
     pipeline = Pipeline(correlator, gate, forwarder, audit,
                         config=ReceiverConfig(), policy=None)
+    # The receiver topology exposes pipeline.kill_switch as the flip
+    # handle (drills, operator CLI); the sim pipeline does the same so
+    # kill-behavior tests run against the identical wiring.
+    pipeline.kill_switch = sim_kill
     return pipeline, vclock, {"judge": judge_name, "model": pinned,
                               "noise_fps": len(noise_fps)}
 

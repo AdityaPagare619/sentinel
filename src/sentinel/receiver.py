@@ -239,6 +239,11 @@ class Pipeline:
         # forwarder); None for ad-hoc constructions. The forwarder carries
         # the check — this is the handle the drill/operator flips.
         self.kill_switch = None
+        # Metrics lock (audit engine P3, RFC engine-metrics-lock): the
+        # ThreadingHTTPServer handler threads share this Pipeline — every
+        # metrics[...] += is a racy read-modify-write (same bug class as
+        # the fail-open ladder race 3fac416). RLock, leaf-lock discipline.
+        self._metrics_lock = threading.RLock()
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -269,6 +274,17 @@ class Pipeline:
         self.forward_outcomes: collections.deque = collections.deque(maxlen=1000)
         self._health: HealthMonitor | None = None
         self._health_lock = threading.Lock()
+
+    def _metric_inc(self, key: str, n: int = 1) -> None:
+        """Thread-safe counter bump. ALL Pipeline.metrics writes go through
+        here (RFC engine-metrics-lock)."""
+        with self._metrics_lock:
+            self.metrics[key] = self.metrics.get(key, 0) + n
+
+    def _metrics_snapshot(self) -> dict:
+        """Thread-safe copy for readers (ops/health, drills). No torn reads."""
+        with self._metrics_lock:
+            return dict(self.metrics)
 
     # ------------------------------------------------------------------ health
 
@@ -301,7 +317,7 @@ class Pipeline:
         without headers a claim cannot be authenticated, and an
         unauthenticated claim never closes an episode.
         """
-        self.metrics["received"] += 1
+        self._metric_inc("received")
         try:
             data = json.loads(body.decode("utf-8"))
             if not isinstance(data, dict):
@@ -323,7 +339,7 @@ class Pipeline:
                 return _pd_ok(data.get("dedup_key") or _body_key(body))
             alert = _normalize_pd(data)
         except Unparseable:
-            self.metrics["unparseable"] += 1
+            self._metric_inc("unparseable")
             self.note_forward(self.forwarder.forward_raw(
                 body, alert_id="unparseable", dedup_key=_body_key(body)))
             return _pd_ok(_body_key(body))
@@ -354,7 +370,7 @@ class Pipeline:
         auth_failure = _webhook_sig_failure_reason_any(
             _webhook_candidates(self.config), False, headers or {}, body)
         if auth_failure is not None:
-            self.metrics["resolve_auth_refused"] += 1
+            self._metric_inc("resolve_auth_refused")
             sys.stderr.write(
                 "[sentinel] resolve_claim_refused action=%s reason=%s "
                 "dedup_key=%s (unsigned resolve claims never close episodes)\n"
@@ -362,7 +378,7 @@ class Pipeline:
             return
         fp = self._fp_for_dedup_key(dedup_key) if dedup_key else None
         if fp is None:
-            self.metrics["resolve_noop"] += 1
+            self._metric_inc("resolve_noop")
             sys.stderr.write(
                 f"[sentinel] resolve_claim_noop action={action} "
                 f"dedup_key={dedup_key} (no known episode; safe no-op)\n")
@@ -370,12 +386,12 @@ class Pipeline:
         closed = self.correlator.resolve_episode(fp,
                                                  reason="verified_resolve")
         if not closed:
-            self.metrics["resolve_noop"] += 1
+            self._metric_inc("resolve_noop")
             sys.stderr.write(
                 f"[sentinel] resolve_claim_noop action={action} fp={fp} "
                 "(episode already closed or pruned; safe no-op)\n")
             return
-        self.metrics["episodes_resolved"] += 1
+        self._metric_inc("episodes_resolved")
         self._audit_episode_resolved(fp, reason="verified_resolve",
                                      resolved_by="pagerduty-webhook",
                                      dedup_key=str(dedup_key))
@@ -402,13 +418,13 @@ class Pipeline:
         closed = self.correlator.resolve_episode(fp,
                                                  reason="operator_resolve")
         if not closed:
-            self.metrics["resolve_noop"] += 1
+            self._metric_inc("resolve_noop")
             sys.stderr.write(
                 f"[sentinel] episode_resolve_noop reason=operator_resolve "
                 f"fp={fp} resolved_by={resolved_by} "
                 "(no open episode; safe no-op)\n")
             return False, fp
-        self.metrics["episodes_resolved"] += 1
+        self._metric_inc("episodes_resolved")
         self._audit_episode_resolved(fp, reason="operator_resolve",
                                      resolved_by=resolved_by,
                                      dedup_key=dedup_key)
@@ -471,14 +487,14 @@ class Pipeline:
 
     def handle_generic(self, body: bytes) -> dict:
         """POST /webhook/generic. Returns a small JSON response dict."""
-        self.metrics["received"] += 1
+        self._metric_inc("received")
         try:
             data = json.loads(body.decode("utf-8"))
             if not isinstance(data, dict):
                 raise Unparseable("top-level JSON is not an object")
             alert = _normalize_generic(data)
         except Unparseable:
-            self.metrics["unparseable"] += 1
+            self._metric_inc("unparseable")
             self.note_forward(self.forwarder.forward_raw(
                 body, alert_id="unparseable", dedup_key=_body_key(body)))
             return {"status": "success", "dedup_key": _body_key(body),
@@ -505,7 +521,7 @@ class Pipeline:
             # never enters the race or the triple lock, so suppress is
             # unreachable by construction. The forward is unconditional:
             # the digest pages, always.
-            self.metrics["storms"] += 1
+            self._metric_inc("storms")
             agg = _aggregate_alert(corr, alert)
             agg_state = build_state(agg, history={}, context={})
             disp, _rec = self.gate.digest_storm(
@@ -519,12 +535,12 @@ class Pipeline:
         # new / duplicate / change_window / storm-continuation all flow through
         # the gate; deterministic kinds skip the Jev call inside the gate.
         if corr.kind == "duplicate":
-            self.metrics["deduped"] += 1
+            self._metric_inc("deduped")
         elif corr.kind == "change_window":
-            self.metrics["change_window"] += 1
+            self._metric_inc("change_window")
         disp, _rec = self.gate.evaluate(alert, state, {}, {},
                                         correlation=corr)
-        self.metrics["triaged"] += 1
+        self._metric_inc("triaged")
         self.correlator.note_disposition(alert.fingerprint, disp)
         # D3: "folded" (storm-continuation absorbed into the aggregate page)
         # is not forwarded either — it is not suppression, it is absorption.
@@ -739,7 +755,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
             # Absolute last resort: a panicking request must not take down
             # the process (design §8.1). The request dies as passthrough;
             # the receiver lives. Never 5xx a triage failure.
-            self.pipeline.metrics["handler_panics"] += 1
+            self.pipeline._metric_inc("handler_panics")
             sys.stderr.write(f"[sentinel] pipeline exception: {exc}\n")
             try:
                 self.pipeline.note_forward(
@@ -902,7 +918,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
             return True
         if reason in ("no_secret", "no_signature", "legacy_signature"):
             # Onboarding fail-open (explicit flag only): accept loudly.
-            self.pipeline.metrics["webhook_auth_bypassed"] += 1
+            self.pipeline._metric_inc("webhook_auth_bypassed")
             sys.stderr.write(
                 "[sentinel] WARNING: webhook auth bypassed "
                 f"(SENTINEL_WEBHOOK_ONBOARDING=1, reason={reason}); "
@@ -1270,7 +1286,17 @@ def build_pipeline_from_env(policy=None,
     # _post: never Jev, never the race, never raises. (P0-1 fix: the 2.0ms
     # drill measured DurableForwarder, a topology the receiver doesn't
     # use; this is the receiver's kill wiring.)
-    kill_switch = KillSwitch(log=audit.log)
+    #
+    # RFC engine-operator-kill-surface: the switch is STATE-FILE backed
+    # (<state_dir>/kill-switch.json, default ~/.sentinel/state — outside
+    # the repo). The file is the cross-process source of truth: the
+    # operator CLI (scripts/ops/sentinel-kill) flips the same file the
+    # receiver's forwarder reads, and an engaged switch SURVIVES receiver
+    # restarts (fail-closed — a cold start must never silently disengage).
+    # One receiver per state dir.
+    _kill_state_path = os.path.join(state_dir or default_state_dir(),
+                                    "kill-switch.json")
+    kill_switch = KillSwitch(log=audit.log, state_path=_kill_state_path)
     # Audit P0 + ruling X-B (audit §7 "SIMULATION FIDELITY"): sim and
     # loadtest environments NEVER touch real PagerDuty — structurally, not
     # via an opt-in toggle. Under SENTINEL_SIM=1 the forwarder is

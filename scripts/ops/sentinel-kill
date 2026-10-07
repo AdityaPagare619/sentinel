@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""sentinel-kill — operator engage/re-arm surface for the receiver topology's
+kill switch (RFC engine-operator-kill-surface).
+
+The receiver's KillSwitch is state-file backed
+(<state_dir>/kill-switch.json, default ~/.sentinel/state). This CLI flips the
+SAME file the receiver's forwarder reads — a flag-flip + audit event, nothing
+more. It never calls Jev, never touches the race (stdlib only; the control-
+principle AST test covers this file).
+
+Kill = HALT all paging (fail-closed), the only semantic. Engaged survives
+receiver restarts (a cold start must never silently disengage).
+
+Usage:
+    sentinel-kill status
+    sentinel-kill engage [--reason TEXT]
+    sentinel-kill disengage --confirm [--reason TEXT]
+
+Environment:
+    SENTINEL_STATE_DIR  state dir (default ~/.sentinel/state — must match
+                        the receiver's; one receiver per state dir)
+    SENTINEL_DB         audit-log sqlite path (default ./sentinel.db —
+                        must match the receiver's, so the flip is audited
+                        in the same log the receiver writes)
+
+Exit codes:
+    0 — done (for engage/disengage: the flip landed, or was already there)
+    2 — misconfiguration / hard error (state dir missing, audit log
+        unwritable, re-arm without --confirm)
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+
+from typing import NoReturn
+
+from sentinel.audit import AuditLog          # noqa: E402
+from sentinel.keystore import default_state_dir  # noqa: E402
+from sentinel.safety import KillSwitch, RearmRefused  # noqa: E402
+
+KILL_STATE_FILENAME = "kill-switch.json"
+
+
+def _refuse(msg: str) -> "NoReturn":
+    """Refuse loudly: message on stderr, exit 2 (misconfiguration)."""
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _resolve() -> tuple[str, str]:
+    """Return (state_path, db_path). Refuse to flip a file nobody reads."""
+    state_dir = default_state_dir()
+    if not os.path.isdir(state_dir):
+        _refuse(
+            f"state dir {state_dir!r} does not exist — the receiver "
+            "has not booted with this SENTINEL_STATE_DIR (or it differs "
+            "from the receiver's). Refusing: flipping a kill file no "
+            "receiver reads would be a silent no-op.")
+    db_path = os.environ.get("SENTINEL_DB", "./sentinel.db")
+    return os.path.join(state_dir, KILL_STATE_FILENAME), db_path
+
+
+def _switch(state_path: str, db_path: str) -> KillSwitch:
+    # The audit log is the receiver's own sqlite file — the flip lands in
+    # the same log the receiver writes (BEGIN IMMEDIATE serializes us).
+    # KillSwitch takes the EventLog (append_event), not the AuditLog
+    # wrapper — the receiver wires it the same way (audit.log).
+    event_log = AuditLog(db_path).log
+    return KillSwitch(log=event_log, state_path=state_path)
+
+
+def cmd_status(state_path: str, db_path: str) -> int:
+    ks = _switch(state_path, db_path)
+    st = ks.status()
+    print(json.dumps({"state_path": state_path, **st}, indent=2,
+                     sort_keys=True))
+    return 0
+
+
+def cmd_engage(state_path: str, db_path: str, reason: str) -> int:
+    ks = _switch(state_path, db_path)
+    res = ks.engage(actor="operator-cli", reason=reason)
+    print(json.dumps({"state_path": state_path, **res}, indent=2,
+                     sort_keys=True))
+    if res["engaged"]:
+        print("KILL ENGAGED — paging halted, nothing goes out.",
+              file=sys.stderr)
+    return 0
+
+
+def cmd_disengage(state_path: str, db_path: str, reason: str,
+                  confirm: bool) -> int:
+    if not confirm:
+        _refuse("re-arm is a separate deliberate action — resend with "
+                "--confirm. No silent auto-rearm, ever. (Nothing was changed.)")
+    ks = _switch(state_path, db_path)
+    try:
+        res = ks.disengage(actor="operator-cli", confirm=True)
+    except RearmRefused as exc:  # pragma: no cover — guarded above
+        _refuse(str(exc))
+    print(json.dumps({"state_path": state_path, "reason": reason, **res},
+                     indent=2, sort_keys=True))
+    if not res["engaged"]:
+        print("KILL RE-ARMED — paging resumed.", file=sys.stderr)
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Flip the receiver topology's kill switch "
+                    "(flag-flip + audit event; never Jev, never the race).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="show kill state")
+    p_e = sub.add_parser("engage", help="HALT all paging (fail-closed)")
+    p_e.add_argument("--reason", default="manual",
+                     help="audit reason (default: manual)")
+    p_d = sub.add_parser("disengage", help="re-arm (requires --confirm)")
+    p_d.add_argument("--confirm", action="store_true",
+                     help="explicit re-arm confirmation (required)")
+    p_d.add_argument("--reason", default="manual",
+                     help="audit reason (default: manual)")
+    args = ap.parse_args(argv)
+    state_path, db_path = _resolve()
+    if args.cmd == "status":
+        return cmd_status(state_path, db_path)
+    if args.cmd == "engage":
+        return cmd_engage(state_path, db_path, args.reason)
+    return cmd_disengage(state_path, db_path, args.reason, args.confirm)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

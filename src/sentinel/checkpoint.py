@@ -161,7 +161,7 @@ class CheckpointJob:
                 detail={"sink_uri": self.sink.sink_uri,
                         "consecutive_failures": self.consecutive_failures,
                         "ts": now_iso})
-            self.log.metrics["evidence_loss_pages"] += 1
+            self.log.bump_metric("evidence_loss_pages")
         return {"seq": seq, "head_seq": head_seq, "head_hash": head_hash,
                 "hmac_hex": hmac_hex, "sink_push_ok": sink_push_ok,
                 "consecutive_failures": self.consecutive_failures}
