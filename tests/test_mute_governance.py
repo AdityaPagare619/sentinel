@@ -157,10 +157,13 @@ class TestMuteTransitionsEventLogged(unittest.TestCase):
                          "noise stopped")
 
     def test_expiry_sweep_writes_mute_expired(self):
-        self._applied(ttl_s=3600)
+        # Pin BOTH ends of the clock: apply_mute defaults muted_at to the
+        # wall clock, so a pinned sweep time alone is a date time-bomb
+        # (it rotted 2026-10-07 when "now" moved past the pinned sweep).
+        self._applied(ttl_s=3600, now_iso="2026-10-04T00:00:00.000Z")
         # 2h later: the TTL the human set is honored (auto-UNmute, not auto-mute).
         seqs = mute_mod.expire_mutes(self.log,
-                                     now_iso="2026-10-05T00:00:00.000Z")
+                                     now_iso="2026-10-04T02:00:00.000Z")
         self.assertEqual(len(seqs), 1)
         rows = self.log.events_of_type("mute_expired")
         body = json.loads(rows[0]["body"])

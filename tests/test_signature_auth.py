@@ -141,9 +141,14 @@ class TestProductionFailClosed(ReceiverTestBase):
         self.assertEqual(self.pd.requests, [])
 
     def test_inside_window_accepted(self):
-        # ±5 min tolerance: fresh timestamps on both edges are accepted.
-        for delta in (0, -(SIGNATURE_MAX_SKEW_S - 1),
-                      SIGNATURE_MAX_SKEW_S - 1):
+        # ±5 min tolerance: fresh timestamps near both edges are accepted.
+        # Deltas stay 5s clear of the exact edge: int(time.time())
+        # truncation hides up to 1s of true age, so probing at SKEW-1 is a
+        # coin flip against the truncation fraction (flaked 2026-10-07).
+        # The exact boundary belongs to a deterministic unit test of the
+        # pure _webhook_sig_failure_reason, not to this wall-clock test.
+        for delta in (0, -(SIGNATURE_MAX_SKEW_S - 5),
+                      SIGNATURE_MAX_SKEW_S - 5):
             body = json.dumps(self._generic()).encode()
             ts = int(time.time()) + delta
             code, resp = self._post("/webhook/generic", body,

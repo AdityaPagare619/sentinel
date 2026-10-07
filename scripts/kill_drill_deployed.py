@@ -33,8 +33,17 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
-BASE = os.environ["SENTINEL_BASE_URL"].rstrip("/")
-TOKEN = os.environ["SENTINEL_VERIFY_TOKEN"]
+def _base():
+    # Lazy: the module must stay importable (entrypoint-import gate) without
+    # the deploy env present. Missing env fails at RUN time, loudly — the
+    # KeyError names the variable, same as before.
+    return os.environ["SENTINEL_BASE_URL"].rstrip("/")
+
+
+def _token():
+    return os.environ["SENTINEL_VERIFY_TOKEN"]
+
+
 OUT = os.environ.get("DRILL_OUT", "/tmp/drill-deployed.json")
 TIMEOUT = 25  # hard client timeout per request: a hang fails loudly
 THRESHOLD_MS = 5000.0
@@ -46,9 +55,9 @@ def iso_now():
 
 def call(method, path, body=None, token=True):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, method=method)
+    req = urllib.request.Request(_base() + path, data=data, method=method)
     if token:
-        req.add_header("Authorization", "Bearer " + TOKEN)
+        req.add_header("Authorization", "Bearer " + _token())
     if data:
         req.add_header("Content-Type", "application/json")
     t0 = time.monotonic()
@@ -122,7 +131,7 @@ def main():
     artifact = {
         "artifact": "kill-drill",
         "contract": "C3",
-        "environment": {"host": BASE,
+        "environment": {"host": _base(),
                         "tier": "deployed-vercel-production"},
         "started_at": started,
         "measured_ms": measured_ms,

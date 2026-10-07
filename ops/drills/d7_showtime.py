@@ -18,9 +18,11 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-# The flip-beat artifact under test lives in the demo worktree (read-only
-# reuse — the drill validates the real artifact, not a copy).
-sys.path.insert(0, "/home/hatch/workspace/jev-builds/sentinel-sun-demo/rehearsal")
+# The flip-beat artifact lives in this repo at rehearsal/flip_beat.py
+# (byte-identical to the old sun-demo worktree copy — the absolute
+# cross-worktree path was leftover coupling; fixed 2026-10-07).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
+                                "rehearsal"))
 
 from sentinel.audit import AuditLog
 from sentinel.client import SystemOneClient

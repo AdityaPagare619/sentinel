@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -77,16 +78,22 @@ def _free_port() -> int:
     return p
 
 
-def _get(base: str, path: str) -> dict:
-    req = urllib.request.Request(base + path, headers={"Accept": "application/json"})
+def _get(base: str, path: str, token: str | None = None) -> dict:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(base + path, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as res:
         return json.loads(res.read().decode("utf-8"))
 
 
-def _post(base: str, path: str, body: dict) -> dict:
+def _post(base: str, path: str, body: dict, token: str | None = None) -> dict:
     data = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(base + path, data=data,
-                                 headers={"Content-Type": "application/json"},
+                                 headers=headers,
                                  method="POST")
     with urllib.request.urlopen(req, timeout=60) as res:
         return json.loads(res.read().decode("utf-8"))
@@ -123,13 +130,23 @@ def build_data() -> str:
     return out
 
 
-def start_server(data_dir: str, state_dir: str, port: int) -> subprocess.Popen:
+def start_server(data_dir: str, state_dir: str,
+                 port: int) -> tuple[subprocess.Popen, str]:
+    """Spawn the platform server; return (proc, operator token).
+
+    The server requires C1 Bearer <redacted> /api/* (auth hardening). The builder
+    provisions a throwaway per-build token via SENTINEL_OPERATOR_TOKEN env —
+    never on disk, never logged — and uses it for every API call, exactly
+    like the console's sign-in flow.
+    """
     plat = os.path.join(state_dir, "platform")
     os.makedirs(os.path.join(plat, "datasets"), exist_ok=True)
     shutil.copy(os.path.join(data_dir, "context.jsonl"),
                 os.path.join(plat, "context.jsonl"))
     shutil.copy(os.path.join(data_dir, "datasets", "labels-v3.jsonl"),
                 os.path.join(plat, "datasets", "labels-v3.jsonl"))
+    token = secrets.token_urlsafe(32)
+    env = dict(os.environ, SENTINEL_OPERATOR_TOKEN=token)
     cmd = [sys.executable, os.path.join(REPO, "platform", "server", "__main__.py"),
            "--port", str(port), "--host", "127.0.0.1",
            "--db", os.path.join(data_dir, "demo.db"),
@@ -138,30 +155,30 @@ def start_server(data_dir: str, state_dir: str, port: int) -> subprocess.Popen:
            "--ui", os.path.join(REPO, "platform", "ui")]
     print(f"[build] platform server on 127.0.0.1:{port} (synthetic)…", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            cwd=REPO)
+                            cwd=REPO, env=env)
     base = f"http://127.0.0.1:{port}"
     for _ in range(60):
         try:
-            _get(base, "/api/decisions?limit=1")
-            print("[build] server up", flush=True)
-            return proc
+            _get(base, "/api/decisions?limit=1", token)
+            print("[build] server up (authenticated)", flush=True)
+            return proc, token
         except Exception:
             time.sleep(0.5)
     proc.kill()
     raise RuntimeError("platform server did not start")
 
 
-def prerender(base: str, api_dir: str) -> dict:
+def prerender(base: str, api_dir: str, token: str) -> dict:
     """Fetch every read endpoint; write normalized JSON. Returns build stats."""
     stats = {"gets": 0, "details": 0, "scenarios": 0}
     for path, rel in GETS:
-        env = _strip_wall_clock(_get(base, path))
+        env = _strip_wall_clock(_get(base, path, token))
         _write_json(os.path.join(api_dir, rel), env)
         stats["gets"] += 1
         print(f"[build]   GET {path} -> {rel}", flush=True)
 
     # Per-decision detail files (top-N by recency, like the live shadow join).
-    decisions = _get(base, "/api/decisions?limit=500")["data"]
+    decisions = _get(base, "/api/decisions?limit=500", token)["data"]
     if not decisions:
         # T2: an empty showcase is never a valid publish — fail loudly
         # instead of shipping a hollow staging bundle that prints "honest".
@@ -172,7 +189,7 @@ def prerender(base: str, api_dir: str) -> dict:
     for d in decisions[:DETAIL_LIMIT]:
         did = d["id"]
         try:
-            env = _strip_wall_clock(_get(base, f"/api/decision/{did}"))
+            env = _strip_wall_clock(_get(base, f"/api/decision/{did}", token))
         except Exception as e:
             print(f"[build]   !! decision {did}: {e} — skipped (derived path covers it)",
                   flush=True)
@@ -207,7 +224,7 @@ def prerender(base: str, api_dir: str) -> dict:
 
     # Stream snapshot: the latest decisions, polled by the static river.
     # Labeled "snapshot — not live" by the UI (freshness law).
-    snap = _strip_wall_clock(_get(base, "/api/decisions?limit=50"))
+    snap = _strip_wall_clock(_get(base, "/api/decisions?limit=50", token))
     snap["meta"]["snapshot"] = True
     snap["meta"]["note"] = ("pre-rendered snapshot baked at build time — "
                             "the static river polls this file; it is not a live stream")
@@ -215,13 +232,13 @@ def prerender(base: str, api_dir: str) -> dict:
     print("[build]   stream snapshot: 50 latest decisions", flush=True)
 
     # Simulator scenarios: fixed, pre-computed, labeled.
-    ds_version = _get(base, "/api/calibration")["data"].get("dataset_version", "labels-v3")
+    ds_version = _get(base, "/api/calibration", token)["data"].get("dataset_version", "labels-v3")
     for name, (label, thresholds) in SCENARIOS.items():
         env = _strip_wall_clock(_post(base, "/api/simulate", {
             "thresholds": thresholds,
             "cost_model": {"c_fp": 100, "c_fn": 50000},
             "dataset_version": ds_version,
-        }))
+        }, token))
         env["data"]["scenario_thresholds"] = thresholds
         env["data"]["provenance"]["precomputed"] = True
         env["data"]["provenance"]["scenario"] = name
@@ -374,11 +391,11 @@ def main() -> None:
         data_dir = build_data()
     port = args.port or _free_port()
     with tempfile.TemporaryDirectory(prefix="sentinel-gh-pages-") as state_dir:
-        server = start_server(data_dir, state_dir, port)
+        server, token = start_server(data_dir, state_dir, port)
         try:
             base = f"http://127.0.0.1:{port}"
             with tempfile.TemporaryDirectory(prefix="sentinel-gh-pages-api-") as api_tmp:
-                stats = prerender(base, api_tmp)
+                stats = prerender(base, api_tmp, token)
                 print(f"[build] pre-rendered: {stats}", flush=True)
                 assemble_staging(UI_DIR, api_tmp,
                                  os.path.join(args.out, "staging"))

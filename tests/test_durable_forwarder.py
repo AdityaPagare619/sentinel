@@ -835,6 +835,13 @@ class TestPolicy(ForwarderTestBase):
         self.assertEqual(row["status"], "dead_letter")
         failed = self._receipts("forward_failed")
         self.assertEqual(failed[0]["error_class"], "max_age_exceeded")
+        # The morgue has an alarm on BOTH max-age paths: the schedule-time
+        # branch must page the control plane exactly like the sweep does
+        # (engine P1, RFC quality-dead-letter-alarm).
+        cp = [r for r in self.log.undelivered_outbox_rows()
+              if r["priority"] == 1]
+        self.assertTrue(cp, "schedule-time max-age dead_letter must page "
+                            "the control plane")
 
     def test_max_age_sweep_dead_letters_loudly(self):
         obid = self._enqueue(
