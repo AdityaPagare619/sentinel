@@ -81,3 +81,21 @@ missing = [p for p in [
 assert not missing, f"missing: {missing}"
 print("[bundle] OK -> $DIST")
 EOF
+
+# --- build provenance stamp -----------------------------------------------
+# Audit §5 P2: a stale deploy/dist reopens the original KEYS P0 if anyone
+# deploys the dir without rebuilding. The stamp makes staleness
+# DETECTABLE — compare BUILD_COMMIT against the intended SHA before any
+# deploy; when in doubt, rebuild (the script rm -rf's $DIST first, so a
+# rebuild is always clean). Demo builds tolerate a dirty tree but record
+# it honestly (production's script refuses dirty trees outright).
+_BUILD_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+_BUILD_DIRTY="no"
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+  _BUILD_DIRTY="yes"
+fi
+printf '%s\n' "$_BUILD_COMMIT" > "$DIST/BUILD_COMMIT"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$DIST/BUILD_TIME"
+printf 'built-from-commit=%s\nbuilt-from-dirty-tree=%s\n' \
+  "$_BUILD_COMMIT" "$_BUILD_DIRTY" > "$DIST/BUILD_PROVENANCE.txt"
+echo "[bundle] provenance stamped: $_BUILD_COMMIT (dirty=$_BUILD_DIRTY)"
