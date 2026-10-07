@@ -15,8 +15,13 @@ import math
 import os
 import pathlib
 import random
+import sys
 import tempfile
 import unittest
+
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+if _SRC not in sys.path:  # makes `python -m unittest discover -s tests` work
+    sys.path.insert(0, _SRC)  # regardless of import order (stdlib only)
 
 from sentinel.ab import (
     RunAborted,

@@ -654,6 +654,23 @@ class DurableForwarder:
             self._dead_letter(row, attempt_no, "max_age_exceeded",
                               f"next retry would exceed max_age_at "
                               f"({max_age_at}); last error: {error}")
+            # The morgue has an alarm: same control-plane page the
+            # _max_age_sweep fires for this error class. The row is already
+            # dead_lettered above; a sick loud path must neither resurrect
+            # it nor abort the worker.
+            try:
+                self.enqueue_control_plane_page(
+                    kind="forwarder_dead_letter",
+                    summary=f"forwarder: outbox {row['outbox_id']} "
+                            f"({row['alert_id']}) dead-lettered: next retry "
+                            f"would exceed max_age_at",
+                    detail={"outbox_id": row["outbox_id"],
+                            "alert_id": row["alert_id"],
+                            "dedup_key": row["dedup_key"]})
+            except Exception as exc:
+                print(f"[sentinel] FORWARDER dead-letter page failed "
+                      f"outbox={row['outbox_id']} err={exc}",
+                      file=sys.stderr)
             return
         self.log.record_receipt_and_update(
             "forward_failed", outbox_id=row["outbox_id"],

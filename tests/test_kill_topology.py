@@ -249,6 +249,40 @@ class TestReceiverTopologyKillWiring(unittest.TestCase):
         self.assertIsNotNone(pipeline.kill_switch)
         self.assertIs(pipeline.kill_switch,
                       pipeline.forwarder._kill_switch)
+        # TOPOLOGY PIN (audit X-A): the drill numbers were measured on the
+        # legacy sync Forwarder's _post kill check. Exact class — not
+        # isinstance: a subclass could drop the kill wiring while still
+        # being "a Forwarder". If the factory ever changes the paging
+        # forwarder, this fails loudly and the drill artifact is
+        # invalidated by name.
+        self.assertIs(type(pipeline.forwarder), Forwarder,
+                      "receiver topology changed: the kill drill was "
+                      "measured on the legacy sync Forwarder")
+
+    def test_drill_artifact_schema_and_topology(self):
+        """The committed drill artifact is a contract: passed, within its
+        threshold, and its topology claim is code-derived — equal to the
+        TOPOLOGY constant in the drill script, not prose in the test."""
+        import glob
+        import importlib.util
+        drills = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "ops", "drills")
+        paths = sorted(glob.glob(os.path.join(
+            drills, "kill-drill-receiver-topology-*.json")))
+        self.assertTrue(paths, "no receiver-topology drill artifact found")
+        with open(paths[-1], encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        script = os.path.join(drills, "kill_drill_receiver_topology.py")
+        spec = importlib.util.spec_from_file_location(
+            "kill_drill_receiver_topology", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertTrue(artifact["passed"], "drill artifact did not pass")
+        self.assertLessEqual(artifact["measured_ms"],
+                             artifact["threshold_ms"],
+                             "drill exceeded its own threshold")
+        self.assertEqual(artifact["topology"], mod.TOPOLOGY,
+                         "artifact topology claim is not code-derived")
 
     def _build_factory_env(self):
         self._tmp = tempfile.TemporaryDirectory()

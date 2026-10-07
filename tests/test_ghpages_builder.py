@@ -5,6 +5,7 @@ cleanliness (no fixtures), staging honesty strings, JSON validity.
 Fast (~5s): builds twice against a private copy of the deterministic
 demo dataset (--data-dir hermetic; never touches the shared dist-data).
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -40,8 +41,18 @@ class TestGhPagesBuilder(unittest.TestCase):
         # which a concurrent full build rebuilds (build-data.sh deletes
         # demo.db) — that corrupted these tests intermittently. Copy the
         # dataset once into the tmp dir and point the builder at the copy.
+        dist = os.path.join(REPO, "deploy", "dist-data")
+        if not os.path.isdir(dist):
+            # dist-data is gitignored build output: rebuild it
+            # deterministically (no network, no Jev key) so the test is
+            # self-healing on fresh clones instead of erroring.
+            spec = importlib.util.spec_from_file_location(
+                "build_static_for_test", BUILDER)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.build_data()
         cls.data = os.path.join(cls.tmp, "data")
-        shutil.copytree(os.path.join(REPO, "deploy", "dist-data"), cls.data)
+        shutil.copytree(dist, cls.data)
         cls.a = os.path.join(cls.tmp, "a")
         cls.b = os.path.join(cls.tmp, "b")
         _build(cls.a, cls.data)

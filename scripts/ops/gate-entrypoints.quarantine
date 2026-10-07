@@ -1,0 +1,8 @@
+# gate-entrypoints quarantine — per-check exemptions, each with a live ticket.
+# Format: <repo-relative path> <check> # ticket: <repo-relative ticket> <date> <owner>
+# check is "import" or "hermeticity". A dangling ticket reference is a FAIL.
+design/showcase/build_showcase.py import # ticket: docs/planning/tickets/quality-20261007-build-showcase-tokens.md 2026-10-07 TEAM6
+demo/storm-scenario/storm_runner.py hermeticity # ticket: docs/planning/tickets/quality-20261007-dynamic-credentials-coupling.md 2026-10-07 TEAM6
+rehearsal/flip_beat.py hermeticity # ticket: docs/planning/tickets/quality-20261007-dynamic-credentials-coupling.md 2026-10-07 TEAM6
+research/jev-behavior/bin/ab_run.py hermeticity # ticket: docs/planning/tickets/quality-20261007-dynamic-credentials-coupling.md 2026-10-07 TEAM6
+research/jev-behavior/bin/latency_campaign.py hermeticity # ticket: docs/planning/tickets/quality-20261007-dynamic-credentials-coupling.md 2026-10-07 TEAM6

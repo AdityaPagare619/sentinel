@@ -84,6 +84,12 @@ ALLOWLIST=(
   # UUID-shaped forged token in the `bogus` list; the 401 assertion proves
   # it is not a live credential.
   'tests/validation/test_ac5_p0_rewalk.py:"Bearer [0-9a-fA-F]{8}-'
+  # kill_drill_receiver_topology.py:79 — loopback-only drill fixture
+  # (value starts "drill-secret-", self-evidently fake): the secret signs
+  # requests to the drill's own CaptureServer (script docstring: "zero
+  # real PagerDuty contact, ever"). Same fixture class as the
+  # test_receiver.py s3cret-long-enough-for-tests entry.
+  'ops/drills/kill_drill_receiver_topology.py:drill-secret-'
 )
 
 if [ -s "$TMP" ]; then

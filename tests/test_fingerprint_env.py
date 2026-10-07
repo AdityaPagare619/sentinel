@@ -344,6 +344,10 @@ class TestMigrationScript(unittest.TestCase):
 
         with self.assertLogs("sentinel.migrate_fingerprints",
                              level="WARNING") as logs:
+            # The migration stamps window_ends_at = wall-clock now + 30d:
+            # anchor the assertion to the actual migration time, never to
+            # the pinned NOW above (a date time-bomb — it rotted 2026-10-07).
+            t0 = datetime.now(timezone.utc)
             summary = self.mig.migrate(bundle, manifest, 30, out)
 
         self.assertTrue(summary["migrated"])
@@ -367,7 +371,7 @@ class TestMigrationScript(unittest.TestCase):
                          set(v1s))
         window_ends = new_allowlist["legacy_v1"]["window_ends_at"]
         ends_at = datetime.fromisoformat(window_ends.replace("Z", "+00:00"))
-        self.assertTrue(timedelta(days=29) < ends_at - NOW
+        self.assertTrue(timedelta(days=29) < ends_at - t0
                         < timedelta(days=31))
 
         with open(os.path.join(out, "legacy_allowlist.json")) as fh:

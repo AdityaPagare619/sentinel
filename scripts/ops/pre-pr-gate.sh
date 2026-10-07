@@ -4,10 +4,14 @@
 #
 # Stages (each must pass before the next starts):
 #   1. secrets-grep      — fast fail on secret-shaped values
-#   2. full test suite   — `python3 -m unittest discover tests` (baseline 496)
-#   3. kill-the-client   — the fail-open invariant, named explicitly in the report
-#   4. boot smoke        — receiver-smoke.sh: the process actually starts
-#   5. config schemas    — flagctl validate on the example configs
+#   2. entrypoints       — full compileall + entrypoint imports (standing law;
+#                          never skipped, even by --fast)
+#   3. full test suite   — `python3 -m unittest discover tests` (baseline 496)
+#   4. platform-server   — `discover -s tests` in platform/server (FaithfulJev,
+#                          FakePD, auth, ops/health; 145 tests, ~35s)
+#   5. kill-the-client   — the fail-open invariant, named explicitly in the report
+#   6. boot smoke        — receiver-smoke.sh: the process actually starts
+#   7. config schemas    — flagctl validate on the example configs
 #
 # Usage: pre-pr-gate.sh [--fast]   (--fast skips the full suite; for deploys,
 #                                   NOT for PRs — a PR gate is never --fast)
@@ -41,6 +45,10 @@ echo "pre-pr-gate: repo=$REPO_ROOT sha=$(git rev-parse --short HEAD 2>/dev/null 
 
 stage "secrets-grep" ./scripts/ops/secrets-grep.sh
 
+# Standing law: full compileall + entrypoint imports on every program merge.
+# Never skipped by --fast (it is as cheap as secrets-grep and as load-bearing).
+stage "entrypoints" ./scripts/ops/gate-entrypoints.sh
+
 if [ "$FAST" = "1" ]; then
   echo "── stage: full-suite SKIPPED (--fast; not valid for PRs) ──"
 else
@@ -66,6 +74,28 @@ else
     fi
   else
     echo "FAIL: full-suite"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
+# Platform-server suite (FaithfulJev determinism, FakePD lifecycle, auth,
+# ops/health, keystore...). Runs from platform/server because the repo's
+# platform/ dir shadows stdlib `platform` when imported from the root.
+echo "── stage: platform-server suite ──"
+if [ "$FAST" = "1" ]; then
+  echo "── stage: platform-server suite SKIPPED (--fast; not valid for PRs) ──"
+else
+  OUT="$(cd platform/server && python3 -m unittest discover -s tests 2>&1 | grep -E '^(Ran |OK|FAILED)' || true)"
+  echo "$OUT"
+  if echo "$OUT" | grep -q '^FAILED'; then
+    echo "FAIL: platform-server suite"
+    FAIL=$((FAIL+1))
+  elif echo "$OUT" | grep -q '^OK$'; then
+    N=$(echo "$OUT" | grep -oP '^Ran \K[0-9]+' || echo '?')
+    echo "PASS: platform-server suite ($N tests)"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL: platform-server suite"
     FAIL=$((FAIL+1))
   fi
 fi
