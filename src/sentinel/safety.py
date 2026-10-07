@@ -103,6 +103,19 @@ class KillSwitch:
         with self._lock:
             return self._engaged
 
+    def _is_engaged_locked(self) -> bool:
+        """File-aware engaged check for use INSIDE self._lock.
+
+        RFC engine-operator-kill-surface: when a state_path is set the
+        file is the cross-process source of truth (the operator CLI flips
+        the same file). engage()/disengage() must consult it, not just
+        the in-memory flag — otherwise a CLI-flipped switch double-audits
+        on engage() and no-ops on disengage(). Callers must hold _lock.
+        """
+        if self._state_path is not None:
+            return self._read_state_file()
+        return self._engaged
+
     @property
     def engaged_at(self) -> str | None:
         with self._lock:
@@ -114,6 +127,14 @@ class KillSwitch:
             return self._engaged_seq
 
     def status(self) -> dict:
+        # File-aware when a state path is set (RFC engine-operator-kill-
+        # surface): the file is the source of truth across processes.
+        if self._state_path is not None:
+            file_engaged = self._read_state_file()
+            with self._lock:
+                return {"engaged": file_engaged,
+                        "engaged_at": self._engaged_at if file_engaged else None,
+                        "flips": self._flips}
         with self._lock:
             return {"engaged": self._engaged,
                     "engaged_at": self._engaged_at,
@@ -132,7 +153,12 @@ class KillSwitch:
         Never calls Jev, never waits on the race.
         """
         with self._lock:
-            if self._engaged:
+            # File-aware (RFC engine-operator-kill-surface): when a state
+            # path is set the file — flippable by the operator CLI in
+            # another process — is the source of truth, not the in-memory
+            # flag. Without this, a CLI-engaged switch would double-audit
+            # here and a CLI state would be invisible to disengage().
+            if self._is_engaged_locked():
                 return {"engaged": True, "engaged_at": self._engaged_at,
                         "flips": self._flips, "seq": self._engaged_seq,
                         "transitioned": False}
@@ -165,7 +191,12 @@ class KillSwitch:
                 "an explicit confirmation ({\"confirm\": true}). "
                 "No silent auto-rearm, ever.")
         with self._lock:
-            if not self._engaged:
+            # File-aware (RFC engine-operator-kill-surface): a switch
+            # engaged by the operator CLI (file=True, our in-memory flag
+            # False) must still transition on confirmed disengage — a
+            # no-op here would leave the file engaged while reporting
+            # success, the fail-unsafe direction.
+            if not self._is_engaged_locked():
                 return {"engaged": False, "engaged_at": None,
                         "flips": self._flips, "transitioned": False}
             rearmed_at = utcnow_iso()

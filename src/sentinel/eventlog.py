@@ -436,10 +436,32 @@ class EventLog:
             "coalesced_duplicates": 0,
             "disk_guard_fires": 0,
         }
+        self._open(genesis_prev_hash)
+
+    def bump_metric(self, key: str, n: int = 1) -> None:
+        """Thread-safe counter bump (audit engine P3, RFC engine-metrics-
+        lock). The event log is shared across the forwarder worker pool,
+        the checkpoint thread, and the reaper thread — every metrics[...]
+        += is a racy read-modify-write without this. ALL metrics writes,
+        including cross-module ones (checkpoint, reaper), go through here.
+        RLock: safe to call with _lock already held (leaf-lock discipline).
+        """
+        with self._lock:
+            self.metrics[key] = self.metrics.get(key, 0) + n
+
+    def metrics_snapshot(self) -> dict:
+        """Thread-safe copy for readers. No torn reads."""
+        with self._lock:
+            return dict(self.metrics)
+
+    def _open(self, genesis_prev_hash: str) -> None:
+        """Remainder of __init__: open the sqlite connection and initialize
+        the schema. (Split out so the metrics helpers above stay at class
+        level.)"""
         # Re-entrancy guard: the degraded path's own commits must not
         # re-trip the watchdog (infinite recursion on a sick disk).
         self._in_watchdog_trip = False
-        self._conn = sqlite3.connect(db_path, check_same_thread=False,
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False,
                                      isolation_level=None)  # autocommit; we txn explicitly
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
@@ -501,7 +523,7 @@ class EventLog:
 
     def _on_watchdog_trip(self, elapsed_ms: float) -> None:
         """Degraded path + evidence-loss page (design §4). Unsuppressible."""
-        self.metrics["watchdog_trips"] += 1
+        self.bump_metric("watchdog_trips")
         payload = {
             "kind": "evidence_loss",
             "reason": "commit_watchdog_trip",
@@ -537,7 +559,7 @@ class EventLog:
                          f"({elapsed_ms:.1f} ms > {COMMIT_WATCHDOG_MS:.0f} ms)"),
                 detail=payload,
             )
-            self.metrics["evidence_loss_pages"] += 1
+            self.bump_metric("evidence_loss_pages")
         except Exception:
             pass  # disk-full etc: file 03's ladder + ADR-018 watcher are the backstop
 
@@ -599,7 +621,7 @@ class EventLog:
         latch (exactly-once per process).
         """
         self._disk_guard_fired = True
-        self.metrics["disk_guard_fires"] += 1
+        self.bump_metric("disk_guard_fires")
         detail = {
             "kind": "disk_guard",
             "reason": "wal_watermark_crossed",
@@ -775,7 +797,7 @@ class EventLog:
                 self._conn.execute("ROLLBACK;")
                 self._head_seq, self._head_hash = _head_before
                 raise
-            self.metrics["events_written"] += 1
+            self.bump_metric("events_written")
             return seq
 
     def record_request(self, *, alert_id: str, fingerprint: str,
@@ -848,7 +870,7 @@ class EventLog:
                 if outbox is not None:
                     outbox_id, coalesced = self._insert_outbox(outbox)
                     if coalesced:
-                        self.metrics["coalesced_duplicates"] += 1
+                        self.bump_metric("coalesced_duplicates")
                 body["outbox_id"] = outbox_id
                 seq, _ = self._insert_event(
                     "decision_made", actor="engine", alert_id=alert_id,
@@ -859,7 +881,7 @@ class EventLog:
                 self._conn.execute("ROLLBACK;")
                 self._head_seq, self._head_hash = _head_before
                 raise
-            self.metrics["events_written"] += 1
+            self.bump_metric("events_written")
             return seq, outbox_id
 
     def _insert_outbox(self, row: dict) -> tuple[str, bool]:
@@ -942,7 +964,7 @@ class EventLog:
                 self._conn.execute("ROLLBACK;")
                 self._head_seq, self._head_hash = _head_before
                 raise
-            self.metrics["events_written"] += 1
+            self.bump_metric("events_written")
             return seq
 
     def note_evidence_drop(self, kind: str = "shadow") -> None:
@@ -952,7 +974,7 @@ class EventLog:
         evidence-loss machinery (wired by the coordinator). Calibration
         degrades gracefully; the paging path never depends on it.
         """
-        self.metrics["shadow_drops"] += 1
+        self.bump_metric("shadow_drops")
 
     # ------------------------------------------------------------- reaper
 
@@ -1233,7 +1255,7 @@ class Reaper:
         for orphan in orphans:
             summary = self._redrive(orphan, now_iso)
             redriven.append(summary)
-            self.log.metrics["reaper_redrives"] += 1
+            self.log.bump_metric("reaper_redrives")
         return redriven
 
     def _find_orphans(self, now_iso: str) -> list[dict]:

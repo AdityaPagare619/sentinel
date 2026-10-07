@@ -246,6 +246,13 @@ class DurableForwarder:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout=10000;")
         self._claim_lock = threading.Lock()
+        # Metrics lock (audit engine P3, RFC engine-metrics-lock): every
+        # metrics[...] += is a read-modify-write — racy under the worker
+        # pool + scheduler + scan threads (same bug class as the fail-open
+        # ladder race 3fac416). RLock + leaf-lock discipline: the metrics
+        # lock is never held while acquiring any other lock (it is always
+        # the last lock taken), so lock ordering is trivially safe.
+        self._metrics_lock = threading.RLock()
         self._work: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._threads: list = []
@@ -260,6 +267,17 @@ class DurableForwarder:
             "dead_letter": 0, "secondary_fired": 0, "spills_replayed": 0,
             "requeued": 0, "control_plane_pages": 0,
         }
+
+    # ------------------------------------------------------------ metrics
+    def _metric_inc(self, key: str, n: int = 1) -> None:
+        """Thread-safe counter bump. ALL metrics writes go through here."""
+        with self._metrics_lock:
+            self.metrics[key] = self.metrics.get(key, 0) + n
+
+    def _metrics_snapshot(self) -> dict:
+        """Thread-safe copy for readers (ops/health, drills). No torn reads."""
+        with self._metrics_lock:
+            return dict(self.metrics)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -338,7 +356,7 @@ class DurableForwarder:
         now_iso = now_iso or utcnow_iso()
         replayed = (replay_spills(self.log, self.config.spill_dir)
                     if self.config.spill_dir else [])
-        self.metrics["spills_replayed"] += len(replayed)
+        self._metric_inc("spills_replayed", len(replayed))
         requeued = 0
         for row in self.log.undelivered_outbox_rows():
             if row["status"] != "in_flight":
@@ -362,7 +380,7 @@ class DurableForwarder:
                            "last_error": "stale in_flight lease at startup "
                                          "(crash window) — requeued"})
             requeued += 1
-        self.metrics["requeued"] += requeued
+        self._metric_inc("requeued", requeued)
         return {"spills_replayed": len(replayed), "requeued": requeued}
 
     # ------------------------------------------------------------- scheduler
@@ -485,7 +503,7 @@ class DurableForwarder:
         for row in self.log.due_outbox_rows(now_iso, limit=limit):
             if self._claim_one(row["outbox_id"], now_iso):
                 claimed.append(self.log.outbox_row(row["outbox_id"]))
-                self.metrics["claimed"] += 1
+                self._metric_inc("claimed")
         return claimed
 
     def _claim_one(self, outbox_id: str, now_iso: str) -> bool:
@@ -639,7 +657,7 @@ class DurableForwarder:
             scheduler={"status": "delivered",
                        "delivered_at": utcnow_iso(),
                        "last_error": None})
-        self.metrics["confirmed"] += 1
+        self._metric_inc("confirmed")
 
     def _retryable(self, row: dict, attempt_no: int, error_class: str,
                    error: str, delay_s: float) -> None:
@@ -664,7 +682,7 @@ class DurableForwarder:
             scheduler={"status": "queued",
                        "next_attempt_at": _ts_to_iso(now_ts + delay_s),
                        "last_error": error[:500]})
-        self.metrics["retryable"] += 1
+        self._metric_inc("retryable")
 
     def _terminal(self, row: dict, attempt_no: int, error_class: str,
                   error: str) -> None:
@@ -675,9 +693,19 @@ class DurableForwarder:
         try:
             annotations = [error_class]
             if self.secondary is not None:
-                page = _secondary_page_from_row(row, annotations)
-                res = self.secondary.send(page)
-                self._secondary_receipt(row, res, annotations)
+                # Contract C3: the kill switch halts ALL paging, including
+                # the secondary — the dead-letter record keeps the morgue
+                # complete, but nothing goes out while engaged. Loud, never
+                # silent; re-arm resumes the primary retries.
+                if self._kill is not None and self._kill.engaged:
+                    print(f"[sentinel] FORWARDER terminal secondary fire "
+                          f"ABSORBED by kill switch (engaged) "
+                          f"outbox={row['outbox_id']} — page not sent",
+                          file=sys.stderr)
+                else:
+                    page = _secondary_page_from_row(row, annotations)
+                    res = self.secondary.send(page)
+                    self._secondary_receipt(row, res, annotations)
             self.enqueue_control_plane_page(
                 kind="payload_formation_error",
                 summary=f"forwarder: {error_class} on {row['alert_id']} "
@@ -701,7 +729,7 @@ class DurableForwarder:
             body={"outbox_id": row["outbox_id"], "channel": "pagerduty",
                   "attempt_no": attempt_no, "error_class": error_class},
             scheduler={"status": "dead_letter", "last_error": error[:500]})
-        self.metrics["dead_letter"] += 1
+        self._metric_inc("dead_letter")
         # dead_letter is a morgue with an alarm, not a trash can.
         print(f"[sentinel] FORWARDER dead_letter outbox={row['outbox_id']} "
               f"alert={row['alert_id']} error_class={error_class}",
@@ -729,8 +757,18 @@ class DurableForwarder:
     def _secondary_scan(self, now_iso: str) -> int:
         """Fire the secondary for rows undelivered past X. Primary retries
         CONTINUE — secondary_fired_at is a timestamp, not a status, and no
-        code path here cancels primary retries (design §5.2, §8)."""
+        code path here cancels primary retries (design §5.2, §8).
+
+        Contract C3 (kill = HALT all paging, fail-closed): an engaged kill
+        switch suppresses the secondary too — the operator deliberately
+        stopped paging, and the secondary is a paging path. Rows stay
+        queued; on re-arm the primary resumes and the scan refires for
+        rows still past X. The halt itself is audited once by
+        _kill_halt_check; per-scan logging would spam the scheduler loop.
+        """
         if self.secondary is None:
+            return 0
+        if self._kill is not None and self._kill.engaged:
             return 0
         cutoff_ts = time.time() - self.config.secondary_fire_after_s
         fired = 0
@@ -765,7 +803,7 @@ class DurableForwarder:
                       "annotations": annotations},
                 scheduler={"secondary_fired_at": utcnow_iso(),
                            "attempt_count": n, "last_error": None})
-            self.metrics["secondary_fired"] += 1
+            self._metric_inc("secondary_fired")
         else:
             # Secondary failed: bounded retries continue on later scans;
             # primary retries continue regardless. Both-down is
@@ -844,7 +882,7 @@ class DurableForwarder:
                 "(was pinned at b2e0005) — coordinator: formalize the "
                 "control-plane page API")
         outbox_id = fn(kind=kind, summary=summary, detail=detail)
-        self.metrics["control_plane_pages"] += 1
+        self._metric_inc("control_plane_pages")
         return outbox_id
 
     # ------------------------------------------------- degraded / standby
@@ -884,10 +922,22 @@ class DurableForwarder:
         This is the fail-open backstop: when the primary durable path is
         dead, the promise to the human is kept on the direct path and the
         audit is repaired at the next startup via spill replay.
+
+        Contract C3 (defense in depth): the kill switch halts even this
+        path. _degraded_send() checks first, but send_direct() is public —
+        any direct caller is absorbed here too. Kill is checked BEFORE the
+        simulated-paging branch: an engaged kill reports "killed", not
+        "simulated".
         """
         outcome: dict = {"pd_outcome": None, "spill": None}
         dedup_key = (f"sentinel/{self.config.env}/degraded/"
                      f"{payload.get('kind', 'unknown')}/{_hour_bucket()}")
+        if self._kill is not None and self._kill.engaged:
+            print("[sentinel] FORWARDER direct send ABSORBED by kill "
+                  "switch (engaged) — page not sent", file=sys.stderr)
+            outcome["pd_outcome"] = "killed"
+            outcome["killed"] = True
+            return outcome
         # BYOK simulated mode: absorb even the standby path — a degraded
         # page must still be honestly labeled.
         if simulated_paging():
@@ -970,9 +1020,19 @@ class DurableForwarder:
     def run_secondary_drill(self) -> str:
         """Send a drill page via the secondary. Returns the drill id — the
         drill passes ONLY when ack_secondary_drill() is called within
-        10 minutes (a delivery receipt is not an ack)."""
+        10 minutes (a delivery receipt is not an ack).
+
+        Contract C3: refused while the kill switch is engaged. A drill is
+        an operator-initiated page through the same machinery kill halts;
+        firing it past an engaged kill would contradict HALT-all-paging.
+        Re-arm, then drill — the drill verifies the resumed path.
+        """
         if self.secondary is None:
             raise SecondaryNotReady("no secondary channel configured")
+        if self._kill is not None and self._kill.engaged:
+            raise SecondaryNotReady(
+                "kill switch engaged — re-arm before drilling the secondary "
+                "(a drill is a page, and kill halts all paging)")
         drill_id = self.drills.start_drill()
         page = {"summary": f"sentinel secondary drill {drill_id}",
                 "severity": "info", "source": "sentinel/drill",
@@ -1051,6 +1111,12 @@ class Forwarder:
         # resumes. The check is a thread-safe flag read: never Jev, never
         # the race, and forward() never raises on kill (it absorbs).
         self._kill_switch = kill_switch
+        # Metrics lock (audit engine P3, RFC engine-metrics-lock): the
+        # receiver shares ONE Forwarder across ThreadingHTTPServer handler
+        # threads — every metrics[...] += is a racy read-modify-write.
+        # Same bug class as the fail-open ladder race 3fac416. RLock,
+        # leaf-lock discipline (see DurableForwarder).
+        self._metrics_lock = threading.RLock()
         self.metrics: dict = {
             "forwarded": 0,   # POSTs accepted (2xx)
             "suppressed": 0,  # suppress dispositions: intentionally not forwarded
@@ -1064,6 +1130,16 @@ class Forwarder:
             "simulated": 0,   # pages absorbed by simulated mode (never sent)
             "killed": 0,      # pages absorbed by an engaged kill switch (C3)
         }
+
+    def _metric_inc(self, key: str, n: int = 1) -> None:
+        """Thread-safe counter bump. ALL metrics writes go through here."""
+        with self._metrics_lock:
+            self.metrics[key] = self.metrics.get(key, 0) + n
+
+    def _metrics_snapshot(self) -> dict:
+        """Thread-safe copy for readers (ops/health, drills). No torn reads."""
+        with self._metrics_lock:
+            return dict(self.metrics)
 
     # ------------------------------------------------------- key resolution
     def _resolve_key(self) -> tuple[str | None, str]:
@@ -1087,14 +1163,29 @@ class Forwarder:
 
     def forward(self, alert: Alert, disposition: Disposition,
                 raw_bytes: bytes | None = None) -> ForwardResult:
-        """Relay one triaged alert. Never raises."""
+        """Relay one triaged alert. Never raises.
+
+        DELIVERY-CONFIRMATION HONESTY BOUNDARY (RFC engine-delivery-
+        confirmation): ``forwarded=True`` means exactly one thing — the
+        PagerDuty Events API accepted the HTTP POST (2xx). It does NOT mean
+        the human's phone rang (PagerDuty's own 202 semantics: accepted
+        into the vendor intake, not delivered to a human).
+
+        This forwarder is an AT-MOST-ONCE relay: no outbox, no retry. A
+        crash between the gate decision and the PD POST loses the page.
+        The DECISION always survives — it is committed to the audit log
+        before forward() runs — so a lost page is detectable by
+        reconciling ``decision_made`` (action ``page_now``) against
+        ``forward_confirmed``. Deployments needing at-least-once delivery
+        use DurableForwarder (transactional outbox), not this class.
+        """
         action = disposition.action
         try:
             if action in ("suppress", "folded"):
                 # D3: folded (storm-continuation) is not forwarded — absorbed
                 # into the aggregate page — but counted separately from
                 # model-driven suppressions.
-                self.metrics["folded" if action == "folded" else "suppressed"] += 1
+                self._metric_inc("folded" if action == "folded" else "suppressed")
                 return ForwardResult(forwarded=False, status_code=None,
                                      error=None, action=action,
                                      dedup_key=_dedup_key_of(alert))
@@ -1159,7 +1250,7 @@ class Forwarder:
         kill = self._kill_switch
         if kill is None or not kill.engaged:
             return None
-        self.metrics["killed"] += 1
+        self._metric_inc("killed")
         print(f"[sentinel] KILL ENGAGED — page ABSORBED action={action} "
               f"alert={alert_id} dedup={dedup_key} (kill switch halted "
               f"paging; nothing was sent)", file=sys.stderr)
@@ -1208,7 +1299,7 @@ class Forwarder:
             return self._fail(action, dedup_key, alert_id, exc,
                               status_code=exc.code)
         if 200 <= status < 300:
-            self.metrics["forwarded"] += 1
+            self._metric_inc("forwarded")
             return ForwardResult(forwarded=True, status_code=status, error=None,
                                  action=action, dedup_key=dedup_key)
         return self._fail(action, dedup_key, alert_id,
@@ -1223,7 +1314,7 @@ class Forwarder:
         the UI must render simulated pages as distinct from real ones.
         """
         _key, key_source = self._resolve_key()
-        self.metrics["simulated"] = self.metrics.get("simulated", 0) + 1
+        self._metric_inc("simulated")
         print(f"[sentinel] SIMULATED PAGE action={action} alert={alert_id} "
               f"dedup={dedup_key} key_source={key_source} "
               f"(simulated paging is ON — nothing was sent to PagerDuty)",
@@ -1237,7 +1328,7 @@ class Forwarder:
         # Log carries alert_id/action/status only — never the body (routing key).
         # The exception string is sanitized against known key values: a
         # hostile/synthetic exception carrying the key must not echo it.
-        self.metrics["errors"] += 1
+        self._metric_inc("errors")
         err = sanitize_error(str(exc))
         print(f"[sentinel] FORWARD FAILED action={action} alert={alert_id} "
               f"status={status_code} error={err}", file=sys.stderr)
