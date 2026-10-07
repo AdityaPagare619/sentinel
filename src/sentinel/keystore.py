@@ -26,6 +26,22 @@ Tier note: the platform tier carries a twin of this module at
 platform/server/keystore.py (tier decoupling — platform never imports the
 engine package). Same file format, same ceremony, same audit contract; if
 the format changes, change BOTH and note it in the PR.
+
+Storage classes (2026-10-07, hash-at-rest):
+  VERIFY-ONLY secrets — the server only ever compares a presented candidate
+  against the stored value (e.g. the platform tier's operator bearer token;
+  nothing in the engine tier today) — are stored as SHA-256 hex digests
+  ({"primary_sha256": ...}). A leaked file yields no secret. Pass
+  hash_at_rest={"name", ...} to RotatingKeyStore to mark verify-only names.
+  PRESENTATION secrets — the server must SEND the value outward — stay
+  recoverable plaintext in the 600-perm file: BYOK PagerDuty/Jev keys
+  (presented to vendor APIs) and webhook_hmac (used as the HMAC *key* for
+  inbound signature checks — hashing is cryptographically impossible there
+  without changing the wire protocol). This is the gh
+  ~/.config/gh/hosts.yml model: a client credential the client must
+  present. Hashing presentation secrets would not change the threat model
+  (the process needs the value in memory anyway) and would break the
+  protocol. Break-glass tokens were already hash-only (issue_breakglass).
 """
 
 from __future__ import annotations
@@ -42,15 +58,78 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 # record codec — the shared file-format contract (both tiers)
 
+ENV_STATE_DIR = "SENTINEL_STATE_DIR"
+
+
+def default_state_dir() -> str:
+    """Default state directory — OUTSIDE the repo tree.
+
+    The old default "./sentinel-state" put live secret files inside the
+    source tree (a live-format operator token was created there during an
+    audit run). State is deployment data, not source: default to
+    ~/.sentinel/state. SENTINEL_STATE_DIR still overrides explicitly.
+
+    Upgrading installs: the store moves on next boot; a fresh secret is
+    minted under the new dir (operator token: shown once in the first-boot
+    banner — re-paste it). The old ./sentinel-state/ can be deleted after
+    confirming, or kept reachable via SENTINEL_STATE_DIR=./sentinel-state.
+    """
+    return os.environ.get(ENV_STATE_DIR) or os.path.expanduser(
+        "~/.sentinel/state")
+
+
+def _sha256_hex(value: str) -> str:
+    """SHA-256 hex digest. Unsalted is safe here: stored values have
+    >=128-bit entropy (token_urlsafe(32)); the digest's job is to make a
+    leaked file useless, not to slow a password guess."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _encode_stored(primary_stored: str, secondary_stored: str | None,
+                   generation: int, hashed: bool) -> dict:
+    """Low-level encoder: values are ALREADY in stored form (digests when
+    hashed, plaintext otherwise). Ceremony methods use this to carry values
+    across generations without re-hashing digests."""
+    if hashed:
+        return {"primary_sha256": primary_stored,
+                "secondary_sha256": secondary_stored,
+                "generation": int(generation)}
+    return {"primary": primary_stored,
+            "secondary": secondary_stored,
+            "generation": int(generation)}
+
 
 def decode_record(raw) -> dict:
-    """Normalize a stored entry to {primary, secondary, generation}.
+    """Normalize a stored entry to {primary, secondary, generation, hashed}.
+
+    Three on-disk formats (all accepted on read):
+      - {"primary_sha256": hex, "secondary_sha256": hex|None, "generation": n}
+        → verify-only record, hashed at rest (2026-10-07+). "primary" holds
+        the hex digest; hashed=True. Plaintext is unrecoverable.
+      - {"primary": str, "secondary": str|None, "generation": n}
+        → plaintext record (presentation secrets, or pre-hash-at-rest
+        verify-only records awaiting migration). hashed=False.
+      - "plain-string" → legacy pre-T4 plaintext, generation 1.
 
     Back-compat: legacy plain-string entries (pre-T4 {name: "value"})
     decode to a generation-1 record with no secondary.
     """
+    if isinstance(raw, dict) and isinstance(raw.get("primary_sha256"), str):
+        gen = raw.get("generation", 1)
+        try:
+            gen = int(gen)
+        except (TypeError, ValueError):
+            gen = 1
+        sec = raw.get("secondary_sha256")
+        return {
+            "primary": raw["primary_sha256"],
+            "secondary": sec if isinstance(sec, str) and sec else None,
+            "generation": max(1, gen),
+            "hashed": True,
+        }
     if isinstance(raw, str):
-        return {"primary": raw, "secondary": None, "generation": 1}
+        return {"primary": raw, "secondary": None, "generation": 1,
+                "hashed": False}
     if isinstance(raw, dict) and isinstance(raw.get("primary"), str):
         gen = raw.get("generation", 1)
         try:
@@ -62,14 +141,23 @@ def decode_record(raw) -> dict:
             "primary": raw["primary"],
             "secondary": sec if isinstance(sec, str) and sec else None,
             "generation": max(1, gen),
+            "hashed": False,
         }
     raise ValueError("unrecognized secret record")
 
 
 def encode_record(primary: str, secondary: str | None,
-                  generation: int) -> dict:
-    return {"primary": primary, "secondary": secondary,
-            "generation": int(generation)}
+                  generation: int, *, hash_at_rest: bool = False) -> dict:
+    """Encode a record from PLAINTEXT values. hash_at_rest=True stores
+    SHA-256 digests only — the plaintext is unrecoverable from the file
+    (verify-only secrets)."""
+    if hash_at_rest:
+        return _encode_stored(
+            _sha256_hex(primary),
+            _sha256_hex(secondary) if isinstance(secondary, str)
+            and secondary else None,
+            generation, True)
+    return _encode_stored(primary, secondary, generation, False)
 
 
 def utcnow_iso() -> str:
@@ -116,18 +204,57 @@ class RotatingKeyStore:
     (raise ValueError to reject). Names not in validators accept any
     non-empty string.
     `audit` is a callable(event: dict) -> None; defaults to a JSONL file.
+    `hash_at_rest` is the set of VERIFY-ONLY secret names stored as
+    SHA-256 digests (see module docstring "Storage classes"). Names outside
+    the set keep the legacy plaintext record format.
     """
 
+    # Class-level hash-at-rest policy, merged with the constructor arg.
+    # (Subclasses that bypass __init__ — e.g. IntegrationStore._RecordsView
+    # — still get a total _hashes() via this default.)
+    HASH_AT_REST = frozenset()
+
     def __init__(self, path: str, *, validators: dict | None = None,
-                 audit=None):
+                 audit=None, hash_at_rest=None):
         self.path = path
         self._validators = validators or {}
         self._audit = audit or jsonl_audit_sink(path)
+        self._hash_at_rest = (frozenset(hash_at_rest or ())
+                              | set(self.HASH_AT_REST))
         self._lock = threading.Lock()
         parent = os.path.dirname(os.path.abspath(self.path))
         os.makedirs(parent, exist_ok=True)
 
     # ------------------------------------------------------------ internals
+    def _hashes(self, name: str) -> bool:
+        """Is `name` a verify-only (hash-at-rest) secret under the current
+        policy?"""
+        policy = getattr(self, "_hash_at_rest", None)
+        if policy is None:
+            policy = self.HASH_AT_REST
+        return name in policy
+
+    def _carry(self, name: str, rec: dict) -> tuple:
+        """Normalize a decoded record to this name's CURRENT hash-at-rest
+        policy, returning (primary_stored, secondary_stored, hashed).
+
+        Plaintext→digest migrates forward (lazy migration on write);
+        digest→plaintext is impossible — fail closed with RotationError
+        rather than silently downgrading a hashed record.
+        """
+        want = self._hashes(name)
+        was = bool(rec.get("hashed"))
+        if want == was:
+            return rec["primary"], rec["secondary"], want
+        if want and not was:
+            p = _sha256_hex(rec["primary"])
+            s = (_sha256_hex(rec["secondary"]) if rec["secondary"]
+                 else None)
+            return p, s, True
+        raise RotationError(
+            f"secret {name!r}: stored hashed at rest but the policy no "
+            "longer hashes it — refusing to downgrade (fail closed)")
+
     def _read_file(self) -> dict:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -193,10 +320,18 @@ class RotatingKeyStore:
         return rec["generation"] if rec else None
 
     def candidates(self, name: str) -> list[str]:
-        """Verifying values, primary first. For multi-candidate checks."""
+        """Verifying values, primary first. For multi-candidate checks.
+
+        Raises TypeError for hash-at-rest (verify-only) records — the
+        plaintext is unrecoverable by design; use verify().
+        """
         rec = self._get_record(name)
         if not rec:
             return []
+        if rec["hashed"]:
+            raise TypeError(
+                f"secret {name!r} is hashed at rest (verify-only) — "
+                "plaintext not recoverable; use verify()")
         out = [rec["primary"]]
         if rec["secondary"]:
             out.append(rec["secondary"])
@@ -208,6 +343,10 @@ class RotatingKeyStore:
 
         Issued (break-glass) tokens verify only at their issuance
         generation — a promote kills every pre-rotation break-glass token.
+
+        For hash-at-rest records the candidate's SHA-256 is compared
+        against the stored digests (constant-time); the plaintext never
+        exists on disk.
         """
         cand = candidate if isinstance(candidate, str) else ""
         data = self._read_file()
@@ -215,10 +354,19 @@ class RotatingKeyStore:
         if raw is None:
             return False, None
         rec = decode_record(raw)
-        if hmac.compare_digest(cand, rec["primary"]):
-            return True, "primary"
-        if rec["secondary"] and hmac.compare_digest(cand, rec["secondary"]):
-            return True, "secondary"
+        if rec["hashed"]:
+            digest = _sha256_hex(cand)
+            if hmac.compare_digest(digest, rec["primary"]):
+                return True, "primary"
+            if rec["secondary"] and hmac.compare_digest(digest,
+                                                       rec["secondary"]):
+                return True, "secondary"
+        else:
+            if hmac.compare_digest(cand, rec["primary"]):
+                return True, "primary"
+            if rec["secondary"] and hmac.compare_digest(cand,
+                                                       rec["secondary"]):
+                return True, "secondary"
         for tid, iss in self._issued(data).items():
             if not isinstance(iss, dict) or iss.get("revoked"):
                 continue
@@ -251,22 +399,33 @@ class RotatingKeyStore:
             recs = self._records(data)
             base = decode_record(recs[name]) if name in recs else None
             gen = base["generation"] if base else 1
-            if base and hmac.compare_digest(clean, base["primary"]):
-                raise RotationError(
-                    f"secret {name!r}: staged value identical to primary — "
-                    "refusing a no-op rotation")
-            primary = base["primary"] if base else clean
+            if base:
+                if base["hashed"]:
+                    same = hmac.compare_digest(_sha256_hex(clean),
+                                               base["primary"])
+                else:
+                    same = hmac.compare_digest(clean, base["primary"])
+                if same:
+                    raise RotationError(
+                        f"secret {name!r}: staged value identical to primary"
+                        " — refusing a no-op rotation")
             if base is None:
                 # First-ever secret: staged value becomes the primary
                 # directly (nothing to overlap with yet).
-                recs[name] = encode_record(clean, None, 1)
+                recs[name] = encode_record(clean, None, 1,
+                                           hash_at_rest=self._hashes(name))
                 data["records"] = recs
                 self._write_file(data)
                 self._log(actor=actor, action="bootstrap", name=name,
                           gen_before=0, gen_after=1,
                           detail="initial secret installed")
                 return self.status(name)
-            recs[name] = encode_record(primary, clean, gen)
+            # Carry the stored primary through untouched (a digest when the
+            # record is hashed — never re-hash a digest), migrating forward
+            # to the current policy if the on-disk form is older.
+            p_stored, _s, h_now = self._carry(name, base)
+            sec_stored = _sha256_hex(clean) if h_now else clean
+            recs[name] = _encode_stored(p_stored, sec_stored, gen, h_now)
             data["records"] = recs
             self._write_file(data)
             self._log(actor=actor, action="stage_secondary", name=name,
@@ -282,7 +441,11 @@ class RotatingKeyStore:
         if not rec or not rec["secondary"]:
             raise RotationError(
                 f"secret {name!r}: no staged secondary to verify")
-        ok = hmac.compare_digest(candidate or "", rec["secondary"])
+        if rec["hashed"]:
+            ok = hmac.compare_digest(_sha256_hex(candidate or ""),
+                                     rec["secondary"])
+        else:
+            ok = hmac.compare_digest(candidate or "", rec["secondary"])
         self._log(actor=actor, action="verify_secondary", name=name,
                   gen_before=rec["generation"],
                   gen_after=rec["generation"],
@@ -306,8 +469,11 @@ class RotatingKeyStore:
                     "run stage_secondary first")
             gen_before = rec["generation"]
             gen_after = gen_before + 1
-            recs[name] = encode_record(rec["secondary"], rec["primary"],
-                                       gen_after)
+            # Secondary becomes primary; old primary drops to the grace
+            # slot — both carried in stored form (digests when hashed),
+            # normalized to the current policy.
+            p_stored, s_stored, h_now = self._carry(name, rec)
+            recs[name] = _encode_stored(s_stored, p_stored, gen_after, h_now)
             data["records"] = recs
             self._write_file(data)
             self._log(actor=actor, action="promote", name=name,
@@ -331,7 +497,8 @@ class RotatingKeyStore:
                 raise RotationError(
                     f"secret {name!r}: nothing to retire — no grace slot")
             gen = rec["generation"]
-            recs[name] = encode_record(rec["primary"], None, gen)
+            p_stored, _s, h_now = self._carry(name, rec)
+            recs[name] = _encode_stored(p_stored, None, gen, h_now)
             data["records"] = recs
             self._write_file(data)
             self._log(actor=actor, action="retire", name=name,
@@ -351,7 +518,8 @@ class RotatingKeyStore:
             base = decode_record(recs[name]) if name in recs else None
             gen_before = base["generation"] if base else 0
             gen_after = gen_before + 1
-            recs[name] = encode_record(clean, None, gen_after)
+            recs[name] = encode_record(clean, None, gen_after,
+                                       hash_at_rest=self._hashes(name))
             data["records"] = recs
             self._write_file(data)
             self._log(actor=actor, action="set_immediate", name=name,
@@ -362,21 +530,59 @@ class RotatingKeyStore:
 
     def ensure(self, name: str, generator, actor: str = "system") -> tuple[str, bool]:
         """Bootstrap-once: if no record exists, generate and install as
-        primary (gen 1). Returns (value, is_new). The value is returned
-        ONLY here — callers must treat it as write-once (never log it)."""
+        primary (gen 1). Returns (value, is_new).
+
+        The value is returned ONLY on first creation — callers must treat
+        it as write-once (never log it). For hash-at-rest (verify-only)
+        names an existing record returns (None, False): the plaintext is
+        unrecoverable by design, and returning the digest would be a lie.
+        """
         with self._lock:
             data = self._read_file()
             recs = self._records(data)
             if name in recs:
+                if self._hashes(name):
+                    return None, False
                 return decode_record(recs[name])["primary"], False
             clean = self._validate(name, generator())
-            recs[name] = encode_record(clean, None, 1)
+            recs[name] = encode_record(clean, None, 1,
+                                       hash_at_rest=self._hashes(name))
             data["records"] = recs
             self._write_file(data)
             self._log(actor=actor, action="bootstrap", name=name,
                       gen_before=0, gen_after=1,
                       detail="initial secret installed")
             return clean, True
+
+    def migrate_hash_at_rest(self, name: str,
+                             actor: str = "system") -> bool:
+        """One-way migration: rewrite a plaintext-stored record for a
+        hash-at-rest (verify-only) name into SHA-256-digest form.
+
+        No-op (False) when the name isn't hashed by policy, the record is
+        missing, or it's already hashed. Audit-logged when it migrates.
+        """
+        if not self._hashes(name):
+            return False
+        with self._lock:
+            data = self._read_file()
+            recs = self._records(data)
+            if name not in recs:
+                return False
+            rec = decode_record(recs[name])
+            if rec["hashed"]:
+                return False
+            gen = rec["generation"]
+            recs[name] = _encode_stored(
+                _sha256_hex(rec["primary"]),
+                _sha256_hex(rec["secondary"]) if rec["secondary"] else None,
+                gen, True)
+            data["records"] = recs
+            self._write_file(data)
+            self._log(actor=actor, action="migrate_hash_at_rest", name=name,
+                      gen_before=gen, gen_after=gen,
+                      detail="plaintext record rewritten as SHA-256 digests")
+            return True
 
     # ------------------------------------------------- break-glass tokens
     def issue_breakglass(self, name: str, actor: str,
@@ -451,13 +657,18 @@ ENV_WEBHOOK_SECRET = "SENTINEL_WEBHOOK_SECRET"
 
 class WebhookSecretStore(RotatingKeyStore):
     """Rotatable webhook HMAC secrets. Env var is the bootstrap fallback:
-    the store record wins when present (operator rotation is explicit)."""
+    the store record wins when present (operator rotation is explicit).
+
+    NOTE: webhook_hmac is deliberately NOT hashed at rest — it is used as
+    the HMAC *key* for inbound signature checks
+    (receiver._webhook_sig_failure_reason_any), which needs the key bytes.
+    Hashing is cryptographically impossible there without changing the
+    wire protocol. See the module docstring "Storage classes".
+    """
 
     def __init__(self, path: str | None = None, *, audit=None):
         if path is None:
-            state_dir = os.environ.get("SENTINEL_STATE_DIR",
-                                       "./sentinel-state")
-            path = os.path.join(state_dir, "webhook_secrets.json")
+            path = os.path.join(default_state_dir(), "webhook_secrets.json")
         super().__init__(path,
                          validators={WEBHOOK_SECRET_NAME: _webhook_validator},
                          audit=audit)

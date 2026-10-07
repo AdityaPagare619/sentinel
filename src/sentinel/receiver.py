@@ -68,7 +68,7 @@ from .forwarder import Forwarder
 from .gate import Gate
 from .health import HealthMonitor
 from .integrations import resolve_jev_key
-from .keystore import WebhookSecretStore
+from .keystore import WebhookSecretStore, default_state_dir
 from .models import Alert, Thresholds
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
@@ -217,8 +217,7 @@ class Pipeline:
         # entrypoint always supplies one — see build_pipeline_from_env.
         self.policy = policy
         self.config_loader = config_loader
-        self.state_dir = (state_dir or os.environ.get("SENTINEL_STATE_DIR")
-                          or "./sentinel-state")
+        self.state_dir = (state_dir or default_state_dir())
         # Stage-0 read-only tap (design 06). Attached by
         # build_pipeline_from_env(); None when SENTINEL_SHADOW_TAP != 1.
         # The shadow pipeline's object graph contains no paging/write
@@ -1342,8 +1341,7 @@ def main(argv=None) -> None:
     parser.add_argument("--config-dir", default=os.environ.get(
         "SENTINEL_CONFIG_DIR", "."),
         help="directory holding thresholds.json / allowlist.json")
-    parser.add_argument("--state-dir", default=os.environ.get(
-        "SENTINEL_STATE_DIR", "./sentinel-state"),
+    parser.add_argument("--state-dir", default=default_state_dir(),
         help="writable state dir (generations, restarts, events)")
     parser.add_argument("--jev-budget-usd", type=float,
                         default=sim_judge.budget_usd_from_env(),

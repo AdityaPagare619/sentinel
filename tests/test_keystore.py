@@ -27,6 +27,7 @@ from sentinel.keystore import (
     WebhookSecretStore,
     RotationError,
     decode_record,
+    encode_record,
     utcnow_iso,
 )
 from sentinel import integrations as eng
@@ -479,6 +480,137 @@ class TestBYOKCeremony(unittest.TestCase):
         s = eng.IntegrationStore(path=self.path, ephemeral=True)
         with self.assertRaises(EphemeralStoreError):
             s.stage_secondary(eng.PD_KEY_NAME, self.PD, actor="op")
+
+
+class TestHashAtRest(KeystoreTestBase):
+    """SHA-256 at rest for verify-only secrets (2026-10-07).
+
+    Policy is per-name via hash_at_rest={...}. Presentation secrets
+    (BYOK keys, webhook_hmac) stay plaintext by design — see
+    TestWebhookStaysPlaintextByDesign.
+    """
+
+    HASHED = {"api"}
+
+    def make_hashed(self, name="h.json", **kw):
+        kw.setdefault("audit", self.audit)
+        kw["hash_at_rest"] = self.HASHED
+        return RotatingKeyStore(os.path.join(self.tmp, name), **kw)
+
+    def file_text(self, name="h.json"):
+        with open(os.path.join(self.tmp, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_bootstrap_stores_digest_never_plaintext(self):
+        ks = self.make_hashed()
+        ks.stage_secondary("api", TEST_OLD, actor="op")  # bootstrap path
+        blob = self.file_text()
+        self.assertNotIn(TEST_OLD, blob)
+        self.assertIn("primary_sha256", blob)
+        self.assertNotIn('"primary"', blob.replace('"primary_sha256"', ""))
+        # digest matches SHA-256 of the secret
+        rec = decode_record(json.loads(blob)["records"]["api"])
+        self.assertTrue(rec["hashed"])
+        self.assertEqual(rec["primary"],
+                         hashlib.sha256(TEST_OLD.encode()).hexdigest())
+
+    def test_verify_roundtrip(self):
+        ks = self.make_hashed()
+        ks.stage_secondary("api", TEST_OLD, actor="op")
+        self.assertEqual(ks.verify("api", TEST_OLD), (True, "primary"))
+        self.assertEqual(ks.verify("api", "wrong"), (False, None))
+        self.assertEqual(ks.verify("api", ""), (False, None))
+
+    def test_ceremony_roundtrip_stays_hashed(self):
+        ks = self.make_hashed()
+        ks.stage_secondary("api", TEST_OLD, actor="op")
+        ks.stage_secondary("api", TEST_NEW, actor="op")
+        self.assertTrue(ks.verify_secondary("api", TEST_NEW,
+                                            actor="op")["ok"])
+        self.assertFalse(ks.verify_secondary("api", "wrong",
+                                             actor="op")["ok"])
+        # no-op stage refuses, comparing digests not plaintext
+        with self.assertRaises(RotationError):
+            ks.stage_secondary("api", TEST_OLD, actor="op")
+        ks.promote("api", actor="op")
+        self.assertEqual(ks.verify("api", TEST_NEW), (True, "primary"))
+        self.assertEqual(ks.verify("api", TEST_OLD), (True, "secondary"))
+        ks.retire("api", actor="op")
+        self.assertEqual(ks.verify("api", TEST_NEW), (True, "primary"))
+        self.assertEqual(ks.verify("api", TEST_OLD), (False, None))
+        self.assertEqual(ks.generation("api"), 2)
+        blob = self.file_text()
+        self.assertNotIn(TEST_OLD, blob)
+        self.assertNotIn(TEST_NEW, blob)
+
+    def test_legacy_plaintext_record_still_verifies(self):
+        # back-compat: a pre-hash-at-rest plaintext record verifies, and
+        # the next write migrates it forward to digests (lazy migration).
+        ks = self.make_hashed(name="legacy.json")
+        plain = RotatingKeyStore(os.path.join(self.tmp, "legacy.json"),
+                                 audit=self.audit)
+        plain.stage_secondary("api", TEST_OLD, actor="op")
+        self.assertEqual(ks.verify("api", TEST_OLD), (True, "primary"))
+        self.assertTrue(ks.migrate_hash_at_rest("api", actor="op"))
+        self.assertNotIn(TEST_OLD, self.file_text("legacy.json"))
+        self.assertEqual(ks.verify("api", TEST_OLD), (True, "primary"))
+        self.assertFalse(ks.migrate_hash_at_rest("api", actor="op"))
+        mig = [e for e in self.audit.events
+               if e["action"] == "migrate_hash_at_rest"]
+        self.assertEqual(len(mig), 1)
+        self.assertEqual(mig[0]["secret_name"], "api")
+
+    def test_candidates_raises_for_hashed(self):
+        ks = self.make_hashed()
+        ks.stage_secondary("api", TEST_OLD, actor="op")
+        with self.assertRaises(TypeError):
+            ks.candidates("api")
+
+    def test_ensure_existing_hashed_returns_no_plaintext(self):
+        ks = self.make_hashed()
+        value, is_new = ks.ensure("api", lambda: TEST_OLD, actor="op")
+        self.assertTrue(is_new)
+        self.assertEqual(value, TEST_OLD)
+        value2, is_new2 = ks.ensure("api", lambda: "other", actor="op")
+        self.assertFalse(is_new2)
+        self.assertIsNone(value2)  # unrecoverable by design
+
+    def test_downgrade_refused_fail_closed(self):
+        ks = self.make_hashed()
+        ks.stage_secondary("api", TEST_OLD, actor="op")
+        # same file, policy removed -> any write that would downgrade a
+        # hashed record to plaintext fails closed
+        plain = RotatingKeyStore(os.path.join(self.tmp, "h.json"),
+                                 audit=self.audit)
+        with self.assertRaises(RotationError):
+            plain.stage_secondary("api", TEST_NEW, actor="op")
+        # the hashed record still verifies through the plain-policy store
+        self.assertEqual(plain.verify("api", TEST_OLD), (True, "primary"))
+
+    def test_encode_record_hash_flag(self):
+        rec = encode_record(TEST_OLD, TEST_NEW, 3, hash_at_rest=True)
+        self.assertIn("primary_sha256", rec)
+        self.assertIn("secondary_sha256", rec)
+        self.assertNotIn("primary", rec)
+        d = decode_record(rec)
+        self.assertTrue(d["hashed"])
+        self.assertEqual(d["generation"], 3)
+
+
+class TestWebhookStaysPlaintextByDesign(KeystoreTestBase):
+    """webhook_hmac is PRESENTATION material (HMAC key for inbound
+    signature checks) — it must stay recoverable. This test pins the
+    distinction: the hash-at-rest policy does NOT cover it."""
+
+    def test_webhook_secret_not_hashed(self):
+        store = WebhookSecretStore(
+            path=os.path.join(self.tmp, "wh.json"), audit=self.audit)
+        self.assertFalse(store._hashes("webhook_hmac"))
+        whsec = "test-webhook-hmac-key-00000001"
+        store.stage_secondary("webhook_hmac", whsec, actor="op")
+        # verification candidates still yield the usable key (the receiver
+        # HMACs with it) — impossible under hashing
+        self.assertIn(whsec, store.verification_candidates())
 
 
 if __name__ == "__main__":

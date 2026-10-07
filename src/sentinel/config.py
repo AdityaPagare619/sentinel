@@ -29,6 +29,7 @@ import sys
 import time
 
 from .counterfactual import PresetError, validate_counterfactual_presets
+from .keystore import default_state_dir
 from .models import Thresholds
 
 CONFIG_VERSION = 1
@@ -102,8 +103,7 @@ class ConfigLoader:
     def __init__(self, config_dir: str = ".",
                  state_dir: str | None = None):
         self.config_dir = config_dir
-        self.state_dir = (state_dir or os.environ.get("SENTINEL_STATE_DIR")
-                          or "./sentinel-state")
+        self.state_dir = (state_dir or default_state_dir())
         self._gen_dir = os.path.join(self.state_dir, "generations")
         self._events_path = os.path.join(self.state_dir, "events.jsonl")
         os.makedirs(self._gen_dir, exist_ok=True)

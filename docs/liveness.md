@@ -62,7 +62,9 @@ emit `config_rejected` to `events.jsonl`. Invalid startup config with **no**
 last-good → **refuse to start** (exit 2). Invalid reload (SIGHUP or
 `POST /-/reload`, same bearer <redacted> `/healthz`) → 422, live generation untouched.
 
-State dir (`--state-dir` / `SENTINEL_STATE_DIR`, default `./sentinel-state`)
+State dir (`--state-dir` / `SENTINEL_STATE_DIR`, default `~/.sentinel/state` —
+outside the repo tree since 2026-10-07; see
+docs/planning/security/STATE_AND_OPERATOR_TOKEN.md)
 holds `generations/` (newest 5 validated generations), `restarts.jsonl`
 (crash-loop accounting) and `events.jsonl` (`config_rejected` events).
 

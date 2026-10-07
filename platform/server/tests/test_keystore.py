@@ -113,10 +113,18 @@ class TestOperatorToken(PlatformStoreBase):
         token, is_new = keystore.ensure_operator_token(store)
         self.assertTrue(is_new)
         self.assertGreaterEqual(len(token), 16)
-        # second call returns the SAME token, no mint
+        # second call returns (None, False): the record is hashed at rest,
+        # so the plaintext is unrecoverable by design — and returning the
+        # digest would be a lie. The token still verifies.
         token2, is_new2 = keystore.ensure_operator_token(store)
         self.assertFalse(is_new2)
-        self.assertEqual(token, token2)
+        self.assertIsNone(token2)
+        self.assertTrue(store.verify(keystore.OPERATOR_TOKEN_NAME, token)[0])
+        # the file holds a digest record, never the token
+        with open(path, encoding="utf-8") as fh:
+            blob = fh.read()
+        self.assertNotIn(token, blob)
+        self.assertIn("primary_sha256", blob)
         # bootstrap is audited without the value
         blob = json.dumps(self.audit.events)
         self.assertNotIn(token, blob)
@@ -249,6 +257,88 @@ class TestPlatformBYOKTwin(PlatformStoreBase):
         e = eng.IntegrationStore(path=path)
         self.assertEqual(e.get(eng.PD_KEY_NAME), pd2)
         self.assertEqual(e.generation(eng.PD_KEY_NAME), 2)
+
+
+class TestHashAtRestPlatform(PlatformStoreBase):
+    """SHA-256 at rest for the verify-only operator_bearer (2026-10-07)."""
+
+    def test_policy_marks_operator_token_verify_only(self):
+        store = keystore.operator_token_store(
+            os.path.join(self.tmp, "oph.json"), audit=self.audit)
+        self.assertTrue(store._hashes(keystore.OPERATOR_TOKEN_NAME))
+        self.assertFalse(store._hashes("other"))
+
+    def test_second_boot_migrates_legacy_plaintext(self):
+        # hand-write a PRE-hash-at-rest plaintext record (the old format)
+        path = os.path.join(self.tmp, "legacy-op.json")
+        legacy_value = "legacy-operator-token-0001"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"records": {keystore.OPERATOR_TOKEN_NAME: {
+                "primary": legacy_value, "secondary": None,
+                "generation": 1}}}, fh)
+        os.chmod(path, 0o600)
+        store = keystore.operator_token_store(path, audit=self.audit)
+        # legacy record still verifies (back-compat) ...
+        self.assertTrue(
+            store.verify(keystore.OPERATOR_TOKEN_NAME, legacy_value)[0])
+        # ... then the boot migrates it forward and reports (None, False)
+        token, is_new = keystore.ensure_operator_token(store)
+        self.assertFalse(is_new)
+        self.assertIsNone(token)
+        with open(path, encoding="utf-8") as fh:
+            blob = fh.read()
+        self.assertNotIn(legacy_value, blob)
+        self.assertIn("primary_sha256", blob)
+        self.assertTrue(
+            store.verify(keystore.OPERATOR_TOKEN_NAME, legacy_value)[0])
+        mig = [e for e in self.audit.events
+               if e["action"] == "migrate_hash_at_rest"]
+        self.assertEqual(len(mig), 1)
+
+    def test_ceremony_roundtrip_on_hashed_operator_token(self):
+        path = os.path.join(self.tmp, "opc.json")
+        store = keystore.operator_token_store(path, audit=self.audit)
+        old, is_new = keystore.ensure_operator_token(store)
+        self.assertTrue(is_new)
+        new = "rotated-operator-token-00000002"
+        name = keystore.OPERATOR_TOKEN_NAME
+        # staging the value identical to the live primary is refused
+        # (digest comparison, since the record is hashed)
+        with self.assertRaises(keystore.RotationError):
+            store.stage_secondary(name, old, actor="op")
+        store.stage_secondary(name, new, actor="op")
+        self.assertTrue(store.verify(name, old)[0])
+        self.assertTrue(store.verify(name, new)[0])
+        store.promote(name, actor="op")
+        store.retire(name, actor="op")
+        self.assertFalse(store.verify(name, old)[0])
+        self.assertTrue(store.verify(name, new)[0])
+        with open(path, encoding="utf-8") as fh:
+            blob = fh.read()
+        self.assertNotIn(old, blob)
+        self.assertNotIn(new, blob)
+
+    def test_candidates_raises_for_hashed_operator_token(self):
+        path = os.path.join(self.tmp, "opd.json")
+        store = keystore.operator_token_store(path, audit=self.audit)
+        keystore.ensure_operator_token(store)
+        with self.assertRaises(TypeError):
+            store.candidates(keystore.OPERATOR_TOKEN_NAME)
+
+    def test_twin_hashed_format_cross_verifies(self):
+        """Engine twin writes a hashed record; the platform twin verifies
+        it (shared format contract, hashed variant)."""
+        path = os.path.join(self.tmp, "shared-hashed.json")
+        eng = eng_keystore.RotatingKeyStore(
+            path, audit=self.audit, hash_at_rest={"k"})
+        eng.stage_secondary("k", TEST_OLD, actor="op")
+        plat = keystore.RotatingKeyStore(
+            path, audit=self.audit, hash_at_rest={"k"})
+        self.assertTrue(plat.verify("k", TEST_OLD)[0])
+        self.assertFalse(plat.verify("k", "wrong")[0])
+        eng2 = eng_keystore.RotatingKeyStore(
+            path, audit=self.audit, hash_at_rest={"k"})
+        self.assertTrue(eng2.verify("k", TEST_OLD)[0])
 
 
 if __name__ == "__main__":

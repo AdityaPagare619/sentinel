@@ -44,6 +44,7 @@ auth_mod = _pkg.load("auth")         # noqa: E402
 datasets_mod = _pkg.load("datasets")  # noqa: E402
 shed_mod = _pkg.load("shed")         # noqa: E402
 store_mod = _pkg.load("store")       # noqa: E402
+keystore_mod = _pkg.load("keystore")  # noqa: E402
 
 PlatformApp = app_mod.PlatformApp
 OperatorTokenStore = auth_mod.OperatorTokenStore
@@ -99,8 +100,7 @@ def main(argv=None) -> None:
     ap.add_argument("--db", default=os.environ.get("SENTINEL_DB",
                                                    "./sentinel.db"))
     ap.add_argument("--state-dir",
-                    default=os.environ.get("SENTINEL_STATE_DIR",
-                                           "./sentinel-state"))
+                    default=keystore_mod.default_state_dir())
     ap.add_argument("--ui", default="platform/ui",
                     help="static UI dir served at / (Prism's files)")
     ap.add_argument("--data-source", default=os.environ.get(

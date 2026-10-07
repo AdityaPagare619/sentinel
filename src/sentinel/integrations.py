@@ -31,14 +31,16 @@ import re
 import tempfile
 import threading
 
-from .keystore import RotatingKeyStore, decode_record, jsonl_audit_sink
+from .keystore import RotatingKeyStore, decode_record, jsonl_audit_sink, \
+    default_state_dir
 
 PD_KEY_NAME = "pagerduty_routing_key"
 JEV_KEY_NAME = "jev_api_key"
 KNOWN_KEYS = (PD_KEY_NAME, JEV_KEY_NAME)
 
 ENV_INTEGRATIONS_FILE = "SENTINEL_INTEGRATIONS_FILE"
-ENV_STATE_DIR = "SENTINEL_STATE_DIR"
+# NOTE: the state-dir env name lives in keystore.ENV_STATE_DIR; the default
+# dir itself is keystore.default_state_dir() (outside the repo tree).
 ENV_SIMULATED = "SENTINEL_SIMULATED_PAGING"
 ENV_PD_ROUTING_KEY = "PD_ROUTING_KEY"
 ENV_JEV_KEY = "TYPESAFE_API_KEY"
@@ -52,8 +54,7 @@ class EphemeralStoreError(RuntimeError):
 
 
 def _default_path() -> str:
-    state_dir = os.environ.get(ENV_STATE_DIR, "./sentinel-state")
-    return os.path.join(state_dir, "integrations.json")
+    return os.path.join(default_state_dir(), "integrations.json")
 
 
 def validate_routing_key(value: str) -> str:
