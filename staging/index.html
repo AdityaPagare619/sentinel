@@ -79,6 +79,11 @@ button.chip:hover{border-color:var(--ink-3)}
 .kill.armed .lamp{background:var(--red);animation:beat 1.2s infinite}
 .kill.confirm{background:var(--red);border-color:var(--red);color:#fff}
 .kill.confirm .lamp{background:#fff}
+/* INTERIM (P0-1 open): deployed tier hosts no paging path that reads the
+   kill flag — the control is visibly disabled until kill-topology wiring
+   lands. Sim mode never renders this state. */
+.kill.disabled{opacity:.55;cursor:not-allowed}
+.kill.disabled .lamp{background:var(--ink-3)}
 
 /* one-line state of the world */
 .state-line{background:var(--surface);border-bottom:1px solid var(--line);
@@ -219,6 +224,10 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
   background:var(--green-soft);color:var(--green)}
 .pillbad{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;
   background:var(--red-soft);color:var(--red)}
+.pillwarn{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;
+  background:var(--amber-soft);color:var(--amber)}
+.pillmute{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;
+  background:var(--quiet-soft);color:var(--quiet)}
 .contract{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;
   padding:10px 12px;font-size:12.5px;color:var(--ink-2);margin-top:8px}
 
@@ -283,8 +292,8 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
   <button class="chip ok" id="chipPolicy" title="Policy governance">policy <b>v2026.10.06-r3</b></button>
   <button class="chip ok" id="chipAuth" title="Auth status">auth <b>2/3 locked</b></button>
   <button class="chip" id="chipRace" title="AI vs timer">race <b class="num">—</b></button>
-  <button class="kill" id="killBtn" aria-label="Kill switch: suppression is currently on">
-    <span class="lamp"></span><span id="killLabel">Suppressing</span>
+  <button class="kill" id="killBtn" aria-label="Kill switch: paging is live. Activate to halt all paging.">
+    <span class="lamp"></span><span id="killLabel">Paging live</span>
   </button>
 </div>
 
@@ -482,7 +491,9 @@ function race(p){
 function gate(p){
   S.counts.gate++;
   const j = p.judge;
-  if(S.kill.engaged) return decide(p,'PAGE','kill-switch','Kill switch engaged — all suppression paused');
+  /* KILL = HALT all paging (fail-closed, owner ruling 2026-10-07). While the kill switch
+     is engaged no decision pages — problems halt and resume when re-armed. */
+  if(S.kill.engaged) return decide(p,'HALT','kill-switch','Kill switch engaged — paging halted, nothing goes out');
   if(j.winner==='timer') return decide(p,'PAGE','timer-win','Judge too slow — the human gets paged, the late answer is powerless');
   const s=j.score, band=SEM.doubtBand;
   if(s - band < SEM.suppressBar)
@@ -495,7 +506,7 @@ function gate(p){
   return decide(p,'PAGE','no-rule','No suppression rule matched — paging');
 }
 function decide(p, disp, ruleId, plain){
-  p.state = disp==='PAGE' ? 'open' : 'decided';
+  p.state = disp==='PAGE' ? 'open' : (disp==='HALT' ? 'halted' : 'decided');
   p.decision = {
     disp, ruleId, plain, at:S.t,
     score:p.judge.score, winner:p.judge.winner, latencyMs:p.judge.latency,
@@ -507,6 +518,10 @@ function decide(p, disp, ruleId, plain){
   if(disp==='PAGE'){
     p.expiresAt = null;
     log('machine', `${p.id}: PAGE — ${plain}`);
+  } else if(disp==='HALT'){
+    // fail-closed: no page, no suppression — the problem waits for re-arm
+    log('machine', `${p.id}: HALT — ${plain}`);
+    S.humanLog.push({t:S.t, kind:'halt', text:`${p.id} halted by kill switch (no page sent)`});
   } else {
     const mins = disp==='SUPPRESS' ? 15+Math.floor(R()*45) : 240;
     p.expiresAt = S.t + mins*60;
@@ -527,7 +542,9 @@ function log(who, text){ S.timeline.push({t:S.t, who, text}); if(S.timeline.leng
 /* self-clear + expiry re-evaluation: time passes, things resolve */
 function ageWorld(dt){
   for(const p of S.problems.values()){
-    if(p.state==='racing' && S.t>=p._resolveAt){
+    // fail-closed: while the kill switch is engaged the race does not resolve —
+    // problems hold, then resume when re-armed.
+    if(p.state==='racing' && !S.kill.engaged && S.t>=p._resolveAt){
       const won = p._score!=null;
       p.judge = won
         ? {winner:'judge', latency:Math.round((p._resolveAt-p.createdAt)*1000), score:p._score}
@@ -612,11 +629,13 @@ const SimAdapter = {
   engageKill(){ const t0=performance.now(); S.kill.engaged=true;
     S.kill.flips.push({t:S.t, dir:'engage', ms:null});
     const ms=performance.now()-t0; S.kill.flips.at(-1).ms=ms; S.kill.drillMs=ms;
-    log('you','kill switch ENGAGED — all suppression paused'); return ms; },
+    log('you','kill switch ENGAGED — paging halted, nothing goes out'); return ms; },
   disengageKill(){ const t0=performance.now(); S.kill.engaged=false;
     S.kill.flips.push({t:S.t, dir:'disengage', ms:null});
     const ms=performance.now()-t0; S.kill.flips.at(-1).ms=ms;
-    log('you','kill switch disengaged — gating resumed'); return ms; },
+    // halted problems resume the race — nothing was paged while engaged
+    for(const p of S.problems.values()) if(p.state==='halted'){ p.state='racing'; p.decision=null; }
+    log('you','kill switch disengaged — paging resumed'); return ms; },
   /* evaluator-only; never in the operator's control plane */
   eval:{ setScenario(sc){ setScenario(sc); }, setLoad(n){ LOAD.target=n; }, reset(){ resetSim(); } },
 };
@@ -673,8 +692,16 @@ function prodSyncStore(h, decisions, s){
   S.counts={recv:n, corr:n, race:n, gate:n, fwd:db.pages_1h||0};
   S.dataAgeSec=db.data_age_s!=null?Math.round(db.data_age_s):null;
   S.kill={engaged:!!(s&&s.engaged), armed:false, flips:[],
-    drillMs:(s&&s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null};
-  S.judgeDown=false; S.storm=null;
+    drillMs:(s&&s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null,
+    /* per-instance kill-state visibility: the deployed tier keeps the flag
+       in per-instance /tmp; instances can disagree. Surfaced so the
+       operator sees divergence instead of assuming one switch. */
+    instanceId:(s&&s.instance_id)||null,
+    scope:(h&&h.safety&&h.safety.kill_switch&&h.safety.kill_switch.kill_state_scope)||null};
+  /* judge state wired from the health payload: without a configured Jev key
+     the judge cannot advise — degraded. (Never a hardcoded constant.) */
+  S.judgeDown = !(h && h.jev && h.jev.key_configured===true);
+  S.storm=null;
   S.auth=[{state:(h&&h.safety&&h.safety.auth&&h.safety.auth.operator_token==='ok')?'locked':'unknown'}];
   S._ops=h||null;
 }
@@ -708,6 +735,7 @@ const ProductionAdapter = {
         const dj=await this._get('/api/decisions?limit=200');
         const s=await this._get('/api/v1/safety/status');
         prodSyncStore(h, dj, s);
+        prodBannerFromHealth(h);
       }catch(e){ /* keep last good state; data age shows staleness */ }
       render();
     };
@@ -724,25 +752,40 @@ const ProductionAdapter = {
   getLedger(filter){ return ledgerData(filter); },
   getSafety(){ return safetyData(); },
   getStorm(){ return null; },
-  getJudgeDown(){ return false; },
+  /* judge state comes from the synced health payload — never hardcoded.
+     Key not configured ⇒ the judge cannot advise ⇒ degraded. When the key
+     IS configured the read tier still cannot observe live judge liveness
+     (not_instrumented); that gap is shown literally in Operations Health. */
+  getJudgeDown(){ return S.judgeDown; },
   getOpsHealth(){ return S._ops||null; },
   /* writes — operator intent against the real backend */
   ack(id,by){ toast('Decision records are immutable — acknowledge in PagerDuty'); },
   takeOwnership(id,by){ toast('Ownership lives in PagerDuty'); },
   appeal(pid,reason){ toast('Appeals apply to the live pipeline via the API'); },
   engageKill(){
+    /* INTERIM (P0-1 open): the kill endpoint flips a per-instance flag only
+       — no paging path on the deployed tier reads it. The confirmation
+       below echoes ONLY what the response contained; it must never claim
+       "suppression paused" or "backend confirmed". */
     const t0=performance.now();
-    this._post('/api/v1/safety/kill',{}).then(()=>{
+    this._post('/api/v1/safety/kill',{}).then((j)=>{
       const ms=performance.now()-t0;
-      log('you','kill switch ENGAGED — backend confirmed in '+ms.toFixed(0)+' ms');
-      toast('Suppression paused — backend confirmed in '+ms.toFixed(0)+' ms');
-      S.kill.engaged=true; render();
+      const engaged=!!(j&&j.engaged);
+      S.kill.engaged=engaged; render();
+      const echo='engaged='+engaged+', engaged_at='+((j&&j.engaged_at)||'n/a')
+        +', transitioned='+((j&&j.transitioned)!==undefined?j.transitioned:'n/a');
+      log('you','kill endpoint responded ['+echo+'] in '+ms.toFixed(0)+' ms — response contains a per-instance flag flip only; no paging path reads it on this tier');
+      toast('kill endpoint: ['+echo+'] — flag only, nothing halted');
     }).catch(e=>toast('kill failed: '+e.message));
     return 0; /* async: confirmation toasts on arrival, never faked sync */
   },
   disengageKill(){
-    this._post('/api/v1/safety/rearm',{confirm:true}).then(()=>{
-      S.kill.engaged=false; render(); toast('Gating resumed — backend confirmed');
+    const t0=performance.now();
+    this._post('/api/v1/safety/rearm',{confirm:true}).then((j)=>{
+      const ms=performance.now()-t0;
+      const engaged=!!(j&&j.engaged);
+      S.kill.engaged=engaged; render();
+      toast('re-arm endpoint: [engaged='+engaged+'] in '+ms.toFixed(0)+' ms — flag only');
     }).catch(e=>toast('re-arm failed: '+e.message));
     return 0;
   },
@@ -775,13 +818,22 @@ function prodTokenGate(){
   document.getElementById('tokin').onkeydown=e=>{ if(e.key==='Enter') go(); };
   setTimeout(()=>{const i=document.getElementById('tokin'); if(i) i.focus();},50);
 }
-/* production chrome: structural mode banner + evaluator removed from the
-   operator's control plane (B-5) + Operations Health entry point */
+/* production chrome: the PRODUCTION band is static in the built bytes
+   (build-v2.py) — never flipped by JS post-token (X-H). This function only
+   adds dynamic, backend-attested state: evaluator removed from the
+   operator's control plane (B-5) + Operations Health entry point. */
 function prodApplyChrome(){
+  /* INTERIM (P0-1 open): kill control disabled from the first paint — the
+     deployed tier hosts no paging path that reads the flag. renderHeader
+     keeps it disabled on every sync; this covers pre-sync paint. */
+  const kb0=document.getElementById('killBtn');
+  if(kb0){ kb0.classList.add('disabled'); kb0.disabled=true;
+    const kl=document.getElementById('killLabel'); if(kl) kl.textContent='Kill switch (this tier)';
+    const honest='Kill switch (this tier): DISABLED. Flips a per-instance flag only — no paging path on this tier reads it.';
+    kb0.setAttribute('aria-label',honest); kb0.setAttribute('title',honest); }
   const band=document.querySelector('.sim-band');
-  if(band){ band.style.background='#7a1f14';
-    band.innerHTML='<span class="tag" style="background:#fff;color:#7a1f14">PRODUCTION</span>'
-    +' <span>Live platform backend — <b>paging is ARMED</b> · every action is real · forwarder identity in Operations Health</span>'; }
+  if(band) band.setAttribute('aria-label',
+    'Production console: live platform backend. Forwarder and judge state follow in the banner.');
   const ev=document.getElementById('evalbar'); if(ev) ev.remove();
   const rail=document.querySelector('.rail');
   if(rail && !document.getElementById('opsBtn')){
@@ -791,6 +843,24 @@ function prodApplyChrome(){
     rail.insertBefore(b, document.getElementById('killBtn'));
   }
   document.title='Sentinel — SRE decision console (PRODUCTION)';
+}
+/* production band text — built ONLY from what ops/health attests.
+   The banner may never claim more than the backend reports. */
+function prodBannerFromHealth(h){
+  const el=document.getElementById('prodBandText'); if(!el) return;
+  const fw=(h&&h.forwarder&&h.forwarder.identity)||'unknown';
+  const keyOk=!!(h&&h.jev&&h.jev.key_configured===true);
+  const fwTxt = fw==='pagerduty' ? 'paging path: PagerDuty (BYOK key configured)'
+    : fw==='fakepd' ? 'paging path: FakePD simulated sink — pages reach no human'
+    : 'paging path: '+fw;
+  const jTxt = keyOk ? 'AI judge: key configured · live judge state not instrumented on this tier'
+    : 'AI judge: not configured — the gate runs without AI judgment';
+  el.innerHTML='Live platform backend (read tier over the engine event log) — '
+    +'<b>'+esc(fwTxt)+'</b> · '+esc(jTxt)
+    +' · <span class="dim">forwarder identity &amp; judge state in Operations Health</span>';
+  const band=document.querySelector('.sim-band');
+  if(band) band.setAttribute('aria-label',
+    'Production console: live platform backend. '+fwTxt+'. '+jTxt+'.');
 }
 /* Operations Health drawer — Aditya's inspection surface. Renders the
    /api/v1/ops/health payload literally: real values as values,
@@ -814,7 +884,8 @@ function renderOps(){
   +'<button class="x" onclick="closeDrawers()">Close</button></header><div class="dbody">'
   +'<div class="srow"><h5>Jev agent</h5><p>model <b class="num">'+esc(jv.last_judgment_model||'not_instrumented')
   +'</b> · connection '+opsStateChip(jv.connection)+' · circuit '+opsStateChip(jv.circuit)+'</p>'
-  +'<p class="dim">last judgment: '+esc(jv.last_judgment_at||'—')+'</p></div>'
+  +'<p class="dim">last judgment: '+esc(jv.last_judgment_at||'—')
+  +' · API key: <b>'+(jv.key_configured===true?'configured':jv.key_configured===false?'<span style="color:var(--amber)">not configured — no AI judgment</span>':'unknown')+'</b></p></div>'
   +'<div class="srow"><h5>Pipeline stages</h5>'+stageRows
   +'<p class="dim">read tier: '+(db.available?'engine DB reachable':'engine DB unreachable')
   +' · data age '+(db.data_age_s!=null?Math.round(db.data_age_s)+'s':'unknown')
@@ -881,7 +952,7 @@ function riskOf(p){
     + (p.judge.score!=null ? (1-p.judge.score)*100 : 200) - p.createdAt*0.01;
 }
 function queueData(){
-  const open=[...S.problems.values()].filter(p=>p.state==='open'||p.state==='racing');
+  const open=[...S.problems.values()].filter(p=>p.state==='open'||p.state==='racing'||p.state==='halted');
   open.sort((a,b)=>riskOf(b)-riskOf(a));
   return {rows:open.slice(0,80), total:open.length};
 }
@@ -956,11 +1027,21 @@ function renderHeader(){
   const r=S.race, tot=r.judge+r.timer;
   $('#chipRace').innerHTML = `race <b class="num">${tot? r.judge+'/'+tot+' judge' : '—'}</b>`;
   const kb=$('#killBtn');
-  kb.classList.toggle('armed', S.kill.engaged);
-  $('#killLabel').textContent = S.kill.engaged ? 'Suppression OFF' : 'Suppressing';
-  kb.setAttribute('aria-label', S.kill.engaged
-    ? 'Kill switch ENGAGED: suppression paused. Activate to resume.'
-    : 'Kill switch: suppression is on. Activate to stop all suppression.');
+  if(PROD_MODE){
+    /* INTERIM (P0-1 open): the deployed tier hosts no paging path that
+       reads the kill flag — the control is disabled with honest copy.
+       The flag flip is a no-op lever; engaging changes nothing. */
+    kb.classList.add('disabled'); kb.classList.remove('armed'); kb.disabled=true;
+    $('#killLabel').textContent='Kill switch (this tier)';
+    const honest='Kill switch (this tier): DISABLED. Flips a per-instance flag only — no paging path on this tier reads it. Engaging currently changes nothing. Kill-topology wiring is open (P0-1); this control re-enables when a paging path consumes the flag.';
+    kb.setAttribute('aria-label',honest); kb.setAttribute('title',honest);
+  } else {
+    kb.classList.toggle('armed', S.kill.engaged);
+    $('#killLabel').textContent = S.kill.engaged ? 'Paging halted' : 'Paging live';
+    kb.setAttribute('aria-label', S.kill.engaged
+      ? 'Kill switch ENGAGED: all paging halted. Activate to re-arm and resume.'
+      : 'Kill switch: paging is live. Activate to halt all paging.');
+  }
   const badAuth=S.auth.some(a=>a.state.includes('blocked'));
   const ca=$('#chipAuth');
   ca.className='chip'+(badAuth?' warn':' ok');
@@ -974,7 +1055,9 @@ function renderStateLine(){
     `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
     `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems never alerts</span>`+
     (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
-    (S.judgeDown?`<span class="sep">·</span><strong style="color:var(--amber)">judge down — suppression paused</strong>`:'');
+    (S.judgeDown?`<span class="sep">·</span><strong style="color:var(--amber)">`+
+      (PROD_MODE?'AI judge not configured — gate runs without AI judgment':'judge down — everything pages')+
+      `</strong>`:'');
   $('#needCount').textContent = d.open+' open';
   $('#quietCount').textContent = d.quiet+' silenced';
 }
@@ -982,12 +1065,21 @@ function renderDegraded(){
   const el=$('#degradedSlot');
   if(S.judgeDown){
     el.innerHTML=`<div style="background:var(--amber-soft);border-bottom:1px solid #E7D3AC;padding:9px 16px;font-size:13px;color:#7A4A08">`+
-      `<b>Degraded:</b> the AI judge is unreachable — <b>suppression is paused</b>. `+
-      `Every problem pages a human until the judge recovers. <button class="trace" data-why="degraded">What stopped?</button></div>`;
+      (PROD_MODE
+        ? `<b>Degraded:</b> the AI judge is not configured on the backend — no AI judgment available. `+
+          `Timer-wins and doubt page. <button class="trace" data-why="degraded">What stopped?</button>`
+        : `<b>Degraded:</b> the AI judge is unreachable — <b>suppression is paused</b>. `+
+          `Every problem pages a human until the judge recovers. <button class="trace" data-why="degraded">What stopped?</button>`)+`</div>`;
   } else if(S.kill.engaged){
     const wouldBe = S.ledger.filter(l=>{const p=S.problems.get(l.pid);return p&&p.state==='decided';}).length;
+    /* INTERIM (P0-1 open): on the deployed tier the flag can be engaged via
+       the API while no paging path reads it — say so, never "suppression
+       paused". */
+    const engagedLine = PROD_MODE
+      ? `<b>Kill flag engaged (this instance)</b> — per-instance flag only; no paging path on this tier reads it, so nothing was halted. `
+      : `<b>Kill switch engaged</b> — paging halted. Nothing goes out until it is re-armed. `;
     el.innerHTML=`<div style="background:var(--red-soft);border-bottom:1px solid var(--red-edge);padding:9px 16px;font-size:13px;color:var(--red)">`+
-      `<b>Kill switch engaged</b> — suppression paused. Problems that would have been silenced now page. `+
+      engagedLine+
       `Flipped <button class="trace num" data-why="killms">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'—'}</button> ago (measured, not asserted).</div>`;
   } else el.innerHTML='';
 }
@@ -1016,7 +1108,9 @@ function renderStorm(){
   h.forEach((v,i)=>{ const x=i/(h.length-1||1)*600, y=44-Math.min(1,v/60)*40;
     i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
   ctx.stroke();
-  $('#stormMitigate').onclick=()=>{ S.humanLog.push({t:S.t,kind:'storm',text:'storm: owning team paged once'});
+  $('#stormMitigate').onclick=()=>{
+    if(S.kill.engaged){ toast('Kill switch engaged — paging halted. Re-arm to page.'); return; }
+    S.humanLog.push({t:S.t,kind:'storm',text:'storm: owning team paged once'});
     log('you','storm: single mitigation page issued'); toast('Owning team paged once — the storm stays compressed'); };
   $('#stormProof').onclick=()=>openLedger({});
 }
@@ -1056,6 +1150,7 @@ function paintRow(el,p){
   if(was===sig) return; el.dataset.sig=sig;
   const racing=p.state==='racing';
   const mc = racing ? `<span style="color:var(--ink-3)">judging… race in progress</span>`
+    : p.state==='halted' ? `<b style="color:var(--red)">HALTED</b> <span style="color:var(--ink-2)">— kill engaged, nothing goes out</span>`
     : p.decision ? `<b>${p.decision.disp}</b> · ${esc(p.decision.plain)}` : '';
   const score = p.judge.score!=null
     ? `<span class="ord"><span class="band${p.sev===1?' sev':''}"><i style="left:${Math.max(0,(p.judge.score-0.09)*100)}%;width:${18}%"></i></span><span class="v num">${p.judge.score.toFixed(2)}</span></span>`
@@ -1078,8 +1173,8 @@ function paintRow(el,p){
 function actOn(p, act){
   if(act==='ack'){
     // deliberate gesture: confirm inline (B-7 — no fat-finger ack at 3 AM)
-    if(!confirm(`Acknowledge ${p.id} — "${p.tpl.title}"?\n\nAck stops escalation. This is undoable for 60 seconds.`)) return;
-    DataAdapter.ack(p.id,'you'); toast(`${p.id} acknowledged — escalation stopped (undo in Safety log)`);
+    if(!confirm(`Acknowledge ${p.id} — "${p.tpl.title}"?\n\nAck stops escalation.`)) return;
+    DataAdapter.ack(p.id,'you'); toast(`${p.id} acknowledged — escalation stopped`);
   }
   if(act==='own'){ DataAdapter.takeOwnership(p.id,'you'); toast(`${p.id} — you own it now`); }
   render();
@@ -1191,11 +1286,17 @@ function renderSafety(soft){
     <div class="sub">Visible, inspectable, first-class. Never a settings page.</div></div>
     <button class="x" onclick="closeDrawers()">Close</button></header>
    <div class="dbody">
-    <div class="srow"><h5>Kill switch ${S.kill.engaged?'<span class="pillbad">ENGAGED</span>':'<span class="pillok">ARMED</span>'}</h5>
-      <p>One control that stops <b>all</b> suppression. Everything pages until it is turned off.</p>
-      <div class="contract"><b>The contract, in plain language:</b> engaging does not page everyone at once — it stops the machine from staying silent. In-flight races resolve as pages (fail-open). Re-arming resumes gating. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
-      <div class="dactions"><button class="btn ${S.kill.engaged?'':'danger'}" id="sKill">${S.kill.armed?'Confirm: stop all suppression':S.kill.engaged?'Resume suppression':'Engage kill switch'}</button></div>
-    </div>
+    ${PROD_MODE?`
+    <div class="srow"><h5>Kill switch <span class="pillwarn">NO-OP LEVER (this tier)</span></h5>
+      <p><b>Disabled.</b> Flipping the flag halts <b>no paging path</b> — this tier hosts no forwarder or receiver, so nothing reads the flag. Engaging currently changes nothing. Kill-topology wiring is open (P0-1); this control re-enables when a paging path consumes the flag.</p>
+      <div class="contract"><b>The contract, in plain language:</b> POST /api/v1/safety/kill returns 200 and flips a per-instance /tmp flag. Serving instance: <b class="num">${esc(S.kill.instanceId||'unknown')}</b> · kill-state scope: <b class="num">${esc(S.kill.scope||'unknown')}</b>. Instances can disagree — there is no distributed flag yet. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
+      <div class="dactions"><button class="btn" id="sKill" disabled>Engage kill switch — disabled (no paging path on this tier)</button></div>
+    </div>`:`
+    <div class="srow"><h5>Kill switch ${S.kill.engaged?'<span class="pillbad">ENGAGED</span>':'<span class="pillok">READY</span>'}</h5>
+      <p>One control that halts <b>all</b> paging. While engaged, nothing pages — the machine stops, it does not merely stay silent.</p>
+      <div class="contract"><b>The contract, in plain language:</b> engaging halts the paging path — nothing goes out. In-flight work stops where it stands (fail-closed). Re-arming resumes the pipeline. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
+      <div class="dactions"><button class="btn ${S.kill.engaged?'':'danger'}" id="sKill">${S.kill.armed?'Confirm: halt all paging':S.kill.engaged?'Re-arm — resume paging':'Engage kill switch'}</button></div>
+    </div>`}
     <div class="srow"><h5>Policy governance</h5>
       <dl class="kv"><dt>Live version</dt><dd style="font-family:var(--mono);font-size:12px">${s.policy.version}</dd>
       <dt>Signed by</dt><dd>${s.policy.signers.map(esc).join(' · ')} <span class="pillok">2-of-2</span></dd>
@@ -1222,20 +1323,23 @@ function renderSafety(soft){
     </div>
    </div>`;
   $('#sKill').onclick=()=>{
+    /* INTERIM (P0-1 open): the PROD_MODE control is rendered disabled and
+       cannot fire this handler — the guard below is belt-and-braces. */
+    if(PROD_MODE){ toast('Kill switch disabled on this tier — no paging path reads the flag'); return; }
     if(!S.kill.engaged && !S.kill.armed){
       S.kill.armed=true; renderSafety(true);
-      toast('Kill switch armed — press once more to stop all suppression');
+      toast('Kill switch armed — press once more to halt all paging');
       setTimeout(()=>{ if(S.kill.armed&&!S.kill.engaged){S.kill.armed=false;render();} },8000);
       return;
     }
     if(!S.kill.engaged && S.kill.armed){
       S.kill.armed=false;
       const ms=DataAdapter.engageKill();
-      if(!PROD_MODE) toast(`Suppression paused in ${ms.toFixed(1)} ms — measured`);
+      if(!PROD_MODE) toast(`Paging halted in ${ms.toFixed(1)} ms — measured`);
       /* production: the adapter toasts on backend confirmation — never faked sync */
     } else {
-      if(!confirm('Resume suppression?\n\nThe machine will decide silence again, with proof.')) return;
-      const ms=DataAdapter.disengageKill(); toast(`Gating resumed (${ms.toFixed(1)} ms)`);
+      if(!confirm('Re-arm and resume paging?\n\nThe pipeline resumes deciding page-or-suppress, with proof.')) return;
+      const ms=DataAdapter.disengageKill(); toast(`Paging resumed (${ms.toFixed(1)} ms)`);
     }
     render();
   };
@@ -1302,7 +1406,7 @@ const WHY={
   'open-n':['Open problems','Problems needing a human, counted as problems never alerts.','source: queue'],
   quiet:['Why grouped?','10,000 silences are never listed raw. They are counted by reason; the ledger is one click away, least-sure first.','source: ledger aggregation'],
   degraded:['What stopped?','The AI judge is unreachable. Suppression paused: every problem pages. The machine stopped deciding silence — it did not stop watching.','source: health monitor'],
-  killms:['Measured, not asserted','Milliseconds from flip to forwarder halt, measured with performance.now() on this machine, this session.','source: kill-switch harness'],
+  killms:['Measured, not asserted','Milliseconds from flip to the pipeline halting, measured with performance.now() on this machine, this session.','source: kill-switch harness'],
 };
 const pop=$('#pop');
 document.addEventListener('click',e=>{
@@ -1327,7 +1431,8 @@ $('#queue').addEventListener('mouseleave',()=>{ holdSorting=false; $('#streamHol
 $('#releaseStream').onclick=()=>{ holdSorting=false; $('#streamHold').classList.remove('on'); heldNew=0; render(); };
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){ closeDrawers(); pop.classList.remove('on'); }
-  if(e.key==='e'&&e.shiftKey){ $('#evalbar').classList.toggle('on'); }
+  /* guard: the evaluator bar is removed on production builds — no dangling handler */
+  if(e.key==='e'&&e.shiftKey){ const eb=$('#evalbar'); if(eb) eb.classList.toggle('on'); }
 });
 /* ================================================================
    PART 5 — evaluator wiring, boot
