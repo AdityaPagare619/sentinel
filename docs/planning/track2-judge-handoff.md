@@ -24,8 +24,16 @@ machinery; zero live vendor calls were made.
 **Sim wiring** (`SENTINEL_SIM=1` in `build_pipeline_from_env`): the sim
 pipeline resolves the real key and runs the REAL race — no more
 `SENTINEL_MOCK` short-circuit. `SENTINEL_MOCK=1` keeps its legacy
-behavior when `SENTINEL_SIM` is unset. PagerDuty wiring untouched
-(FakePD stays in sim — T6's concern).
+behavior when `SENTINEL_SIM` is unset. PagerDuty in sim is **structurally
+FakePD** (audit P0, ruling X-B): `build_pipeline_from_env` hard-wires the
+forwarder to a loopback sink (`http://127.0.0.1:9/fakepd`) with the
+`SIM-FAKE` routing key via `sentinel/sim_pd_guard.py`, and a real
+`PD_EVENTS_URL` / `PD_ROUTING_KEY` in the environment is a loud boot
+refusal. The `Forwarder`/`PagerDutyClient` constructors themselves refuse
+non-loopback endpoints under `SENTINEL_SIM=1`, so no wiring path can
+re-arm real paging. The earlier "wiring untouched" phrasing was the false
+claim behind the audit P0 — the old default was the real
+`events.pagerduty.com` URL.
 
 **Spend meter**: `GET /api/v1/jev/spend` on the receiver →
 `{session_usd, budget_usd, calls, blocked}` (exactly these four keys;

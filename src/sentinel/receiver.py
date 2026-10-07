@@ -74,6 +74,10 @@ from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
 # Track 2 (C2): the sim judge adapter — real Jev in simulation.
 from . import sim_judge
+# Audit P0 (sim default) + ruling X-B: sim-mode PagerDuty is structurally
+# impossible to wire to real PagerDuty (loopback sink + SIM-FAKE key, or
+# boot refusal). See sim_pd_guard.
+from . import sim_pd_guard
 from .state import build_state
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -1158,8 +1162,10 @@ def build_pipeline_from_env(policy=None,
     # TYPESAFE_API_KEY env) and runs the real race, spend-capped; absent
     # key → FakeJev ("simulated judge"), honestly labeled. Takes
     # precedence over SENTINEL_MOCK (explicit new mode beats legacy dev
-    # mock). PagerDuty stays FakePD in sim — the forwarder wiring below
-    # is untouched.
+    # mock). PagerDuty is structurally FakePD in sim: the forwarder wiring
+    # below goes through sim_pd_guard (loopback sink + SIM-FAKE key, boot
+    # refusal on any real endpoint/key) — there is no env flag that
+    # re-arms real paging in sim mode (audit P0, ruling X-B).
     sim_mode = os.environ.get(sim_judge.SIM_MODE_ENV, "0") == "1"
     if sim_mode:
         client, jev_tracker, jev_judge_mode = sim_judge.build_sim_judge(
@@ -1252,11 +1258,26 @@ def build_pipeline_from_env(policy=None,
                 # sim mode. Lets the gate attach the contract JudgeResult
                 # (who decided, at what cost) to decision payloads.
                 jev_tracker=jev_tracker)
-    forwarder = Forwarder(
-        pd_events_url=os.environ.get("PD_EVENTS_URL",
-                                     "https://events.pagerduty.com/v2/enqueue"),
-        default_routing_key=os.environ.get("PD_ROUTING_KEY"),
-    )
+    # Audit P0 + ruling X-B (audit §7 "SIMULATION FIDELITY"): sim and
+    # loadtest environments NEVER touch real PagerDuty — structurally, not
+    # via an opt-in toggle. Under SENTINEL_SIM=1 the forwarder is
+    # hard-wired to a loopback sink with the SIM-FAKE routing key, and a
+    # real PD_EVENTS_URL / PD_ROUTING_KEY in the environment is a loud
+    # boot refusal (fail-closed). Production keeps the real endpoint —
+    # real humans are reachable there ONLY via explicit customer BYOK
+    # routing key + explicit operator action.
+    if sim_mode:
+        pd_events_url, default_routing_key = sim_pd_guard.enforce_sim_pd(
+            os.environ.get("PD_EVENTS_URL"), os.environ.get("PD_ROUTING_KEY"),
+            where="receiver.build_pipeline_from_env")
+        forwarder = Forwarder(pd_events_url=pd_events_url,
+                              default_routing_key=default_routing_key)
+    else:
+        forwarder = Forwarder(
+            pd_events_url=os.environ.get("PD_EVENTS_URL",
+                                         "https://events.pagerduty.com/v2/enqueue"),
+            default_routing_key=os.environ.get("PD_ROUTING_KEY"),
+        )
     config = ReceiverConfig(
         webhook_secret=webhook_secret,
         shadow=shadow,

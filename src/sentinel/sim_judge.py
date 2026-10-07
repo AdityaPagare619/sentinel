@@ -2,7 +2,10 @@
 
 Aditya's order: even in simulation the REAL Jev judge is called — real
 judgments, real latencies, real race outcomes — cost-capped, server-side
-only, key never logged/committed/exposed. PagerDuty stays FakePD in sim.
+only, key never logged/committed/exposed. PagerDuty is structurally FakePD
+in sim (audit P0, ruling X-B): enforced by sentinel/sim_pd_guard.py
+(loopback sink + SIM-FAKE key, boot refusal on any real endpoint/key) —
+not by this module, and not by a toggle.
 
 What this module provides (contract C2, consumed by Tracks 6/7/8):
 

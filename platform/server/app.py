@@ -750,7 +750,16 @@ def _pd_enqueue(event: dict, timeout_s: float = 10.0) -> tuple[bool, str]:
 
     Never logs or returns the routing key — detail carries only the
     status/error class.
+
+    Sim safety (audit P0, ruling X-B): the platform tier never imports the
+    engine package (tier decoupling), so this is a self-contained mirror
+    of sentinel/sim_pd_guard. Under SENTINEL_SIM=1 real PagerDuty is
+    structurally disabled — the explicit operator test-page must not
+    become a sim-mode paging path. Refuse, loudly.
     """
+    if os.environ.get("SENTINEL_SIM") == "1":
+        return False, ("refused: SENTINEL_SIM=1 — sim environments never "
+                       "touch real PagerDuty (audit P0, ruling X-B)")
     import urllib.request
     import urllib.error
     body = json.dumps(event).encode("utf-8")

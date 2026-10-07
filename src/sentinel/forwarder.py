@@ -62,6 +62,9 @@ from datetime import datetime, timezone
 from .eventlog import EventLog, EventLogError, utcnow_iso
 from .safety import KillEngaged  # C3: the kill switch halts this forwarder
 from .integrations import resolve_paging_key, simulated_paging, sanitize_error
+# Audit P0 + ruling X-B: under SENTINEL_SIM=1 it is structurally impossible
+# to wire a forwarder to real PagerDuty. See sim_pd_guard.
+from .sim_pd_guard import assert_sim_pd_safe
 from .pd_sender import (
     DedupKeyInvalid,
     PagerDutyClient,
@@ -1031,6 +1034,9 @@ class Forwarder:
     def __init__(self, pd_events_url: str = "https://events.pagerduty.com/v2/enqueue",
                  timeout_s: float = 5.0, default_routing_key: str | None = None,
                  key_resolver=None):
+        # Structural sim safety (audit P0, ruling X-B): under SENTINEL_SIM=1
+        # a non-loopback endpoint cannot be held by any Forwarder instance.
+        assert_sim_pd_safe(pd_events_url, where="Forwarder.__init__")
         self.pd_events_url = pd_events_url
         self.timeout_s = timeout_s
         self.default_routing_key = default_routing_key
