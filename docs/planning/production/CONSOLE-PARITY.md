@@ -41,17 +41,31 @@ export — never as a subtle theme tweak.
 
 1. UI changes land in the shared shell; mode differences live ONLY in the
    adapter + the mode banner.
-2. CI asserts the banner contract: sim never renders the prod banner;
-   prod never renders the sim banner; neither renders without one.
-3. The `/preview-v2/` judgment preview is REMOVED at production shift —
-   it was a judging artifact, and keeping it would fork the UI into three.
+2. The banner contract is asserted at **build time** by
+   `deploy/gh-pages/build-v2.py`: `/` gets `data-mode="production"` +
+   PRODUCTION chrome injected; `/staging/` ships verbatim from the
+   sim-marked source; the build **fails** if either `<html>` element
+   carries the wrong mode. This is a substring/tag assert in the build
+   script, not a CI job and not a behavior test — it cannot catch a
+   dishonest build, only a mislabeled one (UI backstage note, 2026-10-07).
+   There is no GitHub Actions CI on this repo (Aditya's standing order —
+   local gates only: `scripts/ops/pre-pr-gate.sh` + different-agent
+   review).
+3. The `/preview-v2/` judgment preview is **kept until Petu's flip
+   order** — it is not removed unilaterally at shift (Petu verdict
+   2026-10-07: preview-v2 = B). When the flip is ordered, remove it in
+   one commit with a gh-pages rebuild.
 
 ## Deployment mapping
 
 - `/` → production build (production adapter, prod banner, zero fixtures)
 - `/staging/` → sim build (sim adapter, SIMULATED banner with seed)
-- Both built from the same source on `main`, differing only in the
-  adapter bundle + banner config. The build script asserts this.
+- `/loadtest/` → the load-test lane's dashboard (placeholder until the
+  lane's handoff lands; until then the path says so)
+- Both `/` and `/staging/` are built from the same source on `main` by
+  `deploy/gh-pages/build-v2.py`, differing only in the mode injection —
+  there is no "adapter bundle" split at build time, and no CI job checks
+  anything. The build script's banner assert (above) is the enforcement.
 
 ---
 

@@ -24,9 +24,10 @@ Until then, branches live locally — this runbook waits.
 3. **Review:** a DIFFERENT agent reviews. Checklist: contracts conformed?
    secrets absent? numbers sourced? hot-path separation intact? Vault pass if
    ingress/egress/audit touched.
-4. **CI must be green** (`.github/workflows/ci.yml`): full suite +
-   repeatability probes (flip <2%, shuffle <3%) + kill-the-client + secrets-grep.
-   Red = no merge, no exceptions.
+4. **The local gate must be GREEN** — `bash scripts/ops/pre-pr-gate.sh`
+   (secrets-grep, full suite, kill-the-client invariant, boot smoke,
+   ops-scripts, config schemas). There is no GitHub Actions on this repo;
+   a remote CI signal does not exist. Red = no merge, no exceptions.
 5. **Squash-merge, delete the branch:**
    ```bash
    gh pr merge <number> --squash --delete-branch

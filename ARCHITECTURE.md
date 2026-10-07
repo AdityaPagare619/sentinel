@@ -387,6 +387,14 @@ python -m sentinel.evalharness --n 2000 --seed 7 -o calibration-report.md
 ## 7. Security
 
 - **BYOK:** key arrives only via `TYPESAFE_API_KEY` env var (or `client_from_env()`). Never in code, logs, audit rows, or error messages. HTTP-layer redaction: the `Authorization` header is stripped before any request/response logging. v0.1 runs single-tenant (one key per deployment); per-tenant KMS envelope is the SaaS upgrade (documented, not built).
+  - **Two key paths — do not confuse them (X-E, 2026-10-07):** the path
+    above (env var, and `resolve_jev_key()`'s user-store → env resolution
+    in the BYOK flow) is the **shipped engine / production** path —
+    compliant with the standing law (never committed, never logged). The
+    `custom.typesafe` **vault surrogate** (`hsurr:*` values attached by
+    `add_surrogate_to_request`) is the **agent/research tooling** path
+    (`research/jev-behavior/bin/`, rehearsal logbooks) — it is never a
+    production path, and no doc may claim it is the only one.
 - **Webhook auth:** generic webhook requires HMAC-SHA256 (`X-Sentinel-Signature` + `X-Sentinel-Timestamp`, |now−ts| ≤ 300s) — fail-closed: empty secret refuses startup, absent/invalid/stale signature is a 403. Flagged onboarding (`SENTINEL_WEBHOOK_ONBOARDING=1`) may fail open only with a CRITICAL boot warning + `/healthz` surfacing. PD path relies on the customer's routing key. *(ADR-005, adjudicated 2026-10-03: the IP allowlist was REJECTED entirely — struck here per panel condition (d). Egress IPs rotate; an unmaintained pinning knob fails closed on rotation and turns PD IP changes into dropped-alert incidents. HMAC is the real authentication; no allowlist knob ships.)*
 - **Audit integrity:** append-only writes; no UPDATE/DELETE paths in `AuditLog`.
 

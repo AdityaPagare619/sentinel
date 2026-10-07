@@ -26,21 +26,30 @@
 Every commit: a body line saying *why* (the decision), and a footer line pointing at the
 decision-log entry when one exists (`Decision: ops/decision_log.md#2026-10-02-gate-policy`).
 
-## 3. CI — `.github/workflows/sentinel-ci.yml`
+## 3. The local gate — `scripts/ops/pre-pr-gate.sh`
 
-Runs on every PR and every push to `main`. **stdlib only** (frozen decision — no pip
-deps, no network installs):
+There is no GitHub Actions on this repo (Aditya's standing order,
+2026-10-03 — `.github/workflows/` was removed; `ops/ci-repair.md` is the
+history). The gate is a local script, run on the PR head. It is staged —
+each stage must pass before the next starts — and prints
+`GATE RESULT: RED — no merge, no deploy, no exceptions.` on any failure:
 
-1. **Full test suite:** `python3 -m unittest discover tests` — all green, zero tolerance.
-2. **Repeatability probes:** option-order shuffle (bar <3% disposition change) and
-   repeat-call flip check (bar <2%) on a 200-alert sample — Jev non-determinism (1.3–2.2%,
-   no seed) must stay audited, never surprising.
-3. **Fail-open kill-the-client test:** mock client raising `JevOverloaded`/`JevTimeout` on
-   every call → assert every alert returns `passthrough` and the forwarder relays the
-   original payload. This test failing is a **release blocker**.
-4. **Secrets grep:** fail on anything looking like a key/token in the diff —
-   `TYPESAFE_API_KEY` values, `sk-`/`key-`/`token` patterns, `.env` files, `*secret*`,
-   `*.pem`. Nothing secret is ever committed, ever.
+1. **secrets-grep:** fail on anything looking like a key/token in the tree —
+   `TYPESAFE_API_KEY` values, `sk-`/`key-`/`token` patterns, `.env` files,
+   `*secret*`, `*.pem`. Nothing secret is ever committed, ever.
+2. **Full test suite:** `python3 -m unittest discover tests` — all green,
+   zero tolerance, with a test-count guard (baseline 496; drops without a
+   logged reason fail the gate).
+3. **Kill-the-client invariant:** the fail-open guarantee, named
+   explicitly. This test failing is a **release blocker**.
+4. **Boot smoke:** `receiver-smoke.sh` — the process actually starts.
+5. **Ops scripts:** every shipped script must at least parse
+   (`py_compile` + `bash -n`).
+6. **Config schemas:** `flagctl validate` on a fresh bootstrap tree.
+
+The repeatability probes (option-order shuffle, repeat-call flip check on
+a 200-alert sample) live in the test suite, not the gate script — Jev
+non-determinism (1.3–2.2%, no seed) stays audited, never surprising.
 
 ## 4. Definition of Done (a PR is mergeable iff)
 
@@ -48,7 +57,7 @@ deps, no network installs):
 - [ ] Docs updated: README and/or the relevant doc touched by the change.
 - [ ] PROGRESS.md entry by the build coordinator (status is honest: DONE / FAILED / KILLED).
 - [ ] Demo-able: the change can be shown in the Preview-1 demo transcript.
-- [ ] No secrets in the diff (CI enforces; humans double-check).
+- [ ] No secrets in the diff (the gate's secrets-grep stage enforces; humans double-check).
 - [ ] Claim-Auditor pass on every number the PR description asserts (source or `UNVERIFIED`).
 
 ## 5. Ledgers (the PETU-LABS pattern, adapted)

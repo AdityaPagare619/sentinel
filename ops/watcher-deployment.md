@@ -1,93 +1,78 @@
-# Sentinel — external watcher deployment (deploy lane)
+# Sentinel — external watcher deployment
 
-**Source of truth:** `ops/devops-foundation.md` (L3, PR #53) — pre-mortem §0
-item 1, §1.2 cutover gate, §10 (A3 per-source heartbeat / dead-man's-switch),
-RB-4/RB-6/RB-8 runbooks. This doc is the *host story*: where the watcher
-runs, how often, and where its alerts go. The *what-it-checks* contract
-lives in the L3 doc.
+> **Rewritten 2026-10-07 (docs W7).** The previous version described a
+> self-hosted Sentinel box (receiver process, SQLite event-log,
+> per-source heartbeats, disk watermark) with a watcher on "the
+> operator's existing monitoring host." That box was never deployed — the
+> shipped tier is Vercel serverless, which has no host to SSH, no local
+> event log to tail, and no receiver process. The phantom topology is
+> struck. The L3 heartbeats design (`ops/devops-foundation.md`) is kept
+> as the **customer self-hosted engine** design, clearly labeled where
+> referenced — it is not the story of this tier.
 
-## The one rule
+**Reality check, first:** as of 2026-10-07 the shipped tier has **no
+watcher at all** — no uptime monitor, no log drain, ~30-min Hobby log
+retention. Nobody would know if prod broke (infra P1 #16). This doc
+describes what the watcher MUST be on this topology, and what is still
+missing. Do not mark any cutover "watcher armed" checkbox until the
+arming checklist below is green.
+
+## The one rule (unchanged)
 
 The external watcher **never shares a fate domain with the thing it
-watches**. Not the same process, not the same container, not the same host,
-not the same cron daemon — a dead box cannot report its own death. (L3
-pre-mortem: *"Sentinel down is a SEV1 on a path that doesn't traverse
-Sentinel" is a sentence, not a system, until the watcher has an owner.*)
+watches**. On this topology that means: not a Vercel function in the
+same project, not a cron in `vercel.prod.json`, not anything whose
+logs, billing, or deployment pipeline is the one being watched. A dead
+project cannot report its own death.
 
-## Where it runs
+## What the watcher watches (this tier)
 
-| Watcher | Watches | Runs on | Why this host |
-|---|---|---|---|
-| External watcher (cron) | The Sentinel prod box: receiver process, event-log growth, per-source heartbeats, disk watermark | The operator's **existing monitoring host** — a different machine (or a different cloud account/region) from the Sentinel box. ₹0: no new infrastructure. | If the Sentinel box dies (power, kernel, disk, network partition), the watcher is unaffected and still reports. |
-| Dead-man for the watcher | The watcher itself | A **weekly on-call review** of `heartbeat-check.state` freshness (+ the monthly drill, L3 §2.5). No budget for a hosted dead-man service yet — the gap is stated, not hidden. | A watcher that silently stops is the pre-mortem's exact failure mode. |
+| Check | How | Why |
+|---|---|---|
+| Liveness | `GET https://sentinel-platform-adityapagare619s-projects.vercel.app/api/v1/health/live` — 200, unauthenticated | The tier is up at all. |
+| Auth still fail-closed | same host, `GET /api/v1/ops/health` without bearer → expect 401 | Catches an auth regression without holding the operator token. |
+| Kill-state scope visible | authed `GET /api/v1/ops/health` → `kill_state_scope` present | Cross-instance divergence must stay visible, not assumed away. |
+| TLS + latency | the monitor's own TLS/handshake timings | Cold-start decay is the tier's known slow vector. |
 
-Explicitly NOT allowed: the watcher as a thread in the receiver, a
-sidecar on the same host, or a cron on the Sentinel box itself. Any of
-those shares the fate domain and voids the guarantee.
+What the watcher does NOT check: the paging path (there is none on this
+tier), engine DB health (unwired — `engine_db.available=false` is
+reported honestly by the endpoint, not by the watcher).
 
-## What the watcher runs (fixed interval)
+## Where it runs (₹0)
 
-On the external host, a cron (cadence per subject in `heartbeats.json`,
-versioned in the config dir; the A3 example is "expected every 60s, silent
-at 7m") invokes:
+A **free external uptime monitor** (e.g. UptimeRobot / Better Stack free
+tier — picked by Aditya, not by a lane; no account exists yet) on a
+cadence ≤ 5 minutes, plus a log-drain or scheduled `vercel logs` pull
+until a drain exists. Explicitly NOT allowed: anything inside the
+`sentinel-platform` project, the operator's browser tab, or a cron that
+shares the project's fate domain.
 
-```bash
-scripts/ops/heartbeat-check.py --db <SENTINEL_DB> --heartbeats heartbeats.json
-```
+The **alerting path** pages via a channel that never traverses Sentinel:
+Aditya's phone (SMS/call from the monitor's own alerting). A watcher
+whose alerts route through Sentinel is a sentence, not a system.
 
-plus the disk eye:
+## Arming checklist (blocks any production-live declaration)
 
-```bash
-scripts/ops/disk-watermark.sh <state-dir>   # Nagios-style exit codes
-```
+* [ ] Free uptime monitor chosen and configured with the four checks
+      above; first DOWN-path drill completed (redeploy a bad bundle to
+      a preview, watch the page arrive).
+* [ ] Log retention solved: drain attached or a documented pull cadence
+      that beats the ~30-min Hobby window.
+* [ ] Named human owner for the watcher (today: Aditya by default).
+* [ ] Watcher-down detection: the monitor's own heartbeat/missed-check
+      alert is armed, so a silently-stopped watcher pages too.
 
-Key properties (L3 §10.2):
+## What the old doc described (kept for the record)
 
-* The check reads the **SQLite file directly** (`mode=ro` URI) — the
-  verdict comes from the log file alone. It never traverses the receiver:
-  no `/healthz`, no `/livez` in the decision path. If the receiver is
-  down, the script still runs and reports the log stopped growing — which
-  is exactly the information the on-call needs.
-* `/livez` may be *consulted* for diagnosis, never for the trip verdict.
-* Subjects: every `source_integration` value on `decision_requested`
-  events, plus synthetic `__pipeline__` (any event at all — the pipeline
-  is writing) and `__shadow_tap__` (shadow feed freshness).
-* States: `ok` → `stale` (warning: ticket/note) → `silent` (dead-man trip:
-  **page the on-call** — treat as paging-path-down until proven otherwise).
-  `unknown` (no rows yet) never cries wolf.
-* The script appends its run timestamp to its own state file
-  (`heartbeat-check.state`, next to the DB — never into the event log;
-  the engine owns that). The weekly review checks the state file is fresh:
-  that is the watcher's own dead-man's-switch.
+The self-hosted engine design — receiver process, SQLite event log,
+A3 per-source heartbeats, `heartbeat-check.py` / `disk-watermark.sh`,
+dead-man's-switch on `heartbeat-check.state` — lives in
+`ops/devops-foundation.md` (L3, PR #53, open). That design is for the
+**customer self-hosted engine** (`docs/deploy-production.md`), where a
+box exists to watch. The scripts were specified but never merged; do
+not port them to the serverless tier — they assume a filesystem that
+does not exist here.
 
-Disambiguation on `silent` is RB-8's job: `/livez` dead → RB-4 (receiver
-down); sender side dead → fix the sender; both alive → the path between
-them (webhook auth, routing key, network) is broken. RB-4 and RB-6 both
-*start* from "something went silent" — this tripwire tells the on-call
-which runbook they're in.
-
-## Alerting path
-
-Watcher verdicts — especially `silent` — page via a path that **never
-traverses Sentinel**: the operator's existing paging (PagerDuty /
-phone / SMS on the monitoring host), or the secondary channel drilled
-under ADR-018/D13. A watcher whose alerts route through Sentinel is
-another sentence, not a system.
-
-Arming checklist (blocks prod cutover, L3 §1.2):
-
-* [ ] Named human owner + written duty roster for the watcher.
-* [ ] Cron armed on the external host; first `silent`-path drill completed
-      (kill the receiver in `staging-lab`, watch the page arrive).
-* [ ] Weekly `heartbeat-check.state` freshness review on the on-call
-      calendar.
-* [ ] Watcher-down alerting path tested end-to-end (does not traverse
-      Sentinel).
-
-## Current status (2026-10-04)
-
-`scripts/ops/heartbeat-check.py` and `scripts/ops/disk-watermark.sh` are
-specified in L3's `ops/devops-foundation.md` (PR #53, open) but **not yet
-merged** — this doc describes the deployment contract they will run under.
-Do not mark the cutover "watcher armed" checkbox until the scripts exist,
-the cron is armed, and the first drill has paged successfully.
+**Current status (2026-10-07):** nothing above is built. The tier is
+unwatched. This is a P1 ship-blocker for the production-live
+declaration, stated not hidden.

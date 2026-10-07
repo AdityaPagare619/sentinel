@@ -1,6 +1,15 @@
 # Sentinel — SRE page-or-suppress triage middleware
 
-**One line:** a drop-in pre-page gate in front of PagerDuty/Opsgenie. Every alert is triaged by a decision model (TypeSafe's Jev — typed questions in, calibrated probabilities out); high-confidence noise is suppressed, everything uncertain pages exactly as before. **The only autonomous action is paging a human.**
+**One line:** a drop-in pre-page gate in front of PagerDuty/Opsgenie. Every alert is triaged by a decision model (TypeSafe's Jev — typed questions in, typed answers out); high-confidence noise is suppressed, everything uncertain pages exactly as before. **The only autonomous action is paging a human.**
+
+> **Honesty note (matches ARCHITECTURE.md §4):** Jev's outputs are
+> group-level calibrated (routing ECE 0.096 measured — good, not perfect)
+> and provably non-deterministic (1.3–2.2% flips, no seed). Raw week-1
+> probabilities are **uncalibrated** — which is why the 0.90 confidence
+> bar is applied only after per-org calibration fitting, and why
+> suppression additionally requires the triple lock (probability bar +
+> confidence bar + customer-verified allowlist). No single number is
+> trustworthy alone.
 
 Point your existing PagerDuty integration at Sentinel instead of `events.pagerduty.com`. Sentinel triages, then relays to PagerDuty. Unplug it any time — the bypass is a webhook URL swap.
 

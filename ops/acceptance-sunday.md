@@ -14,8 +14,11 @@ with no interpretation. If a row cannot be executed as written, the row is RED.
 - **Port convention (pinned):** engine receiver `8080`, dashboard/platform tier
   `8090`, stub PagerDuty endpoint `8099`. If the platform lane changes these, it
   updates this file before Sun 14:00 — owner: dashboard lane.
-- Fresh CI signal required: see `ops/ci-repair.md`. Bar 10 is meaningless until CI
-  itself is verified healthy.
+- Fresh local-gate signal required: `scripts/ops/pre-pr-gate.sh` must print
+  `GATE RESULT: GREEN` on `main` HEAD. Bar 10 is meaningless until the gate
+  itself runs green. (GitHub Actions CI was removed by Aditya's order
+  2026-10-03 — `.github/workflows/` does not exist; `ops/ci-repair.md` is
+  the history, not a repair ticket.)
 - No merges after 17:00 except stop-the-line fixes. Verify:
   `git log --since="2026-10-04 17:00" --oneline origin/main` → must be empty
   (or contain only the logged stop-the-line fix).
@@ -26,9 +29,9 @@ with no interpretation. If a row cannot be executed as written, the row is RED.
 
 | | |
 |---|---|
-| **Verify** | CI is green on `main` HEAD; suite + probes + secrets-grep all green. |
-| **Command** | `gh run list -R AdityaPagare619/sentinel --branch main --limit 1` → status `completed`, conclusion `success`. Then confirm the run bound to the ACTIVE "Sentinel CI" record at `.github/workflows/sentinel-ci.yml` (state=active via `gh api .../actions/workflows`), never a `BuildFailed`/`deleted` record — see `ops/ci-repair.md`. |
-| **Pass** | Latest `main` run green on the active workflow; `git rev-parse origin/main` equals the run's `head_sha`. Re-verify at 21:00 before delivery. |
+| **Verify** | The local gate is green on `main` HEAD: secrets-grep, full suite, kill-the-client invariant, boot smoke, ops-scripts, config schemas — all green. |
+| **Command** | `bash scripts/ops/pre-pr-gate.sh` on `main` HEAD → `GATE RESULT: GREEN`. Record the sha (`git rev-parse HEAD`) with the result. There is no remote CI: do not wait on `gh run`. |
+| **Pass** | Gate GREEN on the current `main` HEAD; the recorded sha matches `git rev-parse origin/main`. Re-verify at 21:00 before delivery. |
 | **Sign** | Tripwire: ______ |
 
 ### Bar 7 — Do-no-harm: kill-the-client green (owner: Tripwire)

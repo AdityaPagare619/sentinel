@@ -10,7 +10,7 @@
 - [ ] Docs updated (README and/or the doc this change touches)
 - [ ] PROGRESS.md entry (build coordinator) — status honest: DONE / FAILED / KILLED
 - [ ] Demo-able: the change can be shown in the Preview-1 demo transcript
-- [ ] No secrets in the diff (`.env`, keys, tokens, `*.pem`, routing keys) — CI re-checks
+- [ ] No secrets in the diff (`.env`, keys, tokens, `*.pem`, routing keys) — the gate's secrets-grep stage re-checks
 - [ ] **Claim-Auditor pass:** every number asserted in this description has a source
       (file, line, URL, or run id) — or is marked `UNVERIFIED`
 

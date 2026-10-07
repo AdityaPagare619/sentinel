@@ -6,7 +6,8 @@
 
 The versioned attack corpus behind the ASR (attack-success-rate) gate for
 `sentinel.firewall`. Every attack case MUST be flagged by `screen()`; every
-benign case MUST pass clean. The CI gate (`tests/test_firewall_corpus_gate.py`)
+benign case MUST pass clean. The gate test (`tests/test_firewall_corpus_gate.py` —
+run by the local gate, `scripts/ops/pre-pr-gate.sh`)
 fails the build on any bypass (ASR > 0) or any false positive (FPR > 0).
 
 ## Layout
