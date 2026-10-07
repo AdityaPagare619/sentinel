@@ -26,12 +26,21 @@ What is NOT on this tier: the paging receiver, the gate, the forwarder.
 This tier is read-path + safety-state only. The kill-switch state file
 lives in `/tmp` and is **per-instance** (`kill_state_scope="per_instance_tmp"`
 in the status payloads) — under multi-instance load an engage on instance A
-does not change instance B. Kill-switch semantics on this tier are
-unresolved (fail-open vs fail-closed undecided; see engine ruling
-2026-10-07) — **do not rely on the switch as a production mitigation
-until it is decided and wired** (P0-1 open).
+does not change instance B.
+**Owner-level semantics, DECIDED (Petu's binding ruling, FAANG wave
+2026-10-07): kill = HALT all paging, fail-closed.** The engine ruling's
+"undecided" is superseded — the catastrophic automatic action in this
+product is *suppression*, and a kill switch that pages on engage is not
+a kill switch. What remains open is the WIRING (P0-1): the receiver path
+has zero kill checks, the deployed tier hosts no paging path at all, and
+the flag is still per-instance `/tmp`. **Do not rely on the switch as a
+production mitigation until the wiring lands and is re-drilled**
+(RFC: `docs/planning/rfc/platform-kill-state.md`).
 
 ## How a deployment is built and shipped
+
+The procedure is `deploy/vercel/REPEATABLE-DEPLOY.md` — follow it, don't
+improvise. Summary of the moving parts (the procedure is authoritative):
 
 1. **Build the bundle** (from the repo root, on a clean tree):
    ```bash
@@ -39,13 +48,12 @@ until it is decided and wired** (P0-1 open).
    ```
    Copies `platform/server` → `deploy/dist-prod/vercel/api/_srv` and
    `src/sentinel` → `.../api/_eng`, lays
-   `deploy/vercel/api/index-prod.py` down as `api/index.py`, and installs
-   `deploy/vercel/vercel.prod.json` (rewrites: every `/api/*` → the
-   function). `deploy/dist-prod/` is gitignored — generated, never
-   committed. The script sanity-checks the tree but does **not**
-   pin/record the source commit; nothing today verifies bundle-vs-source
-   drift (P1 gap — record the deployed commit in the deploy note by hand
-   until the script does it).
+   `deploy/vercel/api/index-prod.py` down as `api/index.py`, installs
+   `deploy/vercel/vercel.prod.json`, embeds `BUILD_INFO.json` with the
+   exact source commit (refuses dirty trees — exit 2 — unless
+   `--allow-dirty`, which is dev-only and recorded), and runs the
+   state-exclusion guard. `deploy/dist-prod/` is gitignored — generated,
+   never committed. Prints the DEPLOY RECORD block for the deploy note.
 
 2. **Deploy** with the Vercel CLI against project `sentinel-platform`
    (or redeploy from the dashboard). CLI keeps the deploy command in the
