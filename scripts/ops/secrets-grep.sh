@@ -74,6 +74,10 @@ ALLOWLIST=(
   'research/jev-behavior/bin/ab_run.py:surrogate-never-sent'
   # named test fixture for the env-fallback webhook path, provably fake
   'tests/test_keystore.py:env-fallback-secret-0'
+  # self-evident drill fixture (renamed 2026-10-07): the value is only
+  # ever the HMAC key for the drill's OWN loopback server — constructed
+  # and verified inside one process, never transmitted externally.
+  'ops/drills/kill_drill_receiver_topology.py:drill-fixture-loopback-only'
   # literal redaction placeholders in tests, not credentials
   # test_auth.py:273 passes the test's OWN provisioned fixture
   # (SENTINEL_OPERATOR_TOKEN="env-provisioned-token-1", set at line 261) —

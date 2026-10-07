@@ -289,6 +289,62 @@ class AuthCase(unittest.TestCase):
         self.assertTrue(store.verify(token))
         self.assertFalse(store.verify("nope"))
 
+    # --------------------------------- rotation RFC: serverless dual-accept
+
+    def _env_store(self, primary, previous=None):
+        os.environ["SENTINEL_OPERATOR_TOKEN"] = primary
+        self.addCleanup(os.environ.pop, "SENTINEL_OPERATOR_TOKEN", None)
+        if previous is not None:
+            os.environ["SENTINEL_OPERATOR_TOKEN_PREVIOUS"] = previous
+            self.addCleanup(os.environ.pop,
+                            "SENTINEL_OPERATOR_TOKEN_PREVIOUS", None)
+        return OperatorTokenStore(os.path.join(self.tmp.name, "unused.json"))
+
+    def test_env_dual_accept_previous(self):
+        """Rotation RFC (serverless): with SENTINEL_OPERATOR_TOKEN_PREVIOUS
+        staged, BOTH the primary and the predecessor verify (overlap);
+        anything else 401s. secondary_staged reports the overlap."""
+        store = self._env_store("env-primary-token-0001",
+                                "env-previous-token-0002")
+        self.assertTrue(store.verify("env-primary-token-0001"))
+        self.assertTrue(store.verify("env-previous-token-0002"))
+        self.assertFalse(store.verify("env-primary-token-000"))
+        self.assertFalse(store.verify(""))
+        self.assertFalse(store.verify(None))
+        self.assertTrue(store.secondary_staged)
+        # file-mode seam has no staged secondary here
+        self.assertFalse(self.store.secondary_staged)
+
+    def test_env_no_previous_no_grace(self):
+        """Without the PREVIOUS var there is no grace slot — exactly the
+        old behavior, fail-closed."""
+        store = self._env_store("env-primary-token-0001")
+        self.assertTrue(store.verify("env-primary-token-0001"))
+        self.assertFalse(store.verify("env-previous-token-0002"))
+        self.assertFalse(store.secondary_staged)
+
+    def test_401_carries_www_authenticate(self):
+        """RFC 6750 S3: a 401 from the bearer-token resource server MUST
+        carry a WWW-Authenticate challenge. The JSON body contract is
+        unchanged (Track 8 keys off it verbatim)."""
+        denied = self.call("/api/v1/integrations/status", app=self.app)
+        self.assertTrue(denied["status"].startswith("401"))
+        self.assertEqual(denied["json"], {"error": "unauthorized"})
+        challenge = denied["headers"].get("www-authenticate", "")
+        self.assertTrue(challenge.startswith("Bearer "),
+                        f"missing Bearer challenge: {challenge!r}")
+        self.assertIn('realm="sentinel-operator"', challenge)
+        self.assertIn('error="invalid_token"', challenge)
+        # the token value must never appear in the challenge
+        self.assertNotIn(self.token, challenge)
+
+    def test_stream_behind_auth_in_app(self):
+        """Main-app ordering anchor for the wrapper fix: /api/stream
+        401s before any stream logic for unauthenticated callers."""
+        denied = self.call("/api/stream", app=self.app)
+        self.assertTrue(denied["status"].startswith("401"))
+        self.assertEqual(denied["json"], {"error": "unauthorized"})
+
 
 if __name__ == "__main__":
     unittest.main()

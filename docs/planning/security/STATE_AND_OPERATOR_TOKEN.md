@@ -106,3 +106,57 @@ break the protocols. The distinction is enforced by policy
   readable (and verifiable) until then — by design, to avoid lockouts.
 - `SENTINEL_STATE_DIR` pointing at a shared/network path is not defended
   against — 0600 perms are the only control there.
+
+## 5. Serverless rotation seam (2026-10-07, rotation RFC)
+
+Full ceremony: `docs/planning/rfc/security-rotation.md`. The code seam:
+
+- `SENTINEL_OPERATOR_TOKEN_PREVIOUS` — the grace slot. `OperatorTokenStore`
+  dual-accepts it in env mode; `secondary_staged` reports the overlap.
+- The four-step ceremony (stage → prove → promote → retire) is a dashboard
+  runbook on this tier; the env-var pair is the `{primary, secondary}`
+  record and Vercel's deployment history is the audit trail.
+- Residuals R1–R3 (break-glass needs shared state; no automated overlap
+  nag; webhook/BYOK `*_PREVIOUS` not wired) are documented in the RFC, not
+  fixed here.
+
+## 6. Console token lifetime — the sessionStorage residual (OWASP)
+
+**What the console does.** The operator pastes the token into the token
+gate; the gate verifies it against the backend (`/api/decisions?limit=1`)
+*before* storing — a wrong value never persists. The verified token lives
+in `sessionStorage` under `sentinel.op.token`, is sent as
+`Authorization: Bearer` on every API call, is dropped on any 401 (the gate
+re-opens), and dies with the tab (sessionStorage lifetime). There is no
+explicit sign-out button; closing the tab is the sign-out.
+
+**The exposure, stated plainly (OWASP Session Management Cheat Sheet).**
+OWASP: *"Do not store authentication tokens, session IDs, JWTs, refresh
+tokens, or any credential in `localStorage` or `sessionStorage`. These
+APIs are accessible to any JavaScript executing in the origin, so a single
+XSS vulnerability discloses every token. Use `HttpOnly; Secure;
+SameSite=Strict` cookies (preferred) or a Backend-for-Frontend (BFF)
+pattern."* Our posture against that bar:
+
+- **What we have:** sessionStorage (not localStorage) — the token does not
+  survive the tab, does not touch disk by design, and is never in the URL,
+  logs, or error messages. The console ships zero third-party scripts
+  (verified: no remote `<script src>` in the console bundle), which shrinks
+  — but does not eliminate — the script-injection surface. No CSP header is
+  set today (residual: a strict CSP would further contain inline-injection).
+- **What we don't have:** HttpOnly cookie binding. That requires the API to
+  `Set-Cookie` and the console to send `credentials: include` — a
+  cross-origin cookie flow (`SameSite=None; Secure`) plus CSRF analysis for
+  the state-changing endpoints. It is a real hardening step, not a
+  one-liner, and it changes the auth contract (Track 1 + Track 8).
+- **Decision (this lane):** document, don't pretend. The residual is
+  accepted for the current threat model (single operator, static console,
+  no third-party JS) and recorded here so a future hardening lane can pick
+  it up with the full contract change it deserves. The dishonest version
+  would be claiming "session-only" as if it were "XSS-proof" — it is not.
+
+**Operational notes.** The token gate's verify-before-store means a pasted
+token is proven live at paste time. Any 401 anywhere drops the token and
+re-opens the gate — a rotated-out token fails closed on the next call,
+never silently. Operators on shared machines: close the tab when done;
+there is no in-app sign-out to click.

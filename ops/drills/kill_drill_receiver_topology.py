@@ -76,7 +76,7 @@ def build_topology():
                           default_routing_key="rk-default",
                           kill_switch=ks)
     pipeline = Pipeline(Correlator(), gate, forwarder, audit,
-                        ReceiverConfig(webhook_secret="drill-secret-0123456789"),
+                        ReceiverConfig(webhook_secret="drill-fixture-loopback-only"),
                         policy=policy, config_loader=loader,
                         state_dir=statedir)
     pipeline.kill_switch = ks

@@ -31,6 +31,12 @@ from .keystore import (
 
 ENV_TOKEN_FILE = "SENTINEL_OPERATOR_TOKEN_FILE"
 ENV_TOKEN_VALUE = "SENTINEL_OPERATOR_TOKEN"
+# Grace-slot seam for the serverless dual-accept ceremony (RFC
+# docs/planning/rfc/security-rotation.md): the predecessor token keeps
+# verifying while staged here, giving stage → prove → promote → retire
+# semantics on a tier with no shared mutable state. Unset/empty = no grace
+# slot (exactly today's flag-day-off behavior, fail-closed).
+ENV_TOKEN_PREVIOUS = "SENTINEL_OPERATOR_TOKEN_PREVIOUS"
 # NOTE: the state-dir env name lives in keystore.ENV_STATE_DIR; the default
 # dir itself is keystore.default_state_dir() (outside the repo tree).
 
@@ -69,8 +75,12 @@ class OperatorTokenStore:
         if provisioned:
             # Hosted/serverless: the operator provisions the token via env
             # (e.g. the Vercel dashboard). No file, no banner — they
-            # already hold the value.
-            self._mem = {"primary": provisioned, "secondary": None}
+            # already hold the value. The grace slot
+            # (SENTINEL_OPERATOR_TOKEN_PREVIOUS) carries the predecessor
+            # during rotation — dual-accept, per the rotation RFC.
+            previous = (os.environ.get(ENV_TOKEN_PREVIOUS) or "").strip()
+            self._mem = {"primary": provisioned,
+                         "secondary": previous or None}
             return
         try:
             self._ks = operator_token_store(self.path)
@@ -125,13 +135,39 @@ class OperatorTokenStore:
 
     def verify(self, presented: str | None) -> bool:
         """Dual-accept via the canonical keystore (C4): primary OR
-        secondary (post-rotation) verifies. Constant-time compare."""
+        secondary (post-rotation) verifies. Constant-time compare.
+
+        Env/serverless mode dual-accepts the grace slot too
+        (SENTINEL_OPERATOR_TOKEN_PREVIOUS) — the rotation RFC's overlap
+        mechanism on a tier with no shared mutable state."""
         if self._ks is not None:
             ok, _via = self._ks.verify(OPERATOR_TOKEN_NAME, presented)
             return bool(ok)
-        cand = (self._mem or {}).get("primary")
-        return (isinstance(presented, str) and bool(presented)
-                and bool(cand) and hmac.compare_digest(presented, cand))
+        if not isinstance(presented, str) or not presented:
+            return False
+        mem = self._mem or {}
+        primary = mem.get("primary") or ""
+        secondary = mem.get("secondary") or ""
+        # Compare against BOTH slots even on first match: no early exit,
+        # so the timing reveals nothing about which slot matched.
+        ok_primary = bool(primary) and hmac.compare_digest(presented,
+                                                           primary)
+        ok_secondary = bool(secondary) and hmac.compare_digest(
+            presented, secondary)
+        return bool(ok_primary or ok_secondary)
+
+    @property
+    def secondary_staged(self) -> bool:
+        """Is a grace-slot (overlap) token currently staged?
+
+        File mode: the keystore record's secondary slot. Env mode: whether
+        SENTINEL_OPERATOR_TOKEN_PREVIOUS is set. Surfaces in status
+        payloads so the rotation panel can render "overlap active".
+        """
+        if self._ks is not None:
+            rec = self._ks._get_record(OPERATOR_TOKEN_NAME)
+            return bool(rec and rec.get("secondary"))
+        return bool((self._mem or {}).get("secondary"))
 
     def bearer_from_header(self, value: str | None) -> str | None:
         """Extract the token from an Authorization header value.

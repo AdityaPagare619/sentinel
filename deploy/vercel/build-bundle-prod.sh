@@ -28,6 +28,26 @@ echo "[bundle-prod] repo=$REPO"
 rm -rf "$DIST"
 mkdir -p "$DIST/api/_srv" "$DIST/api/_eng/sentinel"
 
+# --- pinned-source gate ---------------------------------------------------
+# Audit infra finding: the bundle used to copy the working tree without
+# pinning the commit ("assembles from the deployed commit" was
+# aspirational). A production bundle is built from a recorded commit on a
+# CLEAN tree — no dirty-tree deploys, ever. The stamp at the end records
+# the provenance; a stale dist dir is then DETECTABLE, not silently
+# deployable (audit §5 P2: stale deploy/dist reopens the KEYS P0).
+BUILD_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+BUILD_DIRTY="$(git -C "$REPO" status --porcelain 2>/dev/null || echo unknown)"
+if [ "$BUILD_COMMIT" = "unknown" ]; then
+  echo "[bundle-prod] FAIL: not a git tree — cannot pin the source commit" >&2
+  exit 1
+fi
+if [ -n "$BUILD_DIRTY" ]; then
+  echo "[bundle-prod] FAIL: dirty working tree — commit or stash first" >&2
+  echo "$BUILD_DIRTY" >&2
+  exit 1
+fi
+echo "[bundle-prod] source commit: $BUILD_COMMIT (clean tree)"
+
 # --- serverless function ------------------------------------------------
 cp "$SRC/api/index-prod.py" "$DIST/api/index.py"
 cp "$SRC/vercel.prod.json" "$DIST/vercel.json"
@@ -70,3 +90,13 @@ assert not bad, f"bundle contains state/secret files: {bad}"
 print("[bundle-prod] state-exclusion guard clean")
 print("[bundle-prod] OK -> $DIST")
 EOF
+
+# --- build provenance stamp -----------------------------------------------
+# The stamp makes a stale dist dir DETECTABLE: anyone about to deploy
+# deploy/dist-prod can compare BUILD_COMMIT against the intended SHA
+# instead of silently shipping whatever was last built (audit §5 P2).
+printf '%s\n' "$BUILD_COMMIT" > "$DIST/BUILD_COMMIT"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$DIST/BUILD_TIME"
+printf 'built-from-commit=%s\nbuilt-from-clean-tree=yes\n' \
+  "$BUILD_COMMIT" > "$DIST/BUILD_PROVENANCE.txt"
+echo "[bundle-prod] provenance stamped: $BUILD_COMMIT"

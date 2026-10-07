@@ -86,11 +86,46 @@ _STREAM_REFUSAL = json.dumps({
 }).encode("utf-8")
 
 
+def _c1_ok(environ):
+    """C1 operator check for the serverless stream short-circuit.
+
+    The main app enforces auth BEFORE the stream refusal
+    (PlatformApp.__call__ step 1 → step 3); this wrapper must not answer
+    unauthenticated callers with a 501 — that would be a path oracle and
+    a contract split. Same store, same 401 shape as the app.
+    """
+    store = _platform.operator_tokens
+    presented = store.bearer_from_header(environ.get("HTTP_AUTHORIZATION"))
+    return store.verify(presented)
+
+
+def _sr_with_cors(environ, start_response):
+    """Wrap start_response with the platform's CORS headers.
+
+    The main app injects CORS on EVERY response via its own wrapper; the
+    stream short-circuit bypasses __call__, so the 401 it returns must
+    carry the same CORS treatment — one 401 shape everywhere.
+    """
+    cors = _platform._cors_headers(environ)
+
+    def _sr(status, headers, exc_info=None):
+        seen = {n.lower() for n, _ in headers}
+        extra = [(n, v) for n, v in cors if n.lower() not in seen]
+        if exc_info is None:
+            return start_response(status, headers + extra)
+        return start_response(status, headers + extra, exc_info)
+
+    return _sr
+
+
 def app(environ, start_response):
     """WSGI entrypoint (exported as `app` for @vercel/python)."""
     path = environ.get("PATH_INFO", "") or ""
     if path == "/api/stream" or path.startswith("/api/stream?") \
             or path.startswith("/api/stream/"):
+        if not _c1_ok(environ):
+            return _platform._unauthorized(_sr_with_cors(environ,
+                                                         start_response))
         start_response("501 Not Implemented", [
             ("Content-Type", "application/json"),
             ("Content-Length", str(len(_STREAM_REFUSAL))),

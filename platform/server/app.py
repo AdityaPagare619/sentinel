@@ -317,11 +317,18 @@ class PlatformApp:
         state keys off this body verbatim — it is intentionally NOT the
         standard envelope. CORS headers still apply (the cross-origin
         console must be able to READ the 401 to show the sign-in state).
+
+        RFC 6750 §3 (+ RFC 9110 §15.5.2): a 401 from a bearer-token
+        resource server MUST carry a WWW-Authenticate challenge. The
+        header is additive — the body contract above is unchanged.
         """
         body = b'{"error":"unauthorized"}'
         start_response("401 Unauthorized", [
             ("Content-Type", "application/json"),
             ("Content-Length", str(len(body))),
+            ("WWW-Authenticate",
+             'Bearer realm="sentinel-operator", error="invalid_token", '
+             'error_description="operator bearer token missing or invalid"'),
         ])
         return [body]
 
