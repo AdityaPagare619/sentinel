@@ -41,6 +41,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+# Audit P0 + ruling X-B: under SENTINEL_SIM=1 it is structurally impossible
+# to wire a PD client to real PagerDuty. See sim_pd_guard.
+from .sim_pd_guard import assert_sim_pd_safe
+
 PD_ENDPOINT = "https://events.pagerduty.com/v2/enqueue"
 PD_MAX_DEDUP_KEY_LEN = 255  # PD docs, verified 2026-10-03 (design §4.1)
 PD_MAX_PAYLOAD_BYTES = 512 * 1024
@@ -253,6 +257,9 @@ class PagerDutyClient:
 
     def __init__(self, endpoint: str = PD_ENDPOINT, timeout_s: float = 5.0,
                  user_agent: str = _USER_AGENT):
+        # Structural sim safety (audit P0, ruling X-B): under SENTINEL_SIM=1
+        # a non-loopback endpoint cannot be held by any PagerDutyClient.
+        assert_sim_pd_safe(endpoint, where="PagerDutyClient.__init__")
         self.endpoint = endpoint
         self.timeout_s = timeout_s
         self.user_agent = user_agent
