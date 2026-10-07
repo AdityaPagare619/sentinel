@@ -81,7 +81,7 @@ class PlatformApp:
                  data_source: str = "shadow",
                  labels_version: str = "labels-v3",
                  ui_dir: str | None = None,
-                 cors_origins: str = "https://AdityaPagare619.github.io",
+                 cors_origins: str = "https://adityapagare619.github.io",
                  operator_token_store=None,
                  kill_switch=None,
                  drill_dir: str | None = None):
@@ -110,7 +110,7 @@ class PlatformApp:
         cors_origins = (cors_origins or "").strip()
         self._cors_off = (cors_origins == "")
         self._cors_star = (cors_origins == "*")
-        self._cors_set = ({o.strip() for o in cors_origins.split(",")
+        self._cors_set = ({o.strip().lower() for o in cors_origins.split(",")
                            if o.strip()}
                           if not (self._cors_off or self._cors_star) else set())
         # BYOK integrations settings (the platform tier's ONE write surface —
@@ -138,13 +138,21 @@ class PlatformApp:
     def _cors_headers(self, environ) -> list:
         """CORS headers for this request. "" disables (proxy owns the
         policy); "*" needs no Origin check; an allowlist echoes back only
-        a listed Origin (with Vary)."""
+        a listed Origin (with Vary).
+
+        Comparison is case-insensitive on the whole origin: origins are
+        scheme://host[:port] and the host is case-insensitive per RFC 6454
+        / WHATWG URL (browsers lowercase it, so the real GitHub Pages
+        origin arrives as https://adityapagare619.github.io even when the
+        allowlist was written with capitals). Exact-match otherwise — no
+        reflection, no wildcard — so the allowlist is not weakened.
+        """
         if self._cors_off:
             return []
         if self._cors_star:
             return [("Access-Control-Allow-Origin", "*")]
         origin = environ.get("HTTP_ORIGIN", "")
-        if origin and origin in self._cors_set:
+        if origin and origin.lower() in self._cors_set:
             return [("Access-Control-Allow-Origin", origin),
                     ("Vary", "Origin")]
         return []
@@ -217,6 +225,16 @@ class PlatformApp:
             if path.startswith("/api/"):
                 return self._api(environ, start_response, path, method)
             return self._static(environ, start_response, path, method)
+        except Exception as e:
+            # Eternal friction / graceful degradation: an unhandled handler
+            # bug must degrade to a JSON 500 WITH CORS headers (the
+            # start_response in scope is the CORS-injecting wrapper), never
+            # a bare server 500 the console cannot read. The old shape —
+            # uncaught exception, no CORS — made fetch() reject opaquely
+            # and the console's sync silently blanked the Ops drawer.
+            # Only the exception class is named; no internals leak.
+            return self._error(start_response, 500, "internal",
+                               f"unhandled {type(e).__name__}")
         finally:
             self.gate.release()
 
@@ -735,8 +753,8 @@ class PlatformApp:
 
 
 _STATUS_TEXT = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
-                404: "Not Found",
-                422: "Unprocessable Entity", 501: "Not Implemented",
+                404: "Not Found", 422: "Unprocessable Entity",
+                500: "Internal Server Error", 501: "Not Implemented",
                 503: "Service Unavailable"}
 
 

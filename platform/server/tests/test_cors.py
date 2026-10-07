@@ -106,6 +106,23 @@ class TestCors(unittest.TestCase):
                   origin="https://AdityaPagare619.github.io")
         self.assertNotIn("access-control-allow-origin", r["headers"])
 
+    def test_origin_match_is_case_insensitive_on_host(self):
+        # REGRESSION (2026-10-07): the deployed allowlist was written
+        # "https://AdityaPagare619.github.io" but browsers send the
+        # lowercased host "https://adityapagare619.github.io" (WHATWG URL).
+        # Exact-case matching made every preflight from the real console
+        # fail — the browser blocked all /api/* fetches and the Ops Health
+        # drawer sat at "No backend data yet" with no error. Host case is
+        # insignificant per RFC 6454; the allowlist still exact-matches
+        # otherwise (evil origins get nothing).
+        app = _make_app(cors_origins="https://AdityaPagare619.github.io")
+        r = _call(app, "/api/v1/ops/health",
+                  origin="https://adityapagare619.github.io")
+        self.assertEqual(r["headers"].get("access-control-allow-origin"),
+                         "https://adityapagare619.github.io")
+        r2 = _call(app, "/api/nope", origin="https://evil.example.com")
+        self.assertNotIn("access-control-allow-origin", r2["headers"])
+
     def test_preflight_does_not_touch_api(self):
         # Preflight must not reach the API router (no store needed even
         # for unknown paths).
