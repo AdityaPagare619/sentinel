@@ -19,7 +19,6 @@ import { backendUrlConfigured } from './api.js';
 import { renderSetup } from './views-setup.js';
 /* carried forward (adapted only by nav + labeling): the lab, keys, onboarding */
 import { renderSim } from './views-sim.js';
-import { renderCal } from './views-cal.js';
 import { renderShadow } from './views-shadow.js';
 import { renderSettings } from './views-settings.js';
 import { renderStart } from './views-start.js';
@@ -31,7 +30,7 @@ const NAV = [
   { id: 'river', code: 'RIVER', label: 'Decision river' },
   { id: 'safety', code: 'SAFETY', label: 'Kill · policy · auth · race · degraded' },
   { id: 'audit', code: 'AUDIT', label: 'Audit timeline' },
-  { id: 'lab', code: 'LAB', label: 'Simulator · calibration · shadow' },
+  { id: 'lab', code: 'LAB', label: 'Simulator · shadow' },
   { id: 'keys', code: 'KEYS', label: 'Integrations' },
   { id: 'start', code: 'START', label: 'Onboarding' },
 ];
@@ -205,17 +204,15 @@ async function renderLab(root, params, ctx2) {
   const tab = params.tab || 'simulator';
   root.innerHTML = `
     <div class="view-head"><h1>Lab</h1>
-    <div class="sub">Tune, calibrate, and review shadow evaluations — analysis, not operations.</div></div>
+    <div class="sub">Tune and review shadow evaluations — analysis, not operations.</div></div>
     <div class="tabs">
       <a href="#/lab?tab=simulator" class="${tab === 'simulator' ? 'on' : ''}">SIMULATOR</a>
-      <a href="#/lab?tab=calibration" class="${tab === 'calibration' ? 'on' : ''}">CALIBRATION</a>
       <a href="#/lab?tab=shadow" class="${tab === 'shadow' ? 'on' : ''}">SHADOW</a>
     </div>
     <div id="lab-body"></div>`;
   const body = root.querySelector('#lab-body');
   const lp = legacyParams(params);
-  if (tab === 'calibration') await renderCal(body, lp, ctx2);
-  else if (tab === 'shadow') await renderShadow(body, lp, ctx2);
+  if (tab === 'shadow') await renderShadow(body, lp, ctx2);
   else await renderSim(body, lp, ctx2);
 }
 

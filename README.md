@@ -47,7 +47,7 @@ python3 -m sentinel.synthetic --n 2000 --seed 7 -o labels.jsonl
 python3 -m sentinel.tuner --labels labels.jsonl -o thresholds.json
 
 # 3. Run the eval harness (calibration report)
-python3 -m sentinel.evalharness --n 2000 --seed 7 -o calibration-report.md
+python3 -m sentinel.evalharness --n 2000 --seed 7 -o judgment-fidelity-report.md
 
 # 4. Start the receiver (mock Jev — set SENTINEL_MOCK=1)
 SENTINEL_MOCK=1 python3 -m sentinel.receiver --port 8080

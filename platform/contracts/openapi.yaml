@@ -387,6 +387,15 @@ components:
         input_sha256: {type: string, pattern: '^[0-9a-f]{64}$', description: Canonical input hash; flip-audit join key}
         jev_model: {type: string, nullable: true, example: system-one-2026-09-15, description: Pinned Jev model version; null on deterministic pre-Jev paths}
         latency_ms: {type: number, nullable: true, description: Jev round-trip; null on deterministic paths}
+        budget_outcome:
+          type: string, nullable: true,
+          description: |
+            The race's authoritative verdict (RFC aiml-winner-heuristic):
+            answered_in_time | timer_won | timer_won_shed | error_passthrough |
+            structural_passthrough | pre_race_unknown | failopen_stepped |
+            reaper_redrive. Consoles derive judge-vs-timer winner from this,
+            never from jev_model presence. Null on pre-instrumented rows.
+          example: answered_in_time
         shadow:
           type: boolean
           description: True when this row was recorded in shadow mode (action forced to passthrough)

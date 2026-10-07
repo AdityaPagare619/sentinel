@@ -89,9 +89,18 @@ FALLBACK_LABEL: dict[str, str] = {
 class SpendMeter:
     """Track 2's spend surface: {session_usd, budget_usd, calls, blocked}.
 
-    Track 2 owns the real meter; this is the seam the dispatcher charges
-    against. ``charge`` records estimated pre-call cost (conservative:
-    daily caps are enforced on the estimate, never on a post-hoc actual).
+    ROLE CONTRACT (RFC aiml-spend-reconciliation): this is the advisory
+    PRE-AUTHORIZATION ENVELOPE, not the spend ledger. ``charge`` records the
+    estimated pre-call cost (conservative: daily caps are enforced on the
+    estimate, never on a post-hoc actual). The wire-truth ledger is
+    ``sim_judge.JevSpendTracker`` (actual cost from response usage blocks;
+    failed calls cost 0.0). For the same call stream this envelope's
+    session_usd is >= the tracker's (estimates are conservative; failed calls
+    are charged the estimate here but 0.0 there) — the divergence is bounded
+    and one-directional, never an understatement. When a tracker is attached
+    to the dispatcher, its ``blocked`` is consulted too (fail-closed on
+    disagreement); the served spend surface (GET /api/v1/jev/spend) is the
+    tracker only.
     """
     session_usd: float = 0.0
     budget_usd: float = 0.50
@@ -246,16 +255,22 @@ class AdvisoryDispatcher:
     ``decide_fn``: Track 2's Jev call entry — ``(state, questions) ->
     DecisionResponse``. Injected; never the raw key. ``spend_meter``:
     SpendMeter (or the C2 dict shape, auto-wrapped). ``budgets``:
-    per-direction DirectionBudget overrides.
+    per-direction DirectionBudget overrides. ``tracker``: optional
+    ``sim_judge.JevSpendTracker`` (the wire-truth ledger). When attached,
+    the pre-call gates consult it too — a blocked tracker blocks advisory
+    even if the estimate envelope hasn't latched (fail-closed on
+    disagreement; RFC aiml-spend-reconciliation).
     """
 
     def __init__(self, decide_fn, spend_meter=None, budgets=None,
                  jev_model: str | None = None,
-                 pool: AdvisoryPool | None = None) -> None:
+                 pool: AdvisoryPool | None = None,
+                 tracker=None) -> None:
         self._decide_fn = decide_fn
         if isinstance(spend_meter, dict):
             spend_meter = SpendMeter.from_dict(spend_meter)
         self._meter: SpendMeter = spend_meter or SpendMeter()
+        self._tracker = tracker  # JevSpendTracker | None — duck-typed
         merged = {k: DirectionBudget(**vars(v))
                   for k, v in DEFAULT_DIRECTION_BUDGETS.items()}
         for k, v in (budgets or {}).items():
@@ -288,6 +303,12 @@ class AdvisoryDispatcher:
         if budget is None or not budget.enabled:
             return False, "disabled", 0.0
         if self._meter.blocked or self._meter.session_usd >= self._meter.budget_usd:
+            return False, "budget_blocked", 0.0
+        if self._tracker is not None and self._tracker.blocked:
+            # Fail-closed on disagreement: the wire-truth ledger says the
+            # budget is spent, even if the estimate envelope hasn't latched.
+            # (RFC aiml-spend-reconciliation.) The property read takes no
+            # dispatcher locks — no lock-ordering risk.
             return False, "budget_blocked", 0.0
         est = estimate_cost_usd(state, questions)
         if est > budget.cost_cap_usd:

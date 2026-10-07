@@ -220,6 +220,61 @@ class TestPreCallGates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Spend-meter reconciliation (RFC aiml-spend-reconciliation)
+# ---------------------------------------------------------------------------
+
+class TestSpendReconciliation(unittest.TestCase):
+    """SpendMeter (advisory estimate envelope) vs JevSpendTracker (C2
+    wire-truth ledger): explicit roles, one-directional divergence bound,
+    fail-closed on disagreement."""
+
+    def test_blocked_tracker_blocks_dispatcher(self):
+        """A blocked wire-truth ledger blocks advisory even when the estimate
+        envelope hasn't latched — fail-closed on disagreement."""
+        from sentinel.sim_judge import JevSpendTracker
+        fake = RecordingDecide(_resp())
+        tracker = JevSpendTracker(budget_usd=0.0)  # blocked from the start
+        self.assertTrue(tracker.blocked)
+        meter = SpendMeter(budget_usd=10.0)  # envelope: plenty of room
+        d = AdvisoryDispatcher(fake, meter, jev_model="jev-mock-0.0.0",
+                               tracker=tracker)
+        env = d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                            lambda r: {"x": 1}, lambda reason: {"fb": reason})
+        self.assertEqual(fake.n_calls, 0)
+        self.assertEqual(env["fallback_reason"], "budget_blocked")
+        d.close()
+
+    def test_unblocked_tracker_does_not_block(self):
+        from sentinel.sim_judge import JevSpendTracker
+        fake = RecordingDecide(_resp())
+        tracker = JevSpendTracker(budget_usd=10.0)
+        d = AdvisoryDispatcher(fake, SpendMeter(budget_usd=10.0),
+                               jev_model="jev-mock-0.0.0", tracker=tracker)
+        env = d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                            lambda r: {"x": 1}, lambda reason: {"fb": reason})
+        self.assertEqual(env["fallback"], "jev")
+        self.assertEqual(fake.n_calls, 1)
+        d.close()
+
+    def test_estimate_envelope_never_understates_ledger(self):
+        """Same call script through both meters: the estimate envelope's
+        session_usd >= the ledger's (estimates are conservative; failed calls
+        cost 0.0 actual). The divergence is bounded and one-directional."""
+        from sentinel.sim_judge import JevSpendTracker
+        tracker = JevSpendTracker(budget_usd=10.0)
+        meter = SpendMeter(budget_usd=10.0)
+        # (estimate_charged, actual_recorded): successes cost <= estimate;
+        # the failed call records 0.0 (no usage data — never invented).
+        script = [(0.00010, 0.00008), (0.00010, 0.00009), (0.00010, 0.0)]
+        for est, actual in script:
+            meter.charge(est)
+            tracker.record_call(actual)
+        self.assertGreaterEqual(meter.session_usd, tracker.session_usd)
+        self.assertAlmostEqual(meter.session_usd, 0.00030, places=9)
+        self.assertAlmostEqual(tracker.session_usd, 0.00017, places=9)
+
+
+# ---------------------------------------------------------------------------
 # §5 timeout–fallback matrix
 # ---------------------------------------------------------------------------
 

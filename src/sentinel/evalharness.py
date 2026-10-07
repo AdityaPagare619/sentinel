@@ -226,26 +226,30 @@ def accuracy(rows: list[dict]) -> dict[str, float]:
     return {"severity": sev / n, "team": team / n, "disposition": disp / n, "n": n}
 
 
-def ece(pairs: list[tuple[float, bool]], n_bins: int = 10) -> tuple[float, list]:
-    """Expected calibration error. pairs = [(confidence, correct), ...]."""
-    bins: list[list] = [[] for _ in range(n_bins)]
-    for conf, correct in pairs:
-        idx = min(int(conf * n_bins), n_bins - 1)
-        bins[idx].append((conf, correct))
-    total = len(pairs)
-    err = 0.0
-    table = []
-    for i, b in enumerate(bins):
-        if not b:
-            table.append({"bin": f"[{i/10:.1f},{(i+1)/10:.1f})", "n": 0,
-                          "acc": None, "mean_conf": None})
-            continue
-        acc = sum(1 for _, c in b if c) / len(b)
-        mean_conf = sum(c for c, _ in b) / len(b)
-        err += (len(b) / total) * abs(acc - mean_conf)
-        table.append({"bin": f"[{i/10:.1f},{(i+1)/10:.1f})", "n": len(b),
-                      "acc": round(acc, 4), "mean_conf": round(mean_conf, 4)})
-    return err, table
+def rank_fidelity(pairs: list[tuple[float, bool]]) -> tuple[float | None, int]:
+    """Rank fidelity of reported confidences vs correctness (Mann-Whitney U).
+
+    Ordinality law (AC-8c, RFC aiml-ordinality-sweep): confidence is ORDINAL,
+    never a calibrated probability — so the honest instrument is rank-order
+    agreement (do higher confidences rank above correct outcomes?), not ECE.
+    Mirrors platform/server/store.py::_rank_auc.
+
+    Returns (auc, n): auc in [0,1], 0.5 = chance, 1.0 = perfect ranking;
+    None when unscorable (no positives or no negatives in the sample).
+    """
+    pos = [c for c, ok in pairs if ok]
+    neg = [c for c, ok in pairs if not ok]
+    n = len(pairs)
+    if not pos or not neg:
+        return None, n
+    conc = tied = 0
+    for p in pos:
+        for q in neg:
+            if p > q:
+                conc += 1
+            elif p == q:
+                tied += 1
+    return (conc + 0.5 * tied) / (len(pos) * len(neg)), n
 
 
 def coverage_at(confs: list[float], taus=COVERAGE_TAUS) -> dict[float, float]:
@@ -347,7 +351,7 @@ def shuffle_probe(pairs: list[tuple], *, seed: int, n: int = 200,
 # ---------------------------------------------------------------------------
 
 def run_eval(n: int = 2000, seed: int = 7, flip_rate: float = 0.02,
-             label_noise: float = 0.0, out_path: str = "calibration-report.md",
+             label_noise: float = 0.0, out_path: str = "judgment-fidelity-report.md",
              flip_n: int = 200, flip_repeats: int = 100,
              shuffle_n: int = 200) -> dict:
     pairs = generate_alerts(n, seed)
@@ -358,8 +362,9 @@ def run_eval(n: int = 2000, seed: int = 7, flip_rate: float = 0.02,
                 for r in rows if r["record"].q_severity and r["record"].q_severity.confidence is not None]
     q3_pairs = [(r["record"].q_disposition.confidence, r["record"].q_disposition.choice == r["label"]["disposition_true"])
                 for r in rows if r["record"].q_disposition and r["record"].q_disposition.confidence is not None]
-    ece_q1, ece_q1_table = ece(q1_pairs)
-    ece_q3, ece_q3_table = ece(q3_pairs)
+    # Ordinality law (AC-8c, RFC aiml-ordinality-sweep): rank fidelity, never ECE.
+    auc_q1, n_q1 = rank_fidelity(q1_pairs)
+    auc_q3, n_q3 = rank_fidelity(q3_pairs)
     cov_q1 = coverage_at([c for c, _ in q1_pairs])
     cov_q3 = coverage_at([c for c, _ in q3_pairs])
     fs = false_suppress_rate(rows)
@@ -370,13 +375,17 @@ def run_eval(n: int = 2000, seed: int = 7, flip_rate: float = 0.02,
     metrics = {
         "n": n, "seed": seed, "flip_rate_injected": flip_rate,
         "label_noise": label_noise, "using_shim_gate": _USING_SHIM_GATE,
-        "accuracy": acc, "ece_q1": ece_q1, "ece_q3": ece_q3,
-        "ece_q1_table": ece_q1_table, "ece_q3_table": ece_q3_table,
+        "accuracy": acc, "rank_auc_q1": auc_q1, "rank_auc_q3": auc_q3,
+        "rank_n_q1": n_q1, "rank_n_q3": n_q3,
         "coverage_q1": cov_q1, "coverage_q3": cov_q3,
         "false_suppress": fs, "flip_probe": flip, "shuffle_probe": shuf,
     }
     write_report(metrics, out_path)
     return metrics
+
+
+def _fmt_auc(v) -> str:
+    return "n/a (unscorable)" if v is None else f"{v:.4f}"
 
 
 def _md_table(headers: list[str], rows: list[list]) -> str:
@@ -392,7 +401,7 @@ def write_report(m: dict, path: str) -> None:
     flip = m["flip_probe"]
     shuf = m["shuffle_probe"]
     L = [
-        "# Sentinel calibration report",
+        "# Sentinel judgment-fidelity report",
         "",
         f"Alerts evaluated: **{m['n']}** · seed `{m['seed']}` · "
         f"injected flip rate `{m['flip_rate_injected']}` · label noise `{m['label_noise']}` · "
@@ -406,17 +415,16 @@ def write_report(m: dict, path: str) -> None:
             ["disposition accuracy (action vs disposition_true)", f"{acc['disposition']:.4f}"],
         ]),
         "",
-        "## Calibration (ECE, 10-bin)",
+        "## Judgment fidelity (rank AUC — ordinal, never ECE)",
         "",
-        f"Q1 severity ECE: **{m['ece_q1']:.4f}** · Q3 disposition ECE: **{m['ece_q3']:.4f}**",
+        "Confidence is ordinal: the honest instrument is rank-order agreement",
+        "(do higher confidences rank above correct outcomes?), not expected",
+        "calibration error. AUC via Mann-Whitney U: 0.5 = chance, 1.0 = perfect",
+        "ranking. See `rank_fidelity()` and RFC aiml-ordinality-sweep.",
         "",
-        _md_table(["bin", "n", "acc", "mean_conf"],
-                  [[t["bin"], t["n"], t["acc"], t["mean_conf"]] for t in m["ece_q1_table"]]),
-        "",
-        "Q3 bins:",
-        "",
-        _md_table(["bin", "n", "acc", "mean_conf"],
-                  [[t["bin"], t["n"], t["acc"], t["mean_conf"]] for t in m["ece_q3_table"]]),
+        _md_table(["question", "rank AUC", "n"],
+                  [["Q1 severity", _fmt_auc(m["rank_auc_q1"]), m["rank_n_q1"]],
+                   ["Q3 disposition", _fmt_auc(m["rank_auc_q3"]), m["rank_n_q3"]]]),
         "",
         "## Coverage@tau (fraction with confidence >= tau)",
         "",
@@ -452,10 +460,10 @@ def write_report(m: dict, path: str) -> None:
         "   threshold policy, the audit path and the metrics all work end to end —",
         "   it says nothing about how the real Jev model will score on customer",
         "   alerts.",
-        "2. **Real calibration needs 50–300 customer labels** (research finding).",
+        "2. **Real judgment-fidelity measurement needs 50–300 customer labels** (research finding).",
         "   Ship week 1–2 in shadow mode, collect the label join, then re-run",
         "   this harness against the customer's own history before trusting any",
-        "   ECE or coverage number.",
+        "   rank-fidelity or coverage number.",
         "3. Flip injection is a crude stand-in for Jev's measured 1.3–2.2%",
         "   non-determinism: it flips choices, not the underlying probability",
         "   mass, and it cannot reproduce correlated failure modes.",
@@ -468,7 +476,7 @@ def write_report(m: dict, path: str) -> None:
     ]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(L))
-    print(f"wrote calibration report -> {path}")
+    print(f"wrote judgment-fidelity report -> {path}")
 
 
 _AB_REPORT_DEFAULT = "research/jev-behavior/ab-2026-10-04.md"
@@ -561,7 +569,7 @@ def main() -> None:
     print(f"severity_acc={m['accuracy']['severity']:.4f} "
           f"team_acc={m['accuracy']['team']:.4f} "
           f"disp_acc={m['accuracy']['disposition']:.4f} "
-          f"ece_q1={m['ece_q1']:.4f} ece_q3={m['ece_q3']:.4f} "
+          f"rank_auc_q1={_fmt_auc(m['rank_auc_q1'])} rank_auc_q3={_fmt_auc(m['rank_auc_q3'])} "
           f"false_suppress={m['false_suppress']['rate']:.4f} "
           f"flip={'PASS' if m['flip_probe']['pass'] else 'FAIL'} "
           f"shuffle={'PASS' if m['shuffle_probe']['pass'] else 'FAIL'}")

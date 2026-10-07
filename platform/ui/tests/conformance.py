@@ -133,7 +133,7 @@ disp_enum = SPEC["components"]["schemas"]["DispositionAction"]["enum"]
 VIEWS_JS = " ".join((ROOT / "assets" / f).read_text()
                     for f in ["view-river.js", "view-now.js", "view-pages.js", "view-proofs.js",
                               "view-safety.js", "view-audit.js",
-                              "views-cal.js", "views-sim.js", "views-shadow.js"])
+                              "views-sim.js", "views-shadow.js"])
 for v in sev_enum + disp_enum:
     check(f"lib.js maps contract value '{v}'", v in LIB_JS)
 # v2: team names are produced only by synth.js — checked against the enum below
@@ -166,7 +166,7 @@ check("shadow.json envelope data_source ∈ enum",
 VIEWS_JS2 = " ".join((ROOT / "assets" / f).read_text()
                      for f in ["view-river.js", "view-now.js", "view-pages.js", "view-proofs.js",
                                "view-safety.js", "view-audit.js",
-                               "views-cal.js", "views-sim.js", "views-shadow.js"])
+                               "views-sim.js", "views-shadow.js"])
 for v in team_enum:
     pass  # superseded below: v2 has no team filter chips; see the synth-only check
 # Redesign v2: views no longer carry team filter chips; the synthetic pipeline

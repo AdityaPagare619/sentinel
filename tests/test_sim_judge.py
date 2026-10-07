@@ -638,5 +638,102 @@ class TestSpendEndpointAuth(unittest.TestCase):
             self.assertEqual(body["budget_usd"], 0.50)
 
 
+class TestCostCapPressure(unittest.TestCase):
+    """Workstream 3 (RFC aiml-ordinality-sweep wave): prove the cost cap under
+    thread pressure — not assertions about the mechanism, but a live run.
+
+    Invariants under test:
+      1. try_begin_call() gates BEFORE network I/O: no wire attempt may start
+         after the tracker reports blocked (checked per-attempt, under threads).
+      2. The blocked latch is permanent: no API unlatches it; further attempts
+         raise JevBudgetExhausted.
+      3. Budget 0.0 authorizes zero spend: N threads, zero wire attempts.
+    The overshoot (session_usd - budget_usd) is MEASURED and reported, not
+    asserted to zero: pre-authorization admits in-flight calls, so the bound
+    is (threads-1) x per-call cost. Honest numbers, not a zero claim.
+    """
+
+    def _wire(self, tracker, latency_s=0.002, input_tokens=2000):
+        """Fake inner client: records every wire attempt with the tracker's
+        blocked state AT ATTEMPT TIME (the gate-before-I/O invariant)."""
+        from sentinel.sim_judge import SpendCappedJevClient
+        attempts = []
+        lock = threading.Lock()
+
+        class FakeWire:
+            model = "jev-1.13.0"
+            timeout_s = 8.0
+
+            def decide(self, state, questions):
+                with lock:
+                    attempts.append(tracker.blocked)
+                time.sleep(latency_s)  # the network round-trip
+                return _canned_response(input_tokens=input_tokens)
+
+        return SpendCappedJevClient(FakeWire(), tracker), attempts
+
+    def _hammer(self, client, n_threads=32, n_per_thread=10):
+        errors = []
+        lock = threading.Lock()
+
+        def worker():
+            for _ in range(n_per_thread):
+                try:
+                    client.decide({}, {})
+                except Exception as exc:  # noqa: BLE001 - counted, not hidden
+                    with lock:
+                        errors.append(type(exc).__name__)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return errors
+
+    def test_gate_before_io_under_pressure(self):
+        from sentinel.sim_judge import JevSpendTracker
+        # Budget admits ~12 calls at $0.000084/call; 320 attempts race it.
+        tracker = JevSpendTracker(budget_usd=0.001)
+        client, attempts = self._wire(tracker)
+        errors = self._hammer(client)
+        # INVARIANT 1: no wire attempt started after the latch engaged.
+        late = [a for a in attempts if a]
+        self.assertEqual(late, [],
+                         f"{len(late)} wire attempts started after blocked")
+        # INVARIANT 2: the latch is permanent.
+        self.assertTrue(tracker.blocked)
+        for _ in range(10):
+            with self.assertRaises(sim_judge.JevBudgetExhausted):
+                client.decide({}, {})
+        self.assertTrue(tracker.blocked)
+        # MEASURED, not asserted: the pre-authorization overshoot.
+        overshoot = tracker.session_usd - 0.001
+        print(f"\n[pressure] attempts={len(attempts)} blocked-late={len(late)} "
+              f"session_usd={tracker.session_usd:.6f} overshoot_usd={overshoot:.6f} "
+              f"budget_errors={errors.count('JevBudgetExhausted')}")
+        self.assertLessEqual(overshoot, 32 * 2000 * 0.042 / 1_000_000)
+
+    def test_zero_budget_zero_spend_under_pressure(self):
+        from sentinel.sim_judge import JevSpendTracker, JevBudgetExhausted
+        tracker = JevSpendTracker(budget_usd=0.0)
+        self.assertTrue(tracker.blocked)
+        client, attempts = self._wire(tracker)
+        errors = self._hammer(client, n_threads=16, n_per_thread=5)
+        self.assertEqual(attempts, [], "wire I/O attempted on a 0.0 budget")
+        self.assertEqual(tracker.session_usd, 0.0)
+        self.assertTrue(all(e == "JevBudgetExhausted" for e in errors))
+        self.assertEqual(len(errors), 80)
+
+    def test_negative_budget_fail_closed(self):
+        from sentinel.sim_judge import JevSpendTracker
+        tracker = JevSpendTracker(budget_usd=-5.0)
+        self.assertTrue(tracker.blocked)
+        client, attempts = self._wire(tracker)
+        with self.assertRaises(sim_judge.JevBudgetExhausted):
+            client.decide({}, {})
+        self.assertEqual(attempts, [])
+
+
 if __name__ == "__main__":
     unittest.main()

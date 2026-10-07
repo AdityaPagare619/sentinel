@@ -162,6 +162,24 @@ class JevSpendTracker:
     budget; raising it is a restart, not a runtime toggle — a runtime
     raise would let a runaway sim spend past the operator's cap).
     A budget of 0.0 (or negative) starts blocked: zero Jev calls, ever.
+
+    Concurrency note (measured 2026-10-07, TestCostCapPressure): the gate is
+    check-then-act, so under thread pressure a bounded number of in-flight
+    calls are admitted before the latch engages (26 admitted racing a $0.001
+    budget over 320 attempts; overshoot $0.001184 — bounded by (threads-1) x
+    per-call cost, trivial against the $0.50 default). The hard invariant the
+    test enforces: NO wire attempt may START after the tracker reports
+    blocked. Reservation accounting would close the window but adds
+    leaked-reservation failure modes; the simple design is load-bearing for
+    the fail-open path, so the window is documented, not engineered away.
+
+    ROLE CONTRACT (RFC aiml-spend-reconciliation): this is the WIRE-TRUTH
+    LEDGER — actual cost from response usage blocks (``input_tokens ×
+    $0.042/1M``); failed calls record 0.0 because we have no usage data and
+    inventing one would be dishonest. The advisory pre-authorization envelope
+    (``advisory.SpendMeter``) charges estimates BEFORE the call and may
+    overstate spend; it never understates. The served spend surface
+    (``GET /api/v1/jev/spend``) reads this tracker only.
     """
 
     def __init__(self, budget_usd: float = DEFAULT_JEV_BUDGET_USD) -> None:

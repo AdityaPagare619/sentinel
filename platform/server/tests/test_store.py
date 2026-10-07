@@ -242,6 +242,46 @@ class TestNoise(unittest.TestCase):
         self.assertIn("0" * 16, {i["fingerprint"] for i in river})
 
 
+class TestBudgetOutcome(unittest.TestCase):
+    """RFC aiml-winner-heuristic: the DecisionSummary projection carries the
+    race's authoritative budget_outcome so the console never derives the
+    winner from jev_model presence (which mislabels error_passthrough)."""
+
+    def _store_with(self, **kw):
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        from sentinel.audit import AuditLog
+        audit = AuditLog(tmp.name)
+        make_decision(audit, alert_id="alt-bo1", **kw)
+        audit.close()
+        return ReadStore(tmp.name)
+
+    def test_error_passthrough_projected(self):
+        # The regression case: jev_model IS set (the judge was invoked) but
+        # the race took error_passthrough (the judge raised; gate failed open).
+        store = self._store_with(action="page_now", reason="error:timeout",
+                                 sev="p1_critical", confidence=0.9,
+                                 jev_model="system-one")
+        item = store.decisions(limit=1)[0]
+        self.assertEqual(item["budget_outcome"], "error_passthrough")
+        self.assertEqual(item["jev_model"], "system-one")
+
+    def test_answered_in_time_projected(self):
+        store = self._store_with(action="page_now", reason="p1p2-mass",
+                                 sev="p1_critical", confidence=0.9,
+                                 jev_model="system-one")
+        item = store.decisions(limit=1)[0]
+        self.assertEqual(item["budget_outcome"], "answered_in_time")
+
+    def test_structural_passthrough_projected(self):
+        store = self._store_with(action="passthrough", reason="uncertain-default",
+                                 sev="known_noise", confidence=0.95,
+                                 jev_model=None)
+        item = store.decisions(limit=1)[0]
+        self.assertEqual(item["budget_outcome"], "structural_passthrough")
+
+
 class TestFlips(unittest.TestCase):
     def test_repeats_and_flip_flag(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

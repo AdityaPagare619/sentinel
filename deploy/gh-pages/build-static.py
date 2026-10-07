@@ -246,6 +246,12 @@ CONFIG_JS = "window.SENTINEL_DATA_MODE='{mode}';\n"
 # setMode() is a no-op). Structural checks below (no data/, no api/, no JSON
 # fixtures) carry the "no fixtures" guarantee.
 PROD_BANNED = ["SENTINEL_SIMULATED_PAGING"]
+# Ordinality law (AC-8c, RFC aiml-ordinality-sweep): Jev confidence is ORDINAL,
+# never a calibrated probability. These strings fail the build in BOTH bundles.
+CONSOLE_BANNED = ["Expected Calibration Error", "expected calibration error",
+                  "reliability diagram", "Reliability diagram",
+                  "diagonal is perfect honesty", "P(p1)=",
+                  "80% confident", "% confident,"]
 # Strings that MUST appear in the staging bundle (in-band honesty).
 STAGING_REQUIRED = ["SIMULATED SHOWCASE", "snapshot — not live"]
 
@@ -254,15 +260,14 @@ def assemble_staging(ui_src: str, api_dir: str, out: str) -> None:
     if os.path.exists(out):
         shutil.rmtree(out)
     os.makedirs(out)
-    # UI assets. Ordinality law (AC-8c): the dead v1 calibration assets
-    # (lib.js gloss80/stripCal/calVerdict/P(p1), views-cal.js ECE diagrams,
-    # views-sim.js P(p1) sums) must never ship to the public branch again —
-    # exclude them at the copy boundary.
-    _DEAD_CALIBRATION_ASSETS = {"lib.js", "views-cal.js", "views-sim.js"}
+    # UI assets. Ordinality law (AC-8c, RFC aiml-ordinality-sweep): the v1
+    # calibration presentation was deleted at the source (views-cal.js,
+    # banned lib.js helpers, confBar/relDiagram) — there is nothing left to
+    # exclude at the copy boundary. The ordinality gate in verify_staging /
+    # verify_prod fails the build if a violation ever re-enters.
     for name in ("assets",):
         shutil.copytree(
-            os.path.join(ui_src, name), os.path.join(out, name),
-            ignore=shutil.ignore_patterns(*_DEAD_CALIBRATION_ASSETS))
+            os.path.join(ui_src, name), os.path.join(out, name))
     shutil.copy(os.path.join(ui_src, "index.html"), out)
     # Pre-rendered API
     shutil.copytree(api_dir, os.path.join(out, "api"))
@@ -288,6 +293,28 @@ def assemble_prod(ui_src: str, out: str) -> None:
         if os.path.exists(p):
             shutil.rmtree(p)
     print(f"[build] prod/ assembled -> {out}", flush=True)
+
+
+def _assert_ordinality(out: str, label: str) -> None:
+    """Fail loudly if the bundle presents confidence as calibrated probability."""
+    bad = []
+    for root, _, files in os.walk(out):
+        for fn in files:
+            if not fn.endswith((".js", ".html", ".json")):
+                continue
+            p = os.path.join(root, fn)
+            try:
+                with open(p, "r", encoding="utf-8", errors="strict") as f:
+                    text = f.read()
+            except (UnicodeDecodeError, ValueError):
+                continue
+            for s in CONSOLE_BANNED:
+                if s in text:
+                    bad.append(f"{os.path.relpath(p, out)}: {s!r}")
+    if bad:
+        raise RuntimeError(f"{label} bundle violates ordinality (AC-8c):\n"
+                           + "\n".join(bad))
+    print(f"[build] {label} bundle ordinality-clean (AC-8c)", flush=True)
 
 
 def verify_prod(out: str) -> None:
@@ -327,6 +354,7 @@ def verify_prod(out: str) -> None:
     # The honest empty state must ship: backend setup is the entry point.
     if not os.path.exists(os.path.join(out, "assets", "views-setup.js")):
         raise RuntimeError("prod bundle missing views-setup.js (backend config entry)")
+    _assert_ordinality(out, "prod")
     print("[build] prod bundle clean: no fixtures, DATA_MODE='live', setup entry present",
           flush=True)
 
@@ -351,6 +379,7 @@ def verify_staging(out: str) -> None:
                 with open(os.path.join(root, fn), encoding="utf-8") as f:
                     json.load(f)
                 n += 1
+    _assert_ordinality(out, "staging")
     print(f"[build] staging bundle honest ({n} valid JSON files)", flush=True)
 
 

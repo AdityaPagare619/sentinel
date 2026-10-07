@@ -31,6 +31,30 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 V2 = os.path.join(REPO, "platform", "ui-v2", "index.html")
 
 
+def _assert_ordinality(paths: list[str]) -> None:
+    """Ordinality law (AC-8c, RFC aiml-ordinality-sweep): fail the build if any
+    served console presents Jev confidence as a calibrated probability.
+    Banned: ECE headlines, reliability diagrams, "diagonal is perfect honesty",
+    P(...) probability notation, "% confident" claims."""
+    banned = ["Expected Calibration Error", "expected calibration error",
+              "reliability diagram", "Reliability diagram",
+              "diagonal is perfect honesty", "P(p1)=",
+              "80% confident", "% confident,"]
+    bad = []
+    for path in paths:
+        blob = open(path, encoding="utf-8").read()
+        for s in banned:
+            if s in blob:
+                # locate for a useful error
+                idx = blob.index(s)
+                line = blob.count("\n", 0, idx) + 1
+                bad.append(f"{path}:{line}: {s!r}")
+    if bad:
+        raise AssertionError("ordinality violation (AC-8c) in served console:\n"
+                             + "\n".join(bad))
+    print(f"[v2] ordinality gate clean ({len(paths)} files)")
+
+
 def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
     assert os.path.exists(V2), f"v2 console missing: {V2}"
     html = open(V2, encoding="utf-8").read()
@@ -104,6 +128,13 @@ def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
     assert 'data-backend="' in prod_tag, "prod <html> missing data-backend"
     assert 'data-mode="production"' not in stg_tag, "staging <html> leaked data-mode"
     print("[v2] banner contract verified")
+
+    # --- ordinality gate (AC-8c) ----------------------------------------------
+    emitted = [os.path.join(out, "index.html"), os.path.join(stg, "index.html")]
+    lt_html = os.path.join(lt, "index.html")
+    if os.path.exists(lt_html):
+        emitted.append(lt_html)
+    _assert_ordinality(emitted)
 
 
 def main() -> None:

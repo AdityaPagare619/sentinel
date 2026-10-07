@@ -153,9 +153,9 @@ export async function renderSim(root, params, ctx) {
       <div class="pcard"><div class="pcard-k">Suppressions <span class="would">would have stood down</span> ${derivedMark('simulated', 'projection over the 7d shadow window with your thresholds')}</div>
         <div class="pcard-v mono">${fmtInt(b.suppress)} → <b>${fmtInt(proj.suppress)}</b> ${deltaLine(proj.suppress, b.suppress)}</div>
         <div class="pcard-sub mono">suppression rate ${fmtPct(proj.suppress_rate)} · avoided page cost $${fmtInt(proj.avoided_page_cost)}</div></div>
-      <div class="pcard${danger ? ' danger' : ''}"><div class="pcard-k">False-suppress watch <span class="would">the conscience</span> ${derivedMark('simulated', 'Σ P(p1) over the would-be-suppressed set — a projection, not a count of real mistakes')}</div>
+      <div class="pcard${danger ? ' danger' : ''}"><div class="pcard-k">False-suppress watch <span class="would">the conscience</span> ${derivedMark('simulated', 'Σ reported p1 scores over the would-be-suppressed set — a projection, not a count of real mistakes')}</div>
         <div class="pcard-v mono">${(b.exp_false_suppresses ?? 0).toFixed(1)} → <b>${proj.exp_false_suppresses.toFixed(1)}</b> ${deltaLine(Math.round(proj.exp_false_suppresses * 10) / 10, Math.round((b.exp_false_suppresses ?? 0) * 10) / 10)}</div>
-        <div class="pcard-sub mono">Σ P(p1) over suppressed · expected cost $${fmtInt(proj.expected_cost)}</div>
+        <div class="pcard-sub mono">Σ p1 scores over suppressed · projected cost $${fmtInt(proj.expected_cost)}</div>
         ${danger ? '<div class="pcard-warn mono">export locked — review each case in the audit explorer first</div>' : ''}</div>`;
     const locked = danger && !acked;
     exportBtn.disabled = locked;

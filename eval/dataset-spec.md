@@ -44,7 +44,7 @@ D3 is D2 joined to labeled outcomes via `eval/feedback-join-design.md`.
 - **Reproduce-from-scratch command** (no checkout needed beyond the pinned lane):
   ```
   git archive <lane> src/sentinel | tar -x
-  PYTHONPATH=src python -m sentinel.evalharness --n 2000 --seed 7 -o calibration-report.md
+  PYTHONPATH=src python -m sentinel.evalharness --n 2000 --seed 7 -o judgment-fidelity-report.md
   ```
   (The harness replays the synthetic alerts through the Gate with a mock Jev
   client scripted from the labels — see §2.4.)
@@ -137,7 +137,7 @@ says this outright, and every dataset version carries the same warning.
 | --- | --- | --- | --- | --- |
 | Canonical labels.jsonl (n=2000) | `python -m sentinel.synthetic` | any time | `--n 2000 --seed 7 --label-noise 0.0` | `synthetic.py::generate_alerts` @ lane `lane/code-mvp-v0.1` |
 | Full-storm labels.jsonl (n=10000) | same | any time | `--n 10000 --seed 7` | same |
-| v0.1 calibration-report.md | `python -m sentinel.evalharness` | 2026-10-02 | `--n 2000 --seed 7` | `evalharness.py` @ same lane |
+| v0.1 judgment-fidelity-report.md | `python -m sentinel.evalharness` | 2026-10-02 | `--n 2000 --seed 7` | `evalharness.py` @ same lane |
 | This spec's measured mixture tables | LEDGER (Aditya's SRE wave) | 2026-10-03 | n=2000/10000, seed 7 | generator + harness, byte-verified in `/tmp/syncheck` |
 
 Rule: anyone regenerating a D1 artifact uses **the same seed and the generator

@@ -128,11 +128,12 @@ export function stripRiver({ nPages, nSuppress, windowLabel, newestIso, apiDown,
   if (nPages > 0) return `${nPages} page${nPages === 1 ? '' : 's'} in the last ${windowLabel}. ${nSuppress} suppressions, all reason-coded.`;
   return `Nothing on fire. ${nSuppress} suppressions in the last ${windowLabel}, all reason-coded. Gate armed.`;
 }
-export function stripCal({ ece, n, thin, stale }) {
-  if (thin) return `n=${fmtInt(n)} — calibration provisional. Do not tune on this.`;
-  if (stale) return `Calibration as of ${stale}: cannot refresh — treat tonight's confidences as uncalibrated until this updates.`;
-  return `Calibration healthy as of the nightly join: ECE ${fmtConf(ece, 3)} (n=${fmtInt(n)}).`;
-}
+/* Ordinality law (AC-8c, RFC aiml-ordinality-sweep): the v1 calibration strip,
+ * glosses, and verdict helpers (stripCal, gloss80, calVerdict, overconfidentBins,
+ * binForConf, quartilesFromBins) were deleted 2026-10-07. They presented Jev
+ * confidence as a calibrated probability (ECE gates, "80% confident" glosses,
+ * reliability bins) — the banned presentation. The backend instrument is now
+ * rank fidelity (AUC over p1 ranks); no probability-bin helpers live here. */
 export function stripSim({ pageNow, thin, n }) {
   if (thin) return `Cannot project — ${fmtInt(n)} cases is below 100. This refusal is the feature, not a bug.`;
   return `At these thresholds you would have been woken ${fmtInt(pageNow)} times in the 7d window.`;
@@ -146,44 +147,9 @@ export function stripStart({ mode }) {
   return 'Shadow mode — read-only tap. Your paging is unchanged. Nothing here can suppress a page.';
 }
 
-/* ---------- calibration glosses (generated from the actual bins, never canned) ---------- */
-export function binForConf(bins, conf) {
-  return bins.find(b => conf >= b.predicted_lo && conf < b.predicted_hi) || bins[bins.length - 1];
-}
-export function gloss80(bins) {
-  const b = binForConf(bins, 0.85);
-  if (!b || b.n < 30) return 'Too few cases near 0.80–0.90 to say anything honest.';
-  const lo = Math.round(b.ci95_lo * 100), hi = Math.round(b.ci95_hi * 100);
-  return `When Sentinel says 80% confident, the outcome matched about ${lo}–${hi}% of the time.`;
-}
-export function overconfidentBins(bins, tol = 0.05) {
-  return bins.filter(b => ((b.predicted_lo + b.predicted_hi) / 2) - b.observed_rate > tol && b.n >= 30);
-}
-export function calVerdict({ team, ece, bins }) {
-  const bad = overconfidentBins(bins);
-  const ok = ece < 0.05;
-  const s = bad.length === 1 ? 'bin is' : 'bins are';
-  return ok
-    ? `Calibration is healthy for team=${team} (ECE ${ece.toFixed(3)} < 0.05 gate). ${bad.length} ${s} overconfident — see the diagram.`
-    : `Calibration is DEGRADED for team=${team} (ECE ${ece.toFixed(3)} ≥ 0.05 gate). ${bad.length} ${s} overconfident — do not trust suppressions until this clears.`;
-}
-
-/* ---------- confidence-bar statistics (design system §3.5) ---------- */
-export function quartilesFromBins(bins) {
-  /* bins: [{predicted_lo, predicted_hi, n}] — the team's confidence values, labeled eval set */
-  const total = bins.reduce((a, b) => a + b.n, 0);
-  if (!total) return { q1: 0.25, q2: 0.5, q3: 0.75, n: 0 };
-  const at = (p) => {
-    const target = total * p;
-    let acc = 0;
-    for (const b of bins) {
-      acc += b.n;
-      if (acc >= target) return (b.predicted_lo + b.predicted_hi) / 2;
-    }
-    return 0.95;
-  };
-  return { q1: at(0.25), q2: at(0.5), q3: at(0.75), n: total };
-}
+/* (calibration glosses and confidence-bar bin statistics deleted 2026-10-07 —
+ * see the ordinality note above: binForConf, gloss80, overconfidentBins,
+ * calVerdict, quartilesFromBins) */
 
 /* ---------- counterfactual receipt (narrative §4).
  * Derived arithmetically from the decision's stored confidence and the team's
@@ -194,7 +160,7 @@ export function receiptLine(decision, thresholds) {
   const floor = thresholds.suppress_conf_min;
   const p1 = decision.prob_map?.severity?.probs?.p1_critical ?? null;
   const margin = conf - floor;
-  const p1txt = p1 == null ? '' : ` · P(p1)=${p1.toFixed(4)}`;
+  const p1txt = p1 == null ? '' : ` · p1=${p1.toFixed(4)} (ordinal severity score, never a probability)`;
   return `stands down · ${margin >= 0 ? '+' : ''}${margin.toFixed(2)} over the suppress floor ${floor.toFixed(2)}${p1txt} — would page below ${floor.toFixed(2)}`;
 }
 
