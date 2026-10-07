@@ -5,6 +5,20 @@ Scope: `platform/ui-v2/index.html`, `deploy/gh-pages/build-v2.py`, `platform/ser
 NOT in scope: kill wiring into the receiver path (P0-1, engine lane), Ops Health drawer emptiness (P1-11),
 load-test charts, /preview-v2/ removal. No merge to main.
 
+## Rebase onto bf0508f (2026-10-07, parent order)
+main moved to bf0508f (lane/fix-deployed-kill merged): honest no-op-lever marking on the
+kill button + killed fabricated toasts, PROD_MODE-gated. Rebased locally (no force-push).
+Layering, per the parent's order — W3's X-D copy rewrite sits ON TOP of the honest marking:
+- ProductionAdapter engageKill/disengageKill: kept the deployed-kill chief's honest echo
+  ("flag only, nothing halted") — supersedes W3's earlier "Backend confirmed: kill=engaged".
+- renderHeader: PROD_MODE keeps the DISABLED button + honest copy; sim branch carries the
+  fail-closed rewrite ("Paging halted"/"Paging live").
+- renderDegraded: PROD_MODE keeps "Kill flag engaged (this instance)… nothing was halted";
+  sim branch carries "paging halted, nothing goes out".
+- renderSafety: PROD_MODE keeps the "NO-OP LEVER (this tier)" srow (disabled button,
+  per-instance visibility); sim srow carries the fail-closed contract.
+- prodSyncStore: kept both — instanceId/scope (theirs) + key_configured judge wiring (W3).
+
 ## Decisions
 
 **D1. Kill semantics: fail-closed (owner ruling carried out, not re-litigated).**
