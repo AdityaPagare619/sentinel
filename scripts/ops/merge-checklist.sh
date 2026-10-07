@@ -19,10 +19,11 @@
 # Writes a MERGE-RECORD block to stdout — paste it into the PR body.
 # Enforcement mechanism: docs/planning/production/PROMOTION-GATES.md.
 #
-# TEAM 6 CONTRACT: if scripts/ops/team6-gate.sh exists and is executable,
-# it is invoked as the test-automation gate (their internals, our
-# invocation). Absent → FAIL. Interface agreed in PROMOTION-GATES.md;
-# countersign pending with TEAM 6 / the wave coordinator.
+# RFC §3/§4 CONTRACT (quality-gate-interface.md, countersigned): the checklist
+# invokes gates ONLY by the exact paths in the §3 table, and does not
+# re-implement gate logic. (The earlier team6-gate.sh contract referenced a
+# file that was never created; per the countersign it is replaced here by
+# the §3 path contract.) Absent or renamed gate → FAIL.
 
 set -euo pipefail
 
@@ -115,18 +116,26 @@ print('import smoke OK')
 fi
 if [ "$EP_OK" = "1" ]; then pass "entrypoint-import (compile + WSGI import smoke)"; else fail "entrypoint-import"; fi
 
-# --- 4. TEAM 6 test-automation gate (contract, not duplication) -----------------
-TEAM6="./scripts/ops/team6-gate.sh"
-if [ -x "$TEAM6" ]; then
-  echo "── stage: team6-gate ──"
-  if "$TEAM6" "$COMMIT_SHA" >"/tmp/team6-gate.log" 2>&1; then
-    pass "team6-gate GREEN"
-  else
-    fail "team6-gate RED (log: /tmp/team6-gate.log)"
-  fi
-else
-  fail "team6-gate.sh not present/executable — TEAM 6 gate has no implementation; coordinate before merging"
-fi
+# --- 4. RFC §3 gate-path contract (no drift) -----------------------------------
+# Every gate in the §3 table must exist at its exact path AND be invoked by
+# pre-pr-gate.sh (stage 2). A gate that moved without a checklist-visible
+# rename fails here instead of silently dropping out of the suite.
+echo "── stage: gate-path contract (RFC §3) ──"
+GATE_PATHS="scripts/ops/secrets-grep.sh scripts/ops/gate-entrypoints.sh tests/test_banner_contract.py tests/test_gate.py scripts/ops/receiver-smoke.sh scripts/ops/flagctl.py tests/test_kill_topology.py"
+GP_OK=1
+for gp in $GATE_PATHS; do
+  if [ -f "$gp" ]; then :; else echo "  missing gate path: $gp"; GP_OK=0; fi
+done
+# pre-pr-gate.sh must reference each invokable gate path (discover covers
+# the unittest modules; the script names the rest literally).
+for ref in "scripts/ops/secrets-grep.sh" "scripts/ops/gate-entrypoints.sh" "unittest discover tests" "tests.test_gate" "scripts/ops/receiver-smoke.sh" "flagctl.py"; do
+  if grep -qF "$ref" ./scripts/ops/pre-pr-gate.sh; then :; else echo "  pre-pr-gate.sh does not invoke: $ref"; GP_OK=0; fi
+done
+# The two structural/pin test modules must be discoverable by unittest.
+for mod in tests.test_banner_contract tests.test_kill_topology; do
+  if python3 -c "import importlib.util,sys; sys.path.insert(0,'tests'); sys.path.insert(0,'.'); import $mod" 2>/dev/null; then :; else echo "  not importable: $mod"; GP_OK=0; fi
+done
+if [ "$GP_OK" = "1" ]; then pass "gate-path contract: all §3 gates present and invoked"; else fail "gate-path contract drift (see above)"; fi
 
 # --- 5. secrets re-sweep on the diff (fast, targeted) --------------------------
 if git diff --name-only "$COMMIT_SHA^" "$COMMIT_SHA" 2>/dev/null | grep -q .; then
@@ -181,7 +190,7 @@ MERGE-RECORD (paste into the PR body)
   subject: $(git log -1 --format=%s "$COMMIT_SHA")
   pre-pr-gate: GREEN (no --fast)
   entrypoint-import: GREEN
-  team6-gate: $([ -x "$TEAM6" ] && echo GREEN || echo MISSING)
+  gate-path-contract: GREEN (all RFC §3 gates present and invoked)
   secrets-grep: GREEN
   human checklist: CONFIRMED by merger ($(whoami), $(date -u +%Y-%m-%dT%H:%M:%SZ))
   prohibitions: respected (preview-v2 kept, no prod flip, no deployed-tier
