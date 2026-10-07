@@ -24,21 +24,24 @@ import sys
 from .keystore import (
     OPERATOR_TOKEN_NAME,
     RotatingKeyStore,
+    default_state_dir,
     ensure_operator_token,
     operator_token_store,
 )
 
 ENV_TOKEN_FILE = "SENTINEL_OPERATOR_TOKEN_FILE"
 ENV_TOKEN_VALUE = "SENTINEL_OPERATOR_TOKEN"
-ENV_STATE_DIR = "SENTINEL_STATE_DIR"
+# NOTE: the state-dir env name lives in keystore.ENV_STATE_DIR; the default
+# dir itself is keystore.default_state_dir() (outside the repo tree).
 
 _TOKEN_BYTES = 32  # -> 43-char token_urlsafe string
 
 
 def _default_path() -> str:
-    return os.path.join(
-        os.environ.get(ENV_STATE_DIR, "./sentinel-state"),
-        "operator_token.json")
+    # State lives OUTSIDE the repo tree (default_state_dir); this file is
+    # a local boot artifact, never the production token (see
+    # docs/planning/security/STATE_AND_OPERATOR_TOKEN.md).
+    return os.path.join(default_state_dir(), "operator_token.json")
 
 
 class OperatorTokenStore:
@@ -102,10 +105,19 @@ class OperatorTokenStore:
 
     @property
     def _tokens(self) -> dict:
-        """White-box shim (tests): the current {primary, secondary} pair."""
+        """White-box shim (tests): the current {primary, secondary} pair.
+
+        Raises TypeError for file-backed hash-at-rest records — the
+        plaintext is unrecoverable by design; use first_boot_token (the
+        mint-time handle) or verify() instead.
+        """
         if self._ks is not None:
             rec = self._ks._get_record(OPERATOR_TOKEN_NAME)
             if rec:
+                if rec.get("hashed"):
+                    raise TypeError(
+                        "operator token is hashed at rest (verify-only) — "
+                        "plaintext not recoverable; use verify()")
                 return {"primary": rec["primary"],
                         "secondary": rec["secondary"]}
             return {"primary": None, "secondary": None}

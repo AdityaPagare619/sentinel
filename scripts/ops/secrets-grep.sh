@@ -28,8 +28,11 @@ PATTERNS=(
 )
 
 # Paths never scanned (vendored, git internals, caches, local state,
-# and this script itself — its patterns are meta, not secrets).
+# generated bundle/data outputs (copies of scanned sources — scanning them
+# double-reports), and this script itself — its patterns are meta, not
+# secrets).
 PRUNE=( .git __pycache__ .pytest_cache__ node_modules '*.db' '*.db-wal' '*.db-shm'
+        deploy/dist deploy/dist-prod deploy/dist-data
         scripts/ops/secrets-grep.sh )
 
 find_args=()
@@ -63,6 +66,24 @@ ALLOWLIST=(
   'src/sentinel/receiver.py:self\.pipeline\.config\.webhook_secret'
   # test fixture, named as such
   'tests/test_receiver.py:s3cret-long-enough-for-tests'
+  # vault-reference NAME (a name, never a value) — same convention as the
+  # three entries above; used by the D13 cutover drill
+  'ops/drills/d13_cutover_drill.py:secret:pd/control_routing_key'
+  # surrogate placeholder documented as never-sent (see the class
+  # docstring directly above this line) — not a credential
+  'research/jev-behavior/bin/ab_run.py:surrogate-never-sent'
+  # named test fixture for the env-fallback webhook path, provably fake
+  'tests/test_keystore.py:env-fallback-secret-0'
+  # literal redaction placeholders in tests, not credentials
+  # test_auth.py:273 passes the test's OWN provisioned fixture
+  # (SENTINEL_OPERATOR_TOKEN="env-provisioned-token-1", set at line 261) —
+  # the 200-assertion only passes because it matches that fixture.
+  'platform/server/tests/test_auth.py:auth_header="Bearer env-provisioned-token-1"'
+  # test_ac5_p0_rewalk.py:121 is inside test_5b_bogus_bearer_401
+  # ("Forged / malformed Authorization headers all 401") — a fixed
+  # UUID-shaped forged token in the `bogus` list; the 401 assertion proves
+  # it is not a live credential.
+  'tests/validation/test_ac5_p0_rewalk.py:"Bearer [0-9a-fA-F]{8}-'
 )
 
 if [ -s "$TMP" ]; then
@@ -70,7 +91,7 @@ if [ -s "$TMP" ]; then
     skip=0
     rel="${line#./}"  # normalize: allowlist entries use bare repo-relative paths
     for rule in "${ALLOWLIST[@]}"; do
-      file="${rule%%:*}"; rx="${rule#*:}"
+      file="${rule%%:*}"; rx="${rule#"$file:"}"
       if [[ "$rel" == "$file:"* ]] && [[ "$rel" =~ $rx ]]; then skip=1; break; fi
     done
     if [ "$skip" -eq 0 ]; then

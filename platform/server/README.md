@@ -27,7 +27,7 @@ shadows stdlib `platform`. `_pkg.py` loads the package under the alias
 |---|---|---|
 | `--port` | 8080 | Own port. **The paging receiver already owns 8080 on the demo box** — run the platform on another port (18082 used in testing). |
 | `--db` / `SENTINEL_DB` | `./sentinel.db` | Engine SQLite file. Opened `mode=ro` + `query_only=ON`, fresh connection per query. |
-| `--state-dir` / `SENTINEL_STATE_DIR` | `./sentinel-state` | Dataset cache + default context-file location. |
+| `--state-dir` / `SENTINEL_STATE_DIR` | `~/.sentinel/state` (outside the repo tree; was `./sentinel-state` pre-2026-10-07) | Dataset cache + default context-file location. |
 | `--ui` | `platform/ui` | Static UI dir served at `/` (Prism's files — we serve, they own). Missing dir → `/` 404s as JSON. `Cache-Control: no-store`. |
 | `--data-source` | `shadow` | Envelope label for river/explorer/analytics. Calibration/simulate always report `synthetic` (labels are synthetic by construction, labeled loudly). |
 | `--labels-version` | `labels-v3` | The operator's assertion of which label set seeded the `outcomes` table (see §labels). |

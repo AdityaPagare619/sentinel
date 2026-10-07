@@ -241,8 +241,11 @@ class AuthCase(unittest.TestCase):
             data = json.load(fh)
         rec = data["records"]["operator_bearer"]
         self.assertEqual(rec["generation"], 1)
-        self.assertIn("primary", rec)
-        self.assertIn("secondary", rec)
+        # hashed at rest (verify-only): digest keys, never the token
+        self.assertIn("primary_sha256", rec)
+        self.assertIn("secondary_sha256", rec)
+        self.assertNotIn("primary", rec)
+        self.assertNotIn(self.token, json.dumps(data))
         # secondary empty -> no second credential accepted
         self.assertFalse(self.store.verify("anything-else"))
         # operator presents primary -> accepted

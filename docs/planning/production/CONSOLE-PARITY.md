@@ -56,6 +56,15 @@ export — never as a subtle theme tweak.
    2026-10-07: preview-v2 = B). When the flip is ordered, remove it in
    one commit with a gh-pages rebuild.
 
+   **SUSPENDED 2026-10-07** (fix lane `lane/fix-p2-hygiene`, brutal-audit
+   follow-up, audit §5 item 22): `/preview-v2/` STAYS LIVE until Petu's
+   explicit flip order. The shift-removal rule above is suspended, not
+   deleted — the fork risk it names is real, but removal is now a named,
+   ordered action (Petu's call), not an automatic side effect of the
+   shift. **Do NOT remove `/preview-v2/` in any lane without that order.**
+   When the flip order arrives, remove it in the same change that flips
+   production live, and delete this suspension note.
+
 ## Deployment mapping
 
 - `/` → production build (production adapter, prod banner, zero fixtures)

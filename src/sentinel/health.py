@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 from .config import count_restarts_10m
 from .correlator import Correlator, fingerprint_of
+from .keystore import default_state_dir
 from .models import Alert
 from .state import build_state
 
@@ -80,9 +81,7 @@ class HealthMonitor:
                  forward_error_window_s: float = FORWARD_ERROR_WINDOW_S,
                  forward_error_trip: int = FORWARD_ERROR_TRIP):
         self._pipeline = pipeline
-        self._state_dir = (state_dir
-                           or os.environ.get("SENTINEL_STATE_DIR")
-                           or "./sentinel-state")
+        self._state_dir = (state_dir or default_state_dir())
         self._clock = clock
         if selftest_interval_s is None:
             try:
