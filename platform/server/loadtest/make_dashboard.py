@@ -22,18 +22,47 @@ def pct(vals, q):
     return s[min(int(q * len(s)), len(s) - 1)]
 
 
-def svg_bars(values, labels, width=520, height=140, unit=""):
+def svg_bars(values, labels, width=520, height=140, unit="", max_bars=120):
+    """Bar chart with a structural dead-chart guard.
+
+    Root-cause fix (audit UI C11/P1-4; W9 flag): the old code rendered
+    ``width=bw-4`` with ``bw=width/n``, which goes negative for n>130 —
+    the 360/1440-chunk tiers painted ~1,800 zero/negative-width rects, i.e.
+    invisible charts. Two guards now:
+      1. values are bucketed (mean) to at most max_bars, so every bar
+         keeps a visible width no matter how many chunks a tier has;
+      2. the rendered width is clamped to a positive floor — a re-run can
+         never resurrect negative-width rects.
+    """
     if not values:
         return ""
+    values = list(values)
+    labels = list(labels)
+    n = len(values)
+    if n > max_bars:
+        # Exact divmod distribution: nb non-empty buckets covering all n.
+        nb = max_bars
+        base, extra = divmod(n, nb)
+        bvals, blabs = [], []
+        i = 0
+        for b in range(nb):
+            j = i + base + (1 if b < extra else 0)
+            chunk = values[i:j]
+            bvals.append(sum(chunk) / len(chunk))
+            blabs.append(f"{labels[i]}..{labels[j - 1]}"
+                         if j - 1 > i else str(labels[i]))
+            i = j
+        values, labels = bvals, blabs
     mx = max(values) or 1.0
     bw = width / len(values)
+    w = max(bw - 4, 1.0)  # guard: never zero/negative, whatever n is
     rects = []
     for i, (v, lab) in enumerate(zip(values, labels)):
         h = (v / mx) * (height - 24)
         x = i * bw + 2
         y = height - 14 - h
         rects.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw-4:.1f}" '
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
             f'height="{h:.1f}" fill="#2f6fed" opacity="0.85">'
             f'<title>{html.escape(str(lab))}: {v}{unit}</title></rect>')
     return (f'<svg width="{width}" height="{height}" role="img">'
