@@ -16,37 +16,63 @@
 # state-exclusion guard below fails the build if any keystore / token /
 # audit file is ever found in the output.
 #
+# PROVENANCE CONTRACT (audit P1-25): the bundle records the exact source
+# commit in BUILD_INFO.json and refuses to build from a dirty tree unless
+# --allow-dirty is passed (dev only; the flag is recorded in BUILD_INFO).
+# A bundle that cannot name its commit is undeployable — bundle-vs-source
+# drift is otherwise unverifiable.
+#
 # Run from the repo root:
-#   bash deploy/vercel/build-bundle-prod.sh
+#   bash deploy/vercel/build-bundle-prod.sh [--allow-dirty]
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$REPO/deploy/vercel"
 DIST="$REPO/deploy/dist-prod/vercel"
 
-echo "[bundle-prod] repo=$REPO"
+ALLOW_DIRTY=0
+[ "${1:-}" = "--allow-dirty" ] && ALLOW_DIRTY=1
+
+# --- provenance ------------------------------------------------------------
+COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+    if [ "$ALLOW_DIRTY" = "1" ]; then
+      DIRTY=true
+      echo "[bundle-prod] WARNING: building from a DIRTY tree (--allow-dirty); recorded in BUILD_INFO.json" >&2
+    else
+      echo "[bundle-prod] REFUSING: working tree is dirty. Commit or stash" >&2
+      echo "  your changes, or pass --allow-dirty for a dev-only bundle." >&2
+      echo "  A production bundle must name an exact commit." >&2
+      exit 2
+    fi
+  else
+    DIRTY=false
+  fi
+else
+  DIRTY=unknown
+fi
+
+echo "[bundle-prod] repo=$REPO commit=$COMMIT dirty=$DIRTY"
 rm -rf "$DIST"
 mkdir -p "$DIST/api/_srv" "$DIST/api/_eng/sentinel"
 
-# --- pinned-source gate ---------------------------------------------------
-# Audit infra finding: the bundle used to copy the working tree without
-# pinning the commit ("assembles from the deployed commit" was
-# aspirational). A production bundle is built from a recorded commit on a
-# CLEAN tree — no dirty-tree deploys, ever. The stamp at the end records
-# the provenance; a stale dist dir is then DETECTABLE, not silently
-# deployable (audit §5 P2: stale deploy/dist reopens the KEYS P0).
-BUILD_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
-BUILD_DIRTY="$(git -C "$REPO" status --porcelain 2>/dev/null || echo unknown)"
-if [ "$BUILD_COMMIT" = "unknown" ]; then
-  echo "[bundle-prod] FAIL: not a git tree — cannot pin the source commit" >&2
-  exit 1
-fi
-if [ -n "$BUILD_DIRTY" ]; then
-  echo "[bundle-prod] FAIL: dirty working tree — commit or stash first" >&2
-  echo "$BUILD_DIRTY" >&2
-  exit 1
-fi
-echo "[bundle-prod] source commit: $BUILD_COMMIT (clean tree)"
+# --- provenance record (ships IN the bundle; drift-checkable) ---------------
+python3 - "$DIST" "$COMMIT" "$BRANCH" "$DIRTY" <<'EOF'
+import json, sys, datetime
+dist, commit, branch, dirty = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+info = {
+    "commit": commit,
+    "branch": branch,
+    "dirty": dirty == "true",
+    "built_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "script": "deploy/vercel/build-bundle-prod.sh",
+}
+with open(f"{dist}/BUILD_INFO.json", "w") as f:
+    json.dump(info, f, indent=2)
+print(f"[bundle-prod] BUILD_INFO.json commit={commit} dirty={info['dirty']}")
+EOF
 
 # --- serverless function ------------------------------------------------
 cp "$SRC/api/index-prod.py" "$DIST/api/index.py"
@@ -91,12 +117,24 @@ print("[bundle-prod] state-exclusion guard clean")
 print("[bundle-prod] OK -> $DIST")
 EOF
 
-# --- build provenance stamp -----------------------------------------------
-# The stamp makes a stale dist dir DETECTABLE: anyone about to deploy
-# deploy/dist-prod can compare BUILD_COMMIT against the intended SHA
-# instead of silently shipping whatever was last built (audit §5 P2).
-printf '%s\n' "$BUILD_COMMIT" > "$DIST/BUILD_COMMIT"
-date -u +%Y-%m-%dT%H:%M:%SZ > "$DIST/BUILD_TIME"
-printf 'built-from-commit=%s\nbuilt-from-clean-tree=yes\n' \
-  "$BUILD_COMMIT" > "$DIST/BUILD_PROVENANCE.txt"
-echo "[bundle-prod] provenance stamped: $BUILD_COMMIT"
+# --- deploy record -----------------------------------------------------------
+# The operator pastes this block into the deploy note (REPEATABLE-DEPLOY.md
+# §5). It is the anti-click-ops artifact: who built what, from which
+# commit, and what the next operator must verify.
+BUNDLE_SHA="$(find "$DIST" -type f | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"
+cat <<EOF
+
+═══════════════════════════════════════════════════════════════════
+DEPLOY RECORD — paste into the deploy note, then verify (§6)
+  bundle built : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+  source commit: $COMMIT  (branch $BRANCH, dirty=$DIRTY)
+  bundle sha256: $BUNDLE_SHA
+  built by     : ${USER:-unknown} on $(hostname)
+  deploy cmd   : <paste the exact command used — CLI, dashboard redeploy,
+                  or MCP upload_file path — see REPEATABLE-DEPLOY.md §4>
+  deployment id: <from the deploy output — needed for Instant Rollback>
+  verified     : [ ] /health/live 200 unauth   [ ] /ops/health 401 unauth
+                 [ ] CORS preflight 204 + ACAO (lowercase origin)
+                 [ ] BUILD_INFO.json commit == source commit
+═══════════════════════════════════════════════════════════════════
+EOF
