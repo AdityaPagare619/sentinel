@@ -1028,12 +1028,13 @@ class ForwardResult:
     action: str               # the disposition action this forward served
     dedup_key: str | None = None
     simulated: bool = False    # True when simulated paging absorbed the send
+    killed: bool = False       # True when the kill switch absorbed the send (C3)
 
 
 class Forwarder:
     def __init__(self, pd_events_url: str = "https://events.pagerduty.com/v2/enqueue",
                  timeout_s: float = 5.0, default_routing_key: str | None = None,
-                 key_resolver=None):
+                 key_resolver=None, kill_switch=None):
         # Structural sim safety (audit P0, ruling X-B): under SENTINEL_SIM=1
         # a non-loopback endpoint cannot be held by any Forwarder instance.
         assert_sim_pd_safe(pd_events_url, where="Forwarder.__init__")
@@ -1044,6 +1045,12 @@ class Forwarder:
         # user store → ctor default → env → unconfigured. The source is safe
         # to log; the key is NEVER logged (see integrations.sanitize_error).
         self._key_resolver = key_resolver
+        # Contract C3 (kill = HALT all paging, fail-closed): when set, an
+        # engaged switch absorbs every send attempt at _post — the single
+        # funnel both forward() and forward_raw() go through — and re-arm
+        # resumes. The check is a thread-safe flag read: never Jev, never
+        # the race, and forward() never raises on kill (it absorbs).
+        self._kill_switch = kill_switch
         self.metrics: dict = {
             "forwarded": 0,   # POSTs accepted (2xx)
             "suppressed": 0,  # suppress dispositions: intentionally not forwarded
@@ -1055,6 +1062,7 @@ class Forwarder:
             "folded": 0,
             "errors": 0,      # forward attempts that failed
             "simulated": 0,   # pages absorbed by simulated mode (never sent)
+            "killed": 0,      # pages absorbed by an engaged kill switch (C3)
         }
 
     # ------------------------------------------------------- key resolution
@@ -1090,6 +1098,14 @@ class Forwarder:
                 return ForwardResult(forwarded=False, status_code=None,
                                      error=None, action=action,
                                      dedup_key=_dedup_key_of(alert))
+            # Contract C3 (kill = HALT all paging, fail-closed): absorb
+            # before key resolution / body building — a killed page needs
+            # no routing key and must never reach the wire. _post carries
+            # the same check as the final send-boundary backstop.
+            killed = self._kill_absorb(action, _dedup_key_of(alert),
+                                       alert.alert_id)
+            if killed is not None:
+                return killed
             # BYOK simulated mode: absorb BEFORE key resolution — a simulated
             # page needs no key (that's the point of the showcase), and it is
             # always labeled, never silent.
@@ -1122,11 +1138,34 @@ class Forwarder:
                     dedup_key: str | None = None) -> ForwardResult:
         """Best-effort relay of unparseable bytes (receiver fail-open path)."""
         try:
+            # C3: the fail-open path halts on kill too — see forward().
+            killed = self._kill_absorb("passthrough", dedup_key, alert_id)
+            if killed is not None:
+                return killed
             return self._post(raw_bytes, "passthrough", dedup_key, alert_id=alert_id)
         except Exception as exc:
             return self._fail("passthrough", dedup_key, alert_id, exc)
 
     # -------------------------------------------------------------- internals
+
+    def _kill_absorb(self, action: str, dedup_key: str | None,
+                     alert_id: str) -> ForwardResult | None:
+        """Contract C3: when the kill switch is engaged, absorb the send.
+
+        Returns a killed ForwardResult (forwarded=False, killed=True) or
+        None when the switch is absent/disengaged. Never raises. Loud on
+        stderr so a 3 AM operator sees WHY the page didn't go out.
+        """
+        kill = self._kill_switch
+        if kill is None or not kill.engaged:
+            return None
+        self.metrics["killed"] += 1
+        print(f"[sentinel] KILL ENGAGED — page ABSORBED action={action} "
+              f"alert={alert_id} dedup={dedup_key} (kill switch halted "
+              f"paging; nothing was sent)", file=sys.stderr)
+        return ForwardResult(forwarded=False, status_code=None,
+                             error="kill_switch_engaged", action=action,
+                             dedup_key=dedup_key, killed=True)
 
     def _business_hours_body(self, alert: Alert) -> bytes:
         key, _source = self._resolve_key()
@@ -1142,6 +1181,14 @@ class Forwarder:
 
     def _post(self, body: bytes, action: str, dedup_key: str | None,
               alert_id: str) -> ForwardResult:
+        # Contract C3 (kill = HALT all paging, fail-closed): the FINAL
+        # send boundary. forward()/forward_raw() check first via
+        # _kill_absorb, but _post is the last line of defense for any
+        # future caller — nothing below this point may send while the
+        # switch is engaged. Absorbed, never sent; re-arm resumes.
+        absorbed = self._kill_absorb(action, dedup_key, alert_id)
+        if absorbed is not None:
+            return absorbed
         # BYOK simulated mode: absorb the send — LOUDLY labeled, never
         # silent. The honesty law (P3): a simulated page must be visually
         # distinct from a real one everywhere it renders.

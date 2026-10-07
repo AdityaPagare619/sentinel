@@ -1,0 +1,32 @@
+{
+  "artifact": "kill-drill-receiver-topology",
+  "contract": "C3",
+  "topology": "receiver-legacy-forwarder: ThreadingHTTPServer + Pipeline (correlator -> gate -> legacy sync Forwarder) + loopback stub PD",
+  "started_at": "2026-10-07T07:43:25.000Z",
+  "environment": {
+    "host": "htch-runtime",
+    "python": "3.12.3",
+    "sentinel_rev": "lane/fix-kill-topology"
+  },
+  "flip_at": "2026-10-07T07:43:25.453Z",
+  "flip_seq": 2,
+  "checks": {
+    "baseline_send_ok": true,
+    "kill_engaged": true,
+    "receiver_answers_200_while_killed": true,
+    "no_sends_after_halt": true,
+    "killed_metric_eq_5": true,
+    "engage_latency_ms": 9.749560000045676,
+    "rearm_ok": true,
+    "recovered_after_rearm": true,
+    "kill_check_is_flag_read_only": true
+  },
+  "informational": {
+    "gate_jev_calls_during_kill_window": 0,
+    "note": "the gate still triages while killed (the 5 drill events are correlator-duplicates of the baseline, inheriting page_now without a Jev call \u2014 the deterministic duplicate path); the kill CHECK itself is a thread-safe flag read in the forwarder's _post \u2014 no Jev call, no race wait."
+  },
+  "measured_ms": 9.75,
+  "threshold_ms": 5000.0,
+  "notes": "Kill re-drilled on the TRUE receiver topology (ThreadingHTTPServer -> Pipeline -> legacy sync Forwarder with C3 kill wiring), replacing the 2026-10-06 DurableForwarder-topology measurement. 5 webhooks while engaged -> 5 absorbed, 0 PD sends; re-arm -> sends resume. No Jev consulted; the kill check is a thread-safe flag read in the forwarder's _post. Loopback stub PD only \u2014 zero real PagerDuty contact.",
+  "passed": true
+}
