@@ -174,7 +174,7 @@ export function drawerHtml(d, { thresholds = null, datasetVersion = '', flips = 
     </div>
   </section>
   <section class="drawer-sec"><h3>Evidence</h3>
-    <p class="drawer-note">Confidence is ordinal — shown as reported, never as a calibrated probability.</p>
+    <p class="drawer-note">Confidence is ordinal — shown as reported. It is not calibrated.</p>
     <div class="ev-triples">${triple(pm.disposition, 'Q3 disposition')}${triple(pm.severity, 'Q1 severity')}${triple(pm.owning_team, 'Q2 owning team')}</div>
     <div class="ev-meta mono">jev ${esc(d.jev_model || 'deterministic path')} · latency ${d.latency_ms != null ? Math.round(d.latency_ms) + 'ms' : '—'}</div>
   </section>
@@ -242,7 +242,7 @@ export const FIVE_STATES = ['loading', 'ready', 'stale_degraded', 'error', 'empt
 export const COMPONENT_STATE_COVERAGE = {
   DecisionRow:       { loading: 'skeletonRows',  ready: 'decisionRow',    stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
   FreshnessBadge:    { loading: 'freshnessBadge', ready: 'freshnessBadge', stale_degraded: 'freshnessBadge', error: 'freshnessBadge', empty: null },
-  ConfidenceMeter:   { loading: 'skeletonRows',  ready: null,           stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' }, /* retired 2026-10-07 (ordinality): confBar presented confidence over probability bins */
+  ConfidenceMeter:   { loading: 'skeletonRows',  ready: null,           stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' }, /* retired 2026-10-07 (ordinality): confBar presented confidence as binned scores */
   DispositionTag:    { loading: 'skeletonRows',  ready: 'dispChip',       stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
   EvidencePanel:     { loading: 'skeletonRows',  ready: 'drawerHtml',     stale_degraded: 'freshnessBadge', error: 'errorBlock', empty: 'emptyBlock' },
   ReconstructionMark:{ loading: null,            ready: 'derivedMark',    stale_degraded: null,              error: null,         empty: null },

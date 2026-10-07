@@ -131,7 +131,7 @@ export function stripRiver({ nPages, nSuppress, windowLabel, newestIso, apiDown,
 /* Ordinality law (AC-8c, RFC aiml-ordinality-sweep): the v1 calibration strip,
  * glosses, and verdict helpers (stripCal, gloss80, calVerdict, overconfidentBins,
  * binForConf, quartilesFromBins) were deleted 2026-10-07. They presented Jev
- * confidence as a calibrated probability (ECE gates, "80% confident" glosses,
+ * confidence as if calibrated (ECE gates, overconfident glosses,
  * reliability bins) — the banned presentation. The backend instrument is now
  * rank fidelity (AUC over p1 ranks); no probability-bin helpers live here. */
 export function stripSim({ pageNow, thin, n }) {
