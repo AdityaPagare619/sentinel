@@ -220,6 +220,92 @@ class TestPreCallGates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Spend-meter reconciliation (RFC aiml-spend-reconciliation)
+# ---------------------------------------------------------------------------
+
+class TestSpendReconciliation(unittest.TestCase):
+    """SpendMeter (advisory estimate envelope) vs JevSpendTracker (C2
+    wire-truth ledger): explicit roles, one-directional divergence bound,
+    fail-closed on disagreement, atomic gate+charge under threads."""
+
+    def test_blocked_tracker_blocks_dispatcher(self):
+        """A blocked wire-truth ledger blocks advisory even when the estimate
+        envelope hasn't latched — fail-closed on disagreement."""
+        from sentinel.sim_judge import JevSpendTracker
+        fake = RecordingDecide(_resp())
+        tracker = JevSpendTracker(budget_usd=0.0)  # blocked from the start
+        self.assertTrue(tracker.blocked)
+        meter = SpendMeter(budget_usd=10.0)  # envelope: plenty of room
+        d = AdvisoryDispatcher(fake, meter, jev_model="jev-mock-0.0.0",
+                               tracker=tracker)
+        env = d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                            lambda r: {"x": 1}, lambda reason: {"fb": reason})
+        self.assertEqual(fake.n_calls, 0)
+        self.assertEqual(env["fallback_reason"], "budget_blocked")
+        d.close()
+
+    def test_unblocked_tracker_does_not_block(self):
+        from sentinel.sim_judge import JevSpendTracker
+        fake = RecordingDecide(_resp())
+        tracker = JevSpendTracker(budget_usd=10.0)
+        d = AdvisoryDispatcher(fake, SpendMeter(budget_usd=10.0),
+                               jev_model="jev-mock-0.0.0", tracker=tracker)
+        env = d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                            lambda r: {"x": 1}, lambda reason: {"fb": reason})
+        self.assertEqual(env["fallback"], "jev")
+        self.assertEqual(fake.n_calls, 1)
+        d.close()
+
+    def test_estimate_envelope_never_understates_ledger(self):
+        """Same call script through both meters: the estimate envelope's
+        session_usd >= the ledger's (estimates are conservative; failed calls
+        cost 0.0 actual). The divergence is bounded and one-directional."""
+        from sentinel.sim_judge import JevSpendTracker
+        tracker = JevSpendTracker(budget_usd=10.0)
+        meter = SpendMeter(budget_usd=10.0)
+        # (estimate_charged, actual_recorded): successes cost <= estimate;
+        # the failed call records 0.0 (no usage data — never invented).
+        script = [(0.00010, 0.00008), (0.00010, 0.00009), (0.00010, 0.0)]
+        for est, actual in script:
+            meter.charge(est)
+            tracker.record_call(actual)
+        self.assertGreaterEqual(meter.session_usd, tracker.session_usd)
+        self.assertAlmostEqual(meter.session_usd, 0.00030, places=9)
+        self.assertAlmostEqual(tracker.session_usd, 0.00017, places=9)
+
+    def test_gate_and_charge_atomic_under_threads(self):
+        """The envelope gate and charge are atomic: with a budget admitting
+        exactly K charges, N racing threads produce exactly K Jev calls —
+        never K+1 from a check-then-act race."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        fake = RecordingDecide(_resp())
+        est = estimate_cost_usd({"a": 1}, d6_questions())
+        k = 3
+        meter = SpendMeter(budget_usd=k * est)
+        d = AdvisoryDispatcher(fake, meter, jev_model="jev-mock-0.0.0")
+        barrier = threading.Barrier(16)
+
+        def worker(_):
+            barrier.wait()  # release all threads at once: maximal contention
+            return d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                                 lambda r: {"x": 1},
+                                 lambda reason: {"fb": reason})
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            envs = list(pool.map(worker, range(16)))
+        jev_wins = [e for e in envs if e["fallback"] == "jev"]
+        blocked = [e for e in envs
+                   if e.get("fallback_reason") == "budget_blocked"]
+        self.assertEqual(len(jev_wins), k,
+                         f"expected exactly {k} admissions, got {len(jev_wins)}")
+        self.assertEqual(len(blocked), 16 - k)
+        self.assertEqual(fake.n_calls, k)
+        self.assertTrue(meter.blocked)
+        d.close()
+
+
+# ---------------------------------------------------------------------------
 # §5 timeout–fallback matrix
 # ---------------------------------------------------------------------------
 

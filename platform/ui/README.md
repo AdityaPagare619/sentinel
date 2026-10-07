@@ -13,7 +13,7 @@ cd platform/ui && python3 -m http.server 8000   # → http://localhost:8000/#/st
 |---|---|
 | `#/start` | Onboarding — beat-0 honesty contract → key → source → storm → why → tune |
 | `#/river` | Decision river — live tape, filters, SSE, gap markers, detail drawer |
-| `#/calibration?team=data` | Calibration — ECE/coverage/flips, reliability diagram, guided read |
+| `#/lab` (simulator · shadow tabs) | Lab — threshold simulator, shadow evaluations (the v1 `#/calibration` route was removed 2026-10-07 per the ordinality law AC-8c; rank fidelity lives at `GET /api/calibration`) |
 | `#/simulator?team=data` | Threshold simulator — 5 ThresholdSet sliders, live repricing, policy-diff export |
 | `#/audit?fpr=…` | Audit explorer — search, flip timelines, noise strip, audit-pack export |
 
@@ -59,19 +59,20 @@ assets/tokens.css     design tokens — §2.2 taxonomy incl. --state-* (B1 healt
 assets/app.css        components + screens
 assets/rebuild.css    prism-rebuild additions: freshness badges, derived marks,
                       virtualized tape, sim treatment, chain, shadow, companions
-assets/lib.js         pure functions (mappings, strip grammar, calibration math,
+assets/lib.js         pure functions (mappings, strip grammar,
                       mock simulate recompute, policy-diff export, startPlan)
+                      (v1 calibration helpers deleted 2026-10-07, AC-8c)
 assets/api.js         data layer: live ↔ mock switch, SSE w/ gap detection,
                       client-derived shadow join (getShadow)
-assets/components.js  atomic components: chips, badges, confidence bar (§3.5),
-                      reliability diagram, river row, drawer, dead states,
+assets/components.js  atomic components: chips, badges,
+                      river row, drawer, dead states,
                       FreshnessBadge, ReconstructionMark, decision glyphs,
                       §4.3 five-state registry
 assets/freshness.js   §4.1 freshness contract: states, per-surface budgets, badge
 assets/shadow.js      S5 metrics: page-precision, suppression-regret, agreement
 assets/chain.js       S4 derived event-log chain: derive + verify (client-side)
-assets/views-*.js     the six screens (river · calibration · simulator ·
-                      audit · shadow · start)
+assets/views-*.js     the screens (river · simulator ·
+                      audit · shadow · start · now · pages · proofs · safety)
 assets/app.js         router + shell wiring
 data/                 contract mocks incl. shadow.json (S5 fixture)
 tests/                conformance.py · antislop.py · *.test.mjs
@@ -80,6 +81,6 @@ tests/                conformance.py · antislop.py · *.test.mjs
 ## Laws honored
 
 L1 provenance on every automated claim · L2 every view labels its data
-source · L3 no accuracy marketing (calibration/coverage/flips only) ·
+source · L3 no accuracy marketing (rank-fidelity/coverage/flips only) ·
 L4 blameless by construction · L5 reads before writes (export = policy diff,
 never a mutation; zero Jev on read paths).

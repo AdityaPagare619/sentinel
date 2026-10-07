@@ -89,9 +89,18 @@ FALLBACK_LABEL: dict[str, str] = {
 class SpendMeter:
     """Track 2's spend surface: {session_usd, budget_usd, calls, blocked}.
 
-    Track 2 owns the real meter; this is the seam the dispatcher charges
-    against. ``charge`` records estimated pre-call cost (conservative:
-    daily caps are enforced on the estimate, never on a post-hoc actual).
+    ROLE CONTRACT (RFC aiml-spend-reconciliation): this is the advisory
+    PRE-AUTHORIZATION ENVELOPE, not the spend ledger. ``charge`` records the
+    estimated pre-call cost (conservative: daily caps are enforced on the
+    estimate, never on a post-hoc actual). The wire-truth ledger is
+    ``sim_judge.JevSpendTracker`` (actual cost from response usage blocks;
+    failed calls cost 0.0). For the same call stream this envelope's
+    session_usd is >= the tracker's (estimates are conservative; failed calls
+    are charged the estimate here but 0.0 there) — the divergence is bounded
+    and one-directional, never an understatement. When a tracker is attached
+    to the dispatcher, its ``blocked`` is consulted too (fail-closed on
+    disagreement); the served spend surface (GET /api/v1/jev/spend) is the
+    tracker only.
     """
     session_usd: float = 0.0
     budget_usd: float = 0.50
@@ -246,16 +255,22 @@ class AdvisoryDispatcher:
     ``decide_fn``: Track 2's Jev call entry — ``(state, questions) ->
     DecisionResponse``. Injected; never the raw key. ``spend_meter``:
     SpendMeter (or the C2 dict shape, auto-wrapped). ``budgets``:
-    per-direction DirectionBudget overrides.
+    per-direction DirectionBudget overrides. ``tracker``: optional
+    ``sim_judge.JevSpendTracker`` (the wire-truth ledger). When attached,
+    the pre-call gates consult it too — a blocked tracker blocks advisory
+    even if the estimate envelope hasn't latched (fail-closed on
+    disagreement; RFC aiml-spend-reconciliation).
     """
 
     def __init__(self, decide_fn, spend_meter=None, budgets=None,
                  jev_model: str | None = None,
-                 pool: AdvisoryPool | None = None) -> None:
+                 pool: AdvisoryPool | None = None,
+                 tracker=None) -> None:
         self._decide_fn = decide_fn
         if isinstance(spend_meter, dict):
             spend_meter = SpendMeter.from_dict(spend_meter)
         self._meter: SpendMeter = spend_meter or SpendMeter()
+        self._tracker = tracker  # JevSpendTracker | None — duck-typed
         merged = {k: DirectionBudget(**vars(v))
                   for k, v in DEFAULT_DIRECTION_BUDGETS.items()}
         for k, v in (budgets or {}).items():
@@ -263,7 +278,9 @@ class AdvisoryDispatcher:
         self._budgets = merged
         self._jev_model = jev_model
         self._pool = pool or AdvisoryPool()
-        self._spend_lock = threading.Lock()
+        self._spend_lock = threading.RLock()  # RLock: the gate+charge
+        # sequence below holds it across _pre_call_gates and _charge
+        # (atomic check-and-charge; RFC aiml-spend-reconciliation §7).
         self._daily: dict[str, tuple[date, float]] = {}  # direction -> (day, usd)
 
     # -- properties (Track 7 test seam) -----------------------------------
@@ -288,6 +305,12 @@ class AdvisoryDispatcher:
         if budget is None or not budget.enabled:
             return False, "disabled", 0.0
         if self._meter.blocked or self._meter.session_usd >= self._meter.budget_usd:
+            return False, "budget_blocked", 0.0
+        if self._tracker is not None and self._tracker.blocked:
+            # Fail-closed on disagreement: the wire-truth ledger says the
+            # budget is spent, even if the estimate envelope hasn't latched.
+            # (RFC aiml-spend-reconciliation.) The property read takes no
+            # dispatcher locks — no lock-ordering risk.
             return False, "budget_blocked", 0.0
         est = estimate_cost_usd(state, questions)
         if est > budget.cost_cap_usd:
@@ -355,12 +378,20 @@ class AdvisoryDispatcher:
         """
         budget = self._budgets.get(direction) or DirectionBudget()
         try:
-            ok, reason, est = self._pre_call_gates(direction, state, questions)
-            if not ok:
-                return [self._fallback_part(d, reason, fb, alert_id,
-                                            fingerprint, episode_id)
-                        for d, _oj, fb in parts]
-            self._charge(direction, est)
+            # Atomic check-and-charge: the envelope gate and the charge hold
+            # the spend lock together, so two racing threads cannot both pass
+            # the gate on the last unblocked dollar (RLock: _charge re-takes).
+            # Atomic check-and-charge: the envelope gate and the charge hold
+            # the spend lock together, so two racing threads cannot both pass
+            # the gate on the last unblocked dollar (RLock: _charge re-takes).
+            with self._spend_lock:
+                ok, reason, est = self._pre_call_gates(direction, state,
+                                                       questions)
+                if not ok:
+                    return [self._fallback_part(d, reason, fb, alert_id,
+                                                fingerprint, episode_id)
+                            for d, _oj, fb in parts]
+                self._charge(direction, est)
             timeout_s = (timeout_ms if timeout_ms is not None
                          else budget.timeout_ms) / 1000.0
             outcome: dict = {}
@@ -422,13 +453,17 @@ class AdvisoryDispatcher:
         enrichment fell back synchronously (shed/gate-failed). Never
         raises."""
         try:
-            ok, reason, est = self._pre_call_gates(direction, state, questions)
-            if not ok:
-                on_done([self._fallback_part(d, reason, fb, alert_id,
-                                            fingerprint, episode_id)
-                         for d, _oj, fb in parts])
-                return False
-            self._charge(direction, est)
+            # Atomic check-and-charge (see call_multi): the envelope gate and
+            # the charge hold the spend lock together.
+            with self._spend_lock:
+                ok, reason, est = self._pre_call_gates(direction, state,
+                                                       questions)
+                if not ok:
+                    on_done([self._fallback_part(d, reason, fb, alert_id,
+                                                fingerprint, episode_id)
+                             for d, _oj, fb in parts])
+                    return False
+                self._charge(direction, est)
 
             def _worker():
                 try:

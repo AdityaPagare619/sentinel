@@ -6,7 +6,7 @@ import unittest
 from sentinel.evalharness import (
     accuracy,
     coverage_at,
-    ece,
+    rank_fidelity,
     false_suppress_rate,
     run_batch,
     run_eval,
@@ -67,19 +67,22 @@ def _hand_fixture():
 
 
 class TestEvalMetrics(unittest.TestCase):
-    def test_ece_hand_computed(self):
-        # Two correct predictions at conf 0.9 (bin 9) and 0.8 (bin 8):
-        # ECE = 0.5*|1-0.9| + 0.5*|1-0.8| = 0.05 + 0.10 = 0.15.
-        err, table = ece([(0.9, True), (0.8, True)])
-        self.assertAlmostEqual(err, 0.15, places=9)
-        bin9 = table[9]
-        self.assertEqual(bin9["n"], 1)
-        self.assertEqual(bin9["acc"], 1.0)
-        self.assertEqual(bin9["mean_conf"], 0.9)
+    def test_rank_fidelity_hand_computed(self):
+        # Correct answers rank above incorrect ones: all 2x2 pairs concordant.
+        auc, n = rank_fidelity([(0.9, True), (0.8, True), (0.3, False), (0.2, False)])
+        self.assertAlmostEqual(auc, 1.0, places=9)
+        self.assertEqual(n, 4)
 
-    def test_ece_perfect_is_zero(self):
-        err, _ = ece([(1.0, True), (1.0, True), (0.0, False)])
-        self.assertAlmostEqual(err, 0.0, places=9)
+    def test_rank_fidelity_chance(self):
+        # Interleaved ranks: 2 of 4 pairs concordant -> 0.5.
+        auc, _ = rank_fidelity([(0.9, True), (0.2, True), (0.8, False), (0.3, False)])
+        self.assertAlmostEqual(auc, 0.5, places=9)
+
+    def test_rank_fidelity_unscorable(self):
+        # No negatives (or no positives) -> None, never a fabricated number.
+        auc, n = rank_fidelity([(0.9, True), (0.8, True)])
+        self.assertIsNone(auc)
+        self.assertEqual(n, 2)
 
     def test_coverage_at(self):
         cov = coverage_at([0.9, 0.8, 0.6], taus=(0.7, 0.8, 0.9))
@@ -124,7 +127,7 @@ class TestEvalBatch(unittest.TestCase):
 class TestEvalReport(unittest.TestCase):
     def test_report_written_with_limitations(self):
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "calibration-report.md")
+            path = os.path.join(d, "judgment-fidelity-report.md")
             m = run_eval(n=60, seed=5, flip_rate=0.0, label_noise=0.0,
                          out_path=path, flip_n=20, flip_repeats=5, shuffle_n=20)
             self.assertTrue(os.path.exists(path))
@@ -133,11 +136,14 @@ class TestEvalReport(unittest.TestCase):
         self.assertIn("HONEST LIMITATIONS", text)
         self.assertIn("proves plumbing, not production accuracy", text)
         self.assertIn("50–300 customer labels", text)
-        self.assertIn("ECE", text)
+        self.assertIn("rank AUC", text)
+        # No ECE-as-honesty presentation: no ECE metric lines, no ECE bins.
+        self.assertNotIn("## Calibration (ECE", text)
+        self.assertNotIn("severity ECE:", text)
         # Metrics dict carries everything the report claims.
         self.assertEqual(m["n"], 60)
         self.assertIn("accuracy", m)
-        self.assertIn("ece_q1", m)
+        self.assertIn("rank_auc_q1", m)
         self.assertIn("coverage_q1", m)
         self.assertIn("false_suppress", m)
         self.assertIn("flip_probe", m)

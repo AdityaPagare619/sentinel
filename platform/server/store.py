@@ -313,6 +313,11 @@ class ReadStore:
             "input_sha256": body.get("input_sha256"),
             "jev_model": jev_model,
             "latency_ms": body.get("latency_ms"),
+            # The race's authoritative verdict (audit P1/C2, RFC
+            # aiml-winner-heuristic): the console derives judge-vs-timer
+            # winner from this, never from jev_model presence (which
+            # mislabels error_passthrough as a judge win).
+            "budget_outcome": body.get("budget_outcome"),
             # C3: shadow is a MODE, never a reason. mode rides top-level in
             # the decision_made body (and as a VIEW column); the
             # reason == "shadow" fallback covers pre-C3 rows only.

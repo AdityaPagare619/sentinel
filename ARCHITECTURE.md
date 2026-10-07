@@ -8,7 +8,7 @@
 
 ## 1. What Sentinel is (one paragraph)
 
-Sentinel is a drop-in pre-page gate that sits in front of the PagerDuty/Opsgenie Events API. Customers point their existing alerting integration at Sentinel instead of PagerDuty directly; every alert is triaged by Jev (TypeSafe's System-One decision model: three parallel typed questions — severity, owning team, disposition — with calibrated probabilities), and per an expected-cost policy the gate either pages now, queues for business hours, suppresses known noise, or passes through to the existing pipeline untouched. **The only autonomous action is paging a human; suppression requires a triple lock; any error fails open to the existing pipeline.** Weeks 1–2 of any deployment run shadow-only (log dispositions, change nothing).
+Sentinel is a drop-in pre-page gate that sits in front of the PagerDuty/Opsgenie Events API. Customers point their existing alerting integration at Sentinel instead of PagerDuty directly; every alert is triaged by Jev (TypeSafe's System-One decision model: three parallel typed questions — severity, owning team, disposition — with ordinal confidence scores that rank decisions, never calibrated probabilities), and per an expected-cost policy the gate either pages now, queues for business hours, suppresses known noise, or passes through to the existing pipeline untouched. **The only autonomous action is paging a human; suppression requires a triple lock; any error fails open to the existing pipeline.** Weeks 1–2 of any deployment run shadow-only (log dispositions, change nothing).
 
 ### Design principles (non-negotiable)
 
@@ -39,7 +39,7 @@ Sentinel is a drop-in pre-page gate that sits in front of the PagerDuty/Opsgenie
                     │                               └───────────┘  │
                     └──────────────────────────────────────────────┘
    Offline (nightly/CLI):  tuner ──▶ thresholds.json
-                           evalharness ──▶ calibration-report.md
+                           evalharness ──▶ judgment-fidelity-report.md
                            synthetic ──▶ labeled alert fixtures
 ```
 
@@ -345,7 +345,7 @@ Let C_FP = $100 (false page: ~45 min sleep + 2–3h debugging at ~$90/hr loaded)
 
 **Shadow mode:** `Gate(shadow=True)` logs the disposition it *would* have taken but always returns `passthrough`. Weeks 1–2 of any deployment. The weekly shadow report ("we would have suppressed X pages, gotten Y wrong") is the sales collateral.
 
-Honesty note (from research): Jev confidence is group-level calibration (routing ECE 0.096 measured — good, not perfect), and Jev is provably non-deterministic (1.3–2.2% flips, no seed). The 0.90 bar is applied *after* per-org calibration fitting; the allowlist exists because raw week-1 probabilities are uncalibrated. Every decision row stores `input_sha256` + `jev_model` so a flip is auditable, never mysterious.
+Honesty note (from research, reframed 2026-10-07 per the ordinality law AC-8c): Jev confidence is ORDINAL — it ranks decisions, it is never a calibrated probability (verbalized LLM confidence is industry-known overconfident; measured ECE up to ~74.8% in a 2025 evaluation). The honest instrument is rank fidelity: do higher confidences rank above correct outcomes (AUC over ranks). Jev is provably non-deterministic (1.3–2.2% flips, no seed). The 0.90 bar is applied *after* per-org rank-fidelity validation; the allowlist exists because raw week-1 scores are unvalidated. Every decision row stores `input_sha256` + `jev_model` so a flip is auditable, never mysterious.
 
 ---
 
@@ -374,13 +374,13 @@ Grid-searches `suppress_conf_min` ∈ {0.80, 0.85, 0.90, 0.95} and reports the t
 ## 6. Eval harness (`evalharness.py` + `synthetic.py`)
 
 ```
-python -m sentinel.evalharness --n 2000 --seed 7 -o calibration-report.md
+python -m sentinel.evalharness --n 2000 --seed 7 -o judgment-fidelity-report.md
 ```
 
 - `synthetic.py` generates N labeled alerts from a seeded mixture: `known_noise` flaps (auto-clear, never SEV), deploy-adjacent spikes, real SEV1/2s (5%), p3/p4 warnings. Labels = outcomes. Deterministic via seed.
 - The harness replays them through `Gate` with `MockSystemOneClient` scripted from the labels (with configurable label noise + flip injection to simulate the 1.3–2.2% non-determinism).
 - Metrics: severity accuracy, team-routing accuracy, disposition accuracy vs outcome labels; **ECE** (10-bin) on Q1/Q3; **coverage@τ** for τ ∈ {0.7, 0.8, 0.9}; **flip rate** (100 repeats on 200-alert sample; bar < 2%); **option-order shuffle** (permute option order on 200 alerts; bar < 3% disposition change); **false-suppress rate on confirmed SEV1s** (the trust metric).
-- Output: `calibration-report.md` with tables + an explicit HONEST LIMITATIONS section (synthetic data proves plumbing, not production accuracy).
+- Output: `judgment-fidelity-report.md` with tables + an explicit HONEST LIMITATIONS section (synthetic data proves plumbing, not production accuracy).
 
 ---
 

@@ -31,7 +31,7 @@ cd ~/workspace/jev-builds/sentinel && export PYTHONPATH=src
 # 1. synthetic storm → tune → evaluate
 python3 -m sentinel.synthetic --n 2000 --seed 7 -o /tmp/labels.jsonl
 python3 -m sentinel.tuner --labels /tmp/labels.jsonl -o /tmp/thresholds.json
-python3 -m sentinel.evalharness --n 2000 --seed 7 -o /tmp/calibration-report.md
+python3 -m sentinel.evalharness --n 2000 --seed 7 -o /tmp/judgment-fidelity-report.md
 # 2. live receiver in mock mode (no key needed)
 SENTINEL_MOCK=1 SENTINEL_DB=/tmp/demo.db python3 -m sentinel.receiver --port 8080 &
 curl -s localhost:8080/v2/enqueue -H 'Content-Type: application/json' -d \

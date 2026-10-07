@@ -47,7 +47,7 @@ threshold theory, per-team re-tuning, drift monitors, go-live bars, the
 
 | Artifact | Path | Cadence |
 |---|---|---|
-| Calibration reports | `eval/calibration-report.md` (per run) | per eval |
+| Calibration reports | `eval/judgment-fidelity-report.md` (per run) | per eval |
 | Tuner math notes | `docs/threshold-math.md` (new) | living |
 | Latency measurement log | `ops/latency-measurements.md` (new) | per campaign |
 | Go-live bars | `ops/go-live-bars.md` (new) | per pilot |
