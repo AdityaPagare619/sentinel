@@ -415,6 +415,11 @@ const S = {
     {src:'email-gateway', state:'no key — blocked', key:'—'},
   ],
   seq: 0,
+  /* production sync state (Track 8): per-endpoint last-good data. Each
+     endpoint settles independently — one endpoint's failure must never
+     blank the operator's inspection surface (the Ops Health drawer). */
+  _ops: null, _opsAt: 0, _decisionsAt: 0, _safetyAt: 0,
+  _syncErrors: {}, _lastSyncAt: 0,
 };
 const R = mulberry32(SEM.seed);   // the single seeded stream: every synthetic number traces here
 
@@ -656,27 +661,42 @@ function prodProblem(d){
         considered: d.jev_model? '' : 'Timer won or deterministic path — no Jev answer exists.' } },
   };
 }
-/* sync backend state into S — the single store the judged UI renders */
-function prodSyncStore(h, decisions, s){
-  S.problems.clear(); S.ledger.length=0;
-  for(const d of decisions){
-    const p=prodProblem(d);
-    S.problems.set(p.id,p);
-    if(p.state==='decided'){
-      S.ledger.push({pid:p.id, at:p.createdAt, disp:p.decision.disp, ruleId:p.decision.ruleId,
-        plain:p.decision.plain, score:p.judge.score, sev:p.sev, owner:p.svc.owner,
-        expiresAt:null, appealed:null, title:p.tpl.title, svc:p.svc.id, live:true});
+/* sync backend state into S — the single store the judged UI renders.
+   Per-endpoint merge: each successfully fetched part updates its own
+   slice of S (with a timestamp); a failed part leaves its last-good
+   slice in place instead of nuking the whole store. errs maps
+   endpoint name -> failure message for visible rendering. */
+function prodSyncStore(h, decisions, s, errs){
+  const now=Date.now();
+  S._syncErrors=errs||{};
+  S._lastSyncAt=now;
+  if(h){
+    S._ops=h; S._opsAt=now;
+    const db=h.engine_db||{};
+    const n=db.decisions_1h||0;
+    S.counts={recv:n, corr:n, race:n, gate:n, fwd:db.pages_1h||0};
+    S.dataAgeSec=db.data_age_s!=null?Math.round(db.data_age_s):null;
+    S.auth=[{state:(h.safety&&h.safety.auth&&h.safety.auth.operator_token==='ok')?'locked':'unknown'}];
+  }
+  if(Array.isArray(decisions)){
+    S._decisionsAt=now;
+    S.problems.clear(); S.ledger.length=0;
+    for(const d of decisions){
+      const p=prodProblem(d);
+      S.problems.set(p.id,p);
+      if(p.state==='decided'){
+        S.ledger.push({pid:p.id, at:p.createdAt, disp:p.decision.disp, ruleId:p.decision.ruleId,
+          plain:p.decision.plain, score:p.judge.score, sev:p.sev, owner:p.svc.owner,
+          expiresAt:null, appealed:null, title:p.tpl.title, svc:p.svc.id, live:true});
+      }
     }
   }
-  const db=(h&&h.engine_db)||{};
-  const n=db.decisions_1h||0;
-  S.counts={recv:n, corr:n, race:n, gate:n, fwd:db.pages_1h||0};
-  S.dataAgeSec=db.data_age_s!=null?Math.round(db.data_age_s):null;
-  S.kill={engaged:!!(s&&s.engaged), armed:false, flips:[],
-    drillMs:(s&&s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null};
+  if(s){
+    S._safetyAt=now;
+    S.kill={engaged:!!s.engaged, armed:false, flips:[],
+      drillMs:(s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null};
+  }
   S.judgeDown=false; S.storm=null;
-  S.auth=[{state:(h&&h.safety&&h.safety.auth&&h.safety.auth.operator_token==='ok')?'locked':'unknown'}];
-  S._ops=h||null;
 }
 const ProductionAdapter = {
   name:'production', version:'1.0',
@@ -687,7 +707,12 @@ const ProductionAdapter = {
   _token(){ try{ return sessionStorage.getItem('sentinel.op.token')||''; }catch(e){ return ''; } },
   async _get(path){
     const r=await fetch(this._base()+path,{headers:{'Authorization':'Bearer '+this._token()}});
-    if(r.status===401){ prodTokenGate(); throw new Error('unauthorized'); }
+    if(r.status===401){
+      /* rejected credential: drop it (session-only hygiene) and re-open
+         the verifying gate — the operator re-authenticates for real. */
+      try{ sessionStorage.removeItem('sentinel.op.token'); }catch(e){}
+      prodTokenGate(); throw new Error('unauthorized');
+    }
     if(!r.ok) throw new Error('api '+r.status+' '+path);
     const j=await r.json(); return j.data!==undefined? j.data : j;
   },
@@ -695,7 +720,7 @@ const ProductionAdapter = {
     const r=await fetch(this._base()+path,{method:'POST',
       headers:{'Authorization':'Bearer '+this._token(),'Content-Type':'application/json'},
       body:JSON.stringify(body||{})});
-    if(r.status===401){ prodTokenGate(); throw new Error('unauthorized'); }
+    if(r.status===401){ try{ sessionStorage.removeItem('sentinel.op.token'); }catch(e){} prodTokenGate(); throw new Error('unauthorized'); }
     if(!r.ok) throw new Error('api '+r.status+' '+path);
     const j=await r.json(); return j.data!==undefined? j.data : j;
   },
@@ -703,12 +728,22 @@ const ProductionAdapter = {
     if(!this._token()){ prodTokenGate(); return; }
     prodApplyChrome();
     const sync=async()=>{
-      try{
-        const h=await this._get('/api/v1/ops/health');
-        const dj=await this._get('/api/decisions?limit=200');
-        const s=await this._get('/api/v1/safety/status');
-        prodSyncStore(h, dj, s);
-      }catch(e){ /* keep last good state; data age shows staleness */ }
+      /* Per-endpoint failure isolation (eternal friction): each endpoint
+         is fetched independently and settles on its own. A 404/500/503
+         on ONE endpoint is recorded in S._syncErrors (rendered visibly
+         in the Ops drawer + state line) and leaves the other endpoints'
+         last-good data in place. The old all-or-nothing try/catch let a
+         single failure silently blank the operator's only inspection
+         surface — that failure mode is deleted here. */
+      const errs={};
+      let h=null, dj=null, s=null;
+      try{ h=await this._get('/api/v1/ops/health'); }
+      catch(e){ errs['ops/health']=e&&e.message||String(e); }
+      try{ dj=await this._get('/api/decisions?limit=200'); }
+      catch(e){ errs['decisions']=e&&e.message||String(e); }
+      try{ s=await this._get('/api/v1/safety/status'); }
+      catch(e){ errs['safety/status']=e&&e.message||String(e); }
+      prodSyncStore(h, dj, s, errs);
       render();
     };
     sync();
@@ -766,11 +801,35 @@ function prodTokenGate(){
     +'<h3 style="margin:0 0 8px">Operator token required</h3>'
     +'<p style="font-size:13px;color:#5c584c">This console talks to the live platform backend. Paste the per-install operator bearer token. It lives in this tab\u2019s memory only.</p>'
     +'<input id="tokin" type="password" placeholder="Bearer token" style="width:100%;padding:10px;margin:8px 0;border:1px solid #d8d5c9;border-radius:6px"/>'
+    +'<p id="tokerr" role="alert" style="font-size:12px;color:#8a1f14;min-height:16px;margin:2px 0 6px"></p>'
     +'<button id="tokgo" style="padding:10px 18px;background:#1C1B17;color:#fff;border:0;border-radius:6px;cursor:pointer">Connect</button></div>';
   document.body.appendChild(ov);
-  const go=()=>{ const v=document.getElementById('tokin').value.trim();
-    if(!v) return; try{ sessionStorage.setItem('sentinel.op.token', v); }catch(e){}
-    ov.remove(); ProductionAdapter.start(); };
+  /* Paste is not auth: the gate verifies the token against the BACKEND
+     (a real authenticated round-trip) before letting the operator in.
+     The old gate accepted any non-empty string client-side, so a wrong
+     token failed silently later and the drawer sat at "No backend data
+     yet" with no explanation. A 401 here names the problem. */
+  const go=async()=>{
+    const v=document.getElementById('tokin').value.trim();
+    if(!v) return;
+    const errEl=document.getElementById('tokerr'), btn=document.getElementById('tokgo');
+    errEl.textContent=''; btn.disabled=true; btn.textContent='Verifying\u2026';
+    try{
+      const r=await fetch(ProductionAdapter._base()+'/api/decisions?limit=1',
+        {headers:{'Authorization':'Bearer '+v}});
+      if(r.status===401){
+        errEl.textContent='Token rejected by the backend (401) — check the value and try again.';
+      }else if(!r.ok){
+        errEl.textContent='Backend error '+r.status+' — the token may be fine; check the backend and retry.';
+      }else{
+        try{ sessionStorage.setItem('sentinel.op.token', v); }catch(e){}
+        ov.remove(); ProductionAdapter.start(); return;
+      }
+    }catch(e){
+      errEl.textContent='Could not reach the backend: '+(e&&e.message||e);
+    }
+    btn.disabled=false; btn.textContent='Connect';
+  };
   document.getElementById('tokgo').onclick=go;
   document.getElementById('tokin').onkeydown=e=>{ if(e.key==='Enter') go(); };
   setTimeout(()=>{const i=document.getElementById('tokin'); if(i) i.focus();},50);
@@ -802,16 +861,29 @@ function opsStateChip(st){
   return '<span class="pillmute">'+esc(String(st))+'</span>';
 }
 function renderOps(){
-  const h=DataAdapter.getOpsHealth && DataAdapter.getOpsHealth();
   const d=document.getElementById('opsDrawer'); if(!d) return;
-  if(!h){ d.innerHTML='<header><div class="tt"><h3>Operations Health</h3><div class="sub">No backend data yet.</div></div><button class="x" onclick="closeDrawers()">Close</button></header>'; return; }
-  const jv=h.jev||{}, fw=h.forwarder||{}, sf=h.safety||{}, db=h.engine_db||{};
-  const stageRows=(h.pipeline||[]).map(p=>
+  const errs=S._syncErrors||{}, errKeys=Object.keys(errs);
+  const h=S._ops||null;
+  /* Nothing ever received and nothing failed: the console just booted. */
+  if(!h&&!errKeys.length){ d.innerHTML='<header><div class="tt"><h3>Operations Health</h3><div class="sub">No backend data yet.</div></div><button class="x" onclick="closeDrawers()">Close</button></header>'; return; }
+  const errHtml=errKeys.length
+    ? '<div class="srow" style="border-left:3px solid #8a1f14"><h5>Endpoint failures</h5>'
+      +'<p style="color:#8a1f14">'+errKeys.map(k=>'<b>'+esc(k)+'</b> — '+esc(String(errs[k]))).join('<br>')+'</p>'
+      +'<p class="dim">Last-good data is shown below where available; failed endpoints retry every 8s.</p></div>'
+    : '';
+  const opsAgeS=h&&S._opsAt?Math.max(0,Math.round(Date.now()/1000-S._opsAt/1000)):null;
+  const ageNote=opsAgeS==null?'':(opsAgeS>30?' <span class="dim">(stale — '+fmtAge(opsAgeS)+' old)</span>':'');
+  const jv=(h&&h.jev)||{}, fw=(h&&h.forwarder)||{}, sf=(h&&h.safety)||{}, db=(h&&h.engine_db)||{};
+  const stageRows=((h&&h.pipeline)||[]).map(p=>
     '<div class="srow"><h5>'+esc(p.stage)+'</h5><p>'+opsStateChip(p.state)+'</p></div>').join('');
+  const dataAge=(db.data_age_s!=null?Math.round(db.data_age_s)+'s':'unknown');
   d.innerHTML=
   '<header><div class="tt"><h3>Operations Health</h3>'
-  +'<div class="sub">Live backend · as of '+esc(h.environment&&h.environment.as_of||'?')+'</div></div>'
+  +'<div class="sub">Live backend · as of '+esc(h&&h.environment&&h.environment.as_of||'?')
+  +' · engine data '+(dataAge==='unknown'?'age unknown':esc(dataAge)+' old')+ageNote+'</div></div>'
   +'<button class="x" onclick="closeDrawers()">Close</button></header><div class="dbody">'
+  +errHtml
+  +(h?'':'<div class="srow"><h5>ops/health</h5><p class="dim">no data received yet — see failures above</p></div>')
   +'<div class="srow"><h5>Jev agent</h5><p>model <b class="num">'+esc(jv.last_judgment_model||'not_instrumented')
   +'</b> · connection '+opsStateChip(jv.connection)+' · circuit '+opsStateChip(jv.circuit)+'</p>'
   +'<p class="dim">last judgment: '+esc(jv.last_judgment_at||'—')+'</p></div>'
@@ -969,10 +1041,16 @@ function renderHeader(){
 }
 function renderStateLine(){
   const d=stateLineData();
+  /* C8: S.dataAgeSec was computed and had zero render sites — a
+     backend-down console froze silently. In production mode the state
+     line now carries the backend data age and any endpoint failures. */
+  const nErr=PROD_MODE?Object.keys(S._syncErrors||{}).length:0;
   $('#stateLine').innerHTML =
     `<strong class="num">${d.unacked} need you</strong><span class="sep">·</span>`+
     `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
     `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems never alerts</span>`+
+    (PROD_MODE&&S.dataAgeSec!=null?`<span class="sep">·</span><span class="dim">backend data ${fmtAge(S.dataAgeSec)} old</span>`:'')+
+    (nErr?`<span class="sep">·</span><strong style="color:var(--amber)">${nErr} endpoint${nErr>1?'s':''} failing</strong>`:'')+
     (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
     (S.judgeDown?`<span class="sep">·</span><strong style="color:var(--amber)">judge down — suppression paused</strong>`:'');
   $('#needCount').textContent = d.open+' open';

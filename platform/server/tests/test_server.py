@@ -476,5 +476,38 @@ class TestStaticUi(AppCase):
         self.assertTrue(r["status"].startswith("404"))
 
 
+class TestUnhandledExceptionDegradation(AppCase):
+    """Catch-all in PlatformApp.__call__: an unhandled handler bug must
+    degrade to a JSON 500 WITH CORS headers — never a bare server 500
+    the console cannot read (which the old shape turned, via the
+    console's silent catch, into a blank Ops Health drawer)."""
+
+    def test_unhandled_handler_bug_is_json_500_with_cors(self):
+        app = self.make_app()
+
+        def boom(environ, start_response, q):
+            raise RuntimeError("simulated handler bug")
+
+        orig = app._decisions
+        app._decisions = boom
+        try:
+            r = self.call(app, "/api/decisions",
+                          headers={"Origin": "https://adityapagare619.github.io"})
+        finally:
+            app._decisions = orig
+        self.assertTrue(r["status"].startswith("500"), r["status"])
+        payload = json.loads(r["body"])
+        self.assertEqual(payload["error"]["code"], "internal")
+        # class named, internals not leaked
+        self.assertIn("RuntimeError", payload["error"]["message"])
+        self.assertNotIn("simulated handler bug", payload["error"]["message"])
+        # CORS headers present: the cross-origin console can READ this 500
+        self.assertEqual(r["headers"].get("Access-Control-Allow-Origin"),
+                         "https://adityapagare619.github.io")
+        # admission slot released: the river stays up after the 500
+        r2 = self.call(app, "/api/v1/health/ready", auth=False)
+        self.assertTrue(r2["status"].startswith("200"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@ Run (from the repo root):
     python3 platform/server/__main__.py [--port 8080] [--db ./sentinel.db]
         [--state-dir ./sentinel-state] [--ui platform/ui]
         [--data-source shadow] [--labels-version labels-v3]
-        [--cors-origins https://AdityaPagare619.github.io]
+        [--cors-origins https://adityapagare619.github.io]
         [--token-file ./sentinel-state/operator_token.json]
 
 (Note: `python -m platform.server` cannot work — the repo's `platform/`
@@ -116,7 +116,7 @@ def main(argv=None) -> None:
     ap.add_argument("--shed-load", type=float, default=DEFAULT_SHED_LOAD)
     ap.add_argument("--cors-origins",
                     default=os.environ.get("SENTINEL_CORS_ORIGINS",
-                                           "https://AdityaPagare619.github.io"),
+                                           "https://adityapagare619.github.io"),
                     help="comma-separated origins allowed to fetch /api/* "
                          "cross-origin. Default: the hosted prod console "
                          "only. \"*\" allows any origin — restrict it in "
@@ -179,7 +179,7 @@ def main(argv=None) -> None:
         print("[platform] WARNING: can make their browser SEND requests to "
               "this API.", flush=True)
         print("[platform] WARNING: Restrict to your console origin, e.g. "
-              "--cors-origins=https://AdityaPagare619.github.io", flush=True)
+              "--cors-origins=https://adityapagare619.github.io", flush=True)
         print("!" * 70, flush=True)
 
     server = make_server(args.host, args.port, app,
