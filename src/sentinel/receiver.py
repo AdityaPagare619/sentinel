@@ -70,6 +70,7 @@ from .health import HealthMonitor
 from .integrations import resolve_jev_key
 from .keystore import WebhookSecretStore
 from .models import Alert, Thresholds
+from .safety import KillSwitch  # C3: the receiver's forwarder halts on kill
 from .policy_lifecycle import PolicyGate
 from .shadow import ShadowPipeline, ShadowStore, shadow_config_from_env
 # Track 2 (C2): the sim judge adapter — real Jev in simulation.
@@ -230,6 +231,11 @@ class Pipeline:
         # The tracker holds amounts and counts only — never key material.
         self.jev_tracker = None
         self.jev_judge_mode = "unconfigured"
+        # Contract C3: the receiver topology's kill switch. Attached by
+        # build_pipeline_from_env() (which also passes it to the
+        # forwarder); None for ad-hoc constructions. The forwarder carries
+        # the check — this is the handle the drill/operator flips.
+        self.kill_switch = None
         self.metrics: dict[str, int] = {
             "received": 0,
             "triaged": 0,
@@ -1252,10 +1258,19 @@ def build_pipeline_from_env(policy=None,
                 # sim mode. Lets the gate attach the contract JudgeResult
                 # (who decided, at what cost) to decision payloads.
                 jev_tracker=jev_tracker)
+    # Contract C3 (kill = HALT all paging, fail-closed): the kill switch
+    # halts THIS forwarder — the legacy sync Forwarder the receiver
+    # actually pages through. Engaged = every send absorbed, nothing goes
+    # out; re-arm = resume. The check is a thread-safe flag read inside
+    # _post: never Jev, never the race, never raises. (P0-1 fix: the 2.0ms
+    # drill measured DurableForwarder, a topology the receiver doesn't
+    # use; this is the receiver's kill wiring.)
+    kill_switch = KillSwitch(log=audit.log)
     forwarder = Forwarder(
         pd_events_url=os.environ.get("PD_EVENTS_URL",
                                      "https://events.pagerduty.com/v2/enqueue"),
         default_routing_key=os.environ.get("PD_ROUTING_KEY"),
+        kill_switch=kill_switch,
     )
     config = ReceiverConfig(
         webhook_secret=webhook_secret,
@@ -1270,6 +1285,11 @@ def build_pipeline_from_env(policy=None,
     # (GET /api/v1/jev/spend). Amounts and counts only — never key material.
     pipeline.jev_tracker = jev_tracker
     pipeline.jev_judge_mode = jev_judge_mode
+    # Contract C3: the receiver topology's kill switch. Engaging it halts
+    # all paging through the receiver's forwarder (fail-closed); re-arm
+    # resumes. Exposed so the drill and the operator flip the switch that
+    # the paging path actually reads.
+    pipeline.kill_switch = kill_switch
     # Stage-0 read-only tap (design 06 §a): attached only when
     # SENTINEL_SHADOW_TAP=1. Runs on the validated policy's thresholds —
     # the fail-closed gate above already refused to boot without one.
