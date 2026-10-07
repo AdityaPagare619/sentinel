@@ -156,7 +156,7 @@ button.chip:hover{border-color:var(--ink-3)}
 .storm .ghostbtn{background:none;border:1px solid #5A564C;color:#F4F2EC;border-radius:6px;
   font-size:12px;font-weight:600;padding:5px 11px}
 
-/* ============ handled quietly — grouped silence ============ */
+/* ============ handled quietly — grouped suppressions ============ */
 .qgroups{display:flex;flex-direction:column;gap:8px}
 .qgroup{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
   padding:12px 14px;text-align:left;width:100%;display:grid;
@@ -326,7 +326,7 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
       <span class="note">grouped by reason — never listed raw</span>
     </div>
     <div class="qgroups" id="quietGroups"></div>
-    <p class="quiet-note" style="margin-top:10px">Least-sure decisions first inside each group. <button class="trace" data-why="quiet" style="font-size:12px">Why grouped?</button></p>
+    <p class="quiet-note" style="margin-top:10px">Least-sure decisions first inside each group. <span class="dim">Scores run 0 (unsure) → 1 (sure); a score in the doubt band pages a human.</span> <button class="trace" data-why="quiet" style="font-size:12px">Why grouped?</button></p>
   </section>
 </main>
 
@@ -502,7 +502,7 @@ function gate(p){
   if(j.winner==='timer') return decide(p,'PAGE','timer-win','Judge too slow — the human gets paged, the late answer is powerless');
   const s=j.score, band=SEM.doubtBand;
   if(s - band < SEM.suppressBar)
-    return decide(p,'PAGE','doubt','Score inside the doubt band — paging on uncertainty');
+    return decide(p,'PAGE','doubt',`Judge score landed in the doubt band (±${SEM.doubtBand}) — too close to call, so a human decides. Doubt pages.`);
   if(p.flap) return decide(p,'SUPPRESS','R-11',RULES['R-11'].plain);
   if(p.tpl.rule) return decide(p,'SUPPRESS',p.tpl.rule,RULES[p.tpl.rule].plain);
   if(R()<0.45){ const rid=pick(R,['R-07','R-11','R-14','R-19']);
@@ -1128,7 +1128,7 @@ function renderStateLine(){
   $('#stateLine').innerHTML =
     `<strong class="num">${d.unacked} need you</strong><span class="sep">·</span>`+
     `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
-    `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems never alerts</span>`+
+    `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems, never as raw alerts</span>`+
     (PROD_MODE&&S.dataAgeSec!=null?`<span class="sep">·</span><span class="dim">backend data ${fmtAge(S.dataAgeSec)} old</span>`:'')+
     (nErr?`<span class="sep">·</span><strong style="color:var(--amber)">${nErr} endpoint${nErr>1?'s':''} failing</strong>`:'')+
     (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
@@ -1136,7 +1136,7 @@ function renderStateLine(){
       (PROD_MODE?'AI judge not configured — gate runs without AI judgment':'judge down — everything pages')+
       `</strong>`:'');
   $('#needCount').textContent = d.open+' open';
-  $('#quietCount').textContent = d.quiet+' silenced';
+  $('#quietCount').textContent = d.quiet+' handled quietly';
 }
 function renderDegraded(){
   const el=$('#degradedSlot');
@@ -1161,7 +1161,7 @@ function renderDegraded(){
   } else el.innerHTML='';
 }
 
-/* storm card: compression, not a list. Grouped is not silenced. */
+/* storm card: compression, not a list. Grouped is not handled quietly. */
 function renderStorm(){
   const slot=$('#stormSlot'), st=S.storm;
   if(!st){ slot.innerHTML=''; return; }
@@ -1172,7 +1172,7 @@ function renderStorm(){
       <div class="k">STORM — COMPRESSED VIEW</div>
       <h3>Many signals, one problem family</h3>
       <div class="big num">${st.peak}<span style="font-size:14px;font-weight:600;color:#B9B4A8"> problems/min at peak</span></div>
-      <div class="sub">Grouped by change id · group ends after 10 min of quiet · <b style="color:#F4F2EC">grouped is not silenced</b> — one human paged, the rest held with proof.</div>
+      <div class="sub">Grouped by change id · group ends after 10 min of quiet · <b style="color:#F4F2EC">grouped is not handled quietly</b> — one human paged, the rest held with proof.</div>
       <canvas id="stormCv" width="600" height="44" aria-label="arrival rate trend"></canvas>
       <div class="sub num">now ${perMin}/min · trend ${trend>0?'▲ rising':trend<0?'▼ easing':'— steady'} · one page issued, rest held</div>
       <div class="row">
@@ -1260,7 +1260,7 @@ function actOn(p, act){
 /* handled quietly: groups, never a raw list */
 function renderQuiet(){
   const g=DataAdapter.getQuietGroups(), el=$('#quietGroups');
-  if(!g.length){ el.innerHTML=`<div class="empty">Nothing silenced yet.<br>The machine hasn't decided you could sleep on anything.</div>`; return; }
+  if(!g.length){ el.innerHTML=`<div class="empty">Nothing handled quietly yet.<br>The machine hasn't decided you could sleep on anything.</div>`; return; }
   const max=Math.max(...g.map(x=>x.n));
   el.innerHTML=g.map(x=>
    `<button class="qgroup" data-rule="${x.ruleId}">
@@ -1309,7 +1309,7 @@ function renderDetail(id, soft){
       :`<dl class="kv">
         <dt>Decision</dt><dd><b>${dec.disp}</b> — ${esc(dec.plain)}</dd>
         <dt>Judge score</dt><dd>${dec.score!=null
-          ? `<span class="num">${dec.score.toFixed(2)}</span> <span style="color:var(--ink-3)">±${SEM.doubtBand} — ordinal: ranks decisions, not a probability</span>`
+          ? `<span class="num">${dec.score.toFixed(2)}</span> <span style="color:var(--ink-3)">±${SEM.doubtBand} — ordinal: ranks decisions, not a probability · 0 unsure, 1 sure</span>`
           : `— <span style="color:var(--ink-3)">timer won; no score was used</span>`}</dd>
         <dt>Considered, not done</dt><dd style="color:var(--ink-2)">${esc(dec.frozen.considered)}</dd>
         <dt>Rule</dt><dd style="font-family:var(--mono);font-size:12px">${dec.ruleId}</dd>
@@ -1328,7 +1328,7 @@ function renderDetail(id, soft){
         <dt>Decided at</dt><dd class="num">${fmtAge(S.t-dec.at)} ago</dd>
         <dt>Signals seen</dt><dd class="num">${dec.frozen.signals}</dd>
         <dt>Evidence</dt><dd>${dec.frozen.evidence.map(esc).join(' · ')}</dd>
-        <dt>Evidence age</dt><dd class="num">fresh at decision (stale evidence can never justify silence)</dd>
+        <dt>Evidence age</dt><dd class="num">fresh at decision (stale evidence can never justify staying quiet)</dd>
       </dl></div>
       <div class="live-log" style="margin-top:10px"><div class="flabel" style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--ink-2);margin-bottom:6px">SINCE THEN — LIVE</div>
       <ul class="tl">${S.timeline.filter(t=>t.text.includes(p.id)).slice(-8).map(t=>
@@ -1426,12 +1426,12 @@ $('#chipPolicy').onclick=()=>openSafety();
 $('#chipAuth').onclick=()=>openSafety();
 $('#chipRace').onclick=()=>openSafety();
 
-/* ---- ledger: grouped silence, risk-first, jump — never pagination ---- */
+/* ---- ledger: handled quietly, grouped, risk-first, jump — never pagination ---- */
 let ledgerFilter={};
 function openLedger(f){ ledgerFilter=f||{}; renderLedger(); openDrawer('ledgerDrawer'); }
 function renderLedger(soft){
   const d=DataAdapter.getLedger(ledgerFilter), el=$('#ledgerDrawer');
-  const title=ledgerFilter.ruleId?`Silenced — ${RULES[ledgerFilter.ruleId].name}`:'Proof ledger';
+  const title=ledgerFilter.ruleId?`Handled quietly — ${RULES[ledgerFilter.ruleId].name}`:'Proof ledger';
   el.innerHTML=
   `<header><div class="tt"><h3>${esc(title)}</h3>
     <div class="sub num">${d.total} suppressions · least-sure first — borderline calls deserve human eyes</div></div>
@@ -1449,7 +1449,7 @@ function renderLedger(soft){
         ${l.appealed?'<span class="pillbad">APPEALED — paged</span>':l.live?'<span class="pillok">LIVE</span>':'<span class="pillok" style="background:var(--quiet-soft);color:var(--quiet)">EXPIRED — re-evaluated</span>'}</h5>
       <dl class="kv">
         <dt>Decision</dt><dd><b>${l.disp}</b> via <span style="font-family:var(--mono);font-size:12px">${l.ruleId}</span> — ${esc(l.plain)}</dd>
-        <dt>Judge score</dt><dd>${l.score!=null?`<span class="num">${l.score.toFixed(2)}</span> <span style="color:var(--ink-3)">ordinal, not a probability</span>`:'timer won — no score'}</dd>
+        <dt>Judge score</dt><dd>${l.score!=null?`<span class="num">${l.score.toFixed(2)}</span> <span style="color:var(--ink-3)">ordinal, not a probability — 0 unsure, 1 sure</span>`:'timer won — no score'}</dd>
         <dt>Expires</dt><dd class="num">${fmtAge(l.expiresAt-S.t)} — then re-evaluated, never silently dropped</dd>
         ${l.appealed?`<dt>Appeal</dt><dd>${esc(l.appealed.by)}, ${fmtAge(S.t-l.appealed.at)} ago — "${esc(l.appealed.reason)}". Original decision above, preserved.</dd>`:''}
       </dl>
@@ -1479,10 +1479,10 @@ const WHY={
   race:['Raced','Problems that ran the judge-vs-timer race. A late judge answer is powerless.','source: race harness'],
   gate:['Decided','Final page-or-suppress decisions owned by the deterministic gate. Doubt pages.','source: gate'],
   fwd:['Sent','Decisions delivered: pages to the (mock) pager, suppressions to the proof ledger.','source: forwarder mock'],
-  'quiet-n':['Handled quietly','Suppressions currently live, grouped by rule. Open-ended silences are forbidden — each expires.','source: proof ledger'],
-  'open-n':['Open problems','Problems needing a human, counted as problems never alerts.','source: queue'],
-  quiet:['Why grouped?','10,000 silences are never listed raw. They are counted by reason; the ledger is one click away, least-sure first.','source: ledger aggregation'],
-  degraded:['What stopped?','The AI judge is unreachable. Suppression paused: every problem pages. The machine stopped deciding silence — it did not stop watching.','source: health monitor'],
+  'quiet-n':['Handled quietly','Suppressions currently live, grouped by rule. Nothing stays quiet forever — each expires.','source: proof ledger'],
+  'open-n':['Open problems','Problems needing a human — counted as problems, never as raw alerts.','source: queue'],
+  quiet:['Why grouped?','10,000 quiet decisions are never listed raw. They are counted by reason; the ledger is one click away, least-sure first.','source: ledger aggregation'],
+  degraded:['What stopped?','The AI judge is unreachable. Suppression paused: every problem pages. The machine stopped deciding you could sleep — it did not stop watching.','source: health monitor'],
   killms:['Measured, not asserted','Milliseconds from flip to the pipeline halting, measured with performance.now() on this machine, this session.','source: kill-switch harness'],
 };
 const pop=$('#pop');

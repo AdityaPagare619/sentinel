@@ -485,7 +485,7 @@ function gate(p){
   if(j.winner==='timer') return decide(p,'PAGE','timer-win','Judge too slow — the human gets paged, the late answer is powerless');
   const s=j.score, band=SEM.doubtBand;
   if(s - band < SEM.suppressBar)
-    return decide(p,'PAGE','doubt','Score inside the doubt band — paging on uncertainty');
+    return decide(p,'PAGE','doubt','Judge score landed in the doubt band (±0.09) — too close to call, so a human decides. Doubt pages.');
   if(p.flap) return decide(p,'SUPPRESS','R-11',RULES['R-11'].plain);
   if(p.tpl.rule) return decide(p,'SUPPRESS',p.tpl.rule,RULES[p.tpl.rule].plain);
   if(R()<0.45){ const rid=pick(R,['R-07','R-11','R-14','R-19']);
