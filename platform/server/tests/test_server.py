@@ -219,8 +219,9 @@ class TestCalibrationApi(AppCase):
         self.assertTrue(r["status"].startswith("200"))
         self.assertEqual(r["json"]["meta"]["data_source"], "synthetic")
         data = r["json"]["data"]
-        self.assertEqual(len(data["bins"]), 10)
+        self.assertEqual(len(data["deciles"]), 10)
         self.assertGreater(data["n_labeled"], 0)
+        self.assertEqual(data["interpretation"]["p1_semantics"], "ordinal")
 
     def test_team_filter(self):
         r = self.call(self.app, "/api/calibration", query="team=data")

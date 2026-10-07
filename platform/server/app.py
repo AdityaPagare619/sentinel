@@ -3,7 +3,8 @@
 Implements platform/contracts/openapi.yaml v1.0.0 exactly:
   GET  /api/decisions[?limit&since_id&fingerprint&team&action&from&to]
   GET  /api/decision/<id>
-  GET  /api/calibration[?team]
+  GET  /api/calibration[?team]          # ordinal rank-fidelity (AUC over p1 ranks),
+                                       # rank deciles, coverage@tau — never a probability
   POST /api/simulate
   GET  /api/analytics/noise[?window]
   GET  /api/analytics/flips[?window]

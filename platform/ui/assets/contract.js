@@ -2,7 +2,7 @@
  *
  * GENERATED FROM platform/contracts/openapi.yaml — DO NOT EDIT BY HAND.
  * Regenerate: python3 platform/ui/tools/gen_contract.py
- * Source sha256: 16b9d7e3156c757426536d13aa970dc91c59c33db9ec4627e08d2ba8385d6ece
+ * Source sha256: 006e77c3841d957ffd83d4b17e3a537c0ea6454a77f8d369818d2cf9a3d8f28f
  *
  * This module is the console's typed boundary (F8). The river, views, filters,
  * and sorts may reference ONLY the fields enumerated here. Vendor payload
@@ -15,7 +15,7 @@
  */
 
 export const CONTRACT_VERSION = '1.0.0';
-export const CONTRACT_SOURCE_SHA = '16b9d7e3156c757426536d13aa970dc91c59c33db9ec4627e08d2ba8385d6ece';
+export const CONTRACT_SOURCE_SHA = '006e77c3841d957ffd83d4b17e3a537c0ea6454a77f8d369818d2cf9a3d8f28f';
 
 export const ENUMS = {
   "Severity": [

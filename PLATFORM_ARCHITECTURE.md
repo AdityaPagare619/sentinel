@@ -94,7 +94,7 @@ with their data source. Lanes build against these signatures; mocks provided.
 GET  /api/decisions?limit=50&since_id=<id>          # decision river feed
 GET  /api/decisions?fingerprint=&team=&action=&from=&to=   # audit explorer search
 GET  /api/decision/<id>                             # full row: probs, input_sha256, model
-GET  /api/calibration?team=<team>                   # reliability bins, ECE, coverage@τ
+GET  /api/calibration?team=<team>                   # ordinal rank-fidelity (AUC over p1 ranks), deciles, coverage@τ
 POST /api/simulate  {thresholds, dataset_version}    # → {projection} (pure recompute)
 GET  /api/analytics/noise?window=24h                # top checks, team load, breakdown
 GET  /api/analytics/flips?window=7d                # flip-audit records

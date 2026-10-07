@@ -81,8 +81,8 @@ check_required("decision-detail.json", det["data"], "#/components/schemas/Decisi
 
 cal = json.loads((ROOT / "data" / "calibration.json").read_text())
 check_required("calibration.json", cal["data"], "#/components/schemas/CalibrationReport")
-for i, b in enumerate(cal["data"]["bins"]):
-    check_required(f"calibration.json bin {i}", b, "#/components/schemas/CalibrationBin")
+for i, b in enumerate(cal["data"]["deciles"]):
+    check_required(f"calibration.json decile {i}", b, "#/components/schemas/RankDecile")
 
 sim = json.loads((ROOT / "data" / "simulate.json").read_text())
 check_required("simulate.json", sim["data"], "#/components/schemas/SimulateResponse")

@@ -45,7 +45,7 @@ SEV_OPTIONS = ("p1_critical", "p2_high", "p3_medium", "p4_low",
                "known_noise", "cannot_determine")
 DISP_OPTIONS = ("page_now", "page_business_hours", "suppress", "passthrough")
 
-CALIBRATION_BINS = 10          # equal-width bins over Q1 P(p1_critical)
+RANK_DECILES = 10               # equal-count rank deciles over ordinal Q1 p1_critical
 MAX_REPLAY = 10_000            # SSE reconnect replay bound (gap policy)
 
 
@@ -87,6 +87,27 @@ def _wilson(p: float, n: int, z: float = 1.96):
     center = (p + z * z / (2 * n)) / denom
     half = z * (p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5 / denom
     return max(0.0, center - half), min(1.0, center + half)
+
+
+def _rank_auc(items) -> float | None:
+    """Concordance of ordinal p1 ranks vs SEV1/2 outcomes (Mann-Whitney U).
+
+    Consumes order only: P(p1[pos] > p1[neg]) + 0.5·P(ties).
+    0.5 = chance, 1.0 = perfect ranking. None when unscorable
+    (fewer than 2 items, or no positives/negatives).
+    """
+    pos = [it["p1"] for it in items if it["sev12"]]
+    neg = [it["p1"] for it in items if not it["sev12"]]
+    if not pos or not neg:
+        return None
+    conc = tied = 0
+    for p in pos:
+        for q in neg:
+            if p > q:
+                conc += 1
+            elif p == q:
+                tied += 1
+    return (conc + 0.5 * tied) / (len(pos) * len(neg))
 
 
 def load_context_jsonl(path: str) -> dict[str, dict]:
@@ -455,35 +476,38 @@ class ReadStore:
 
         n_labeled = len(items)
         binnable = [it for it in items if it["p1"] is not None]
-        bins = []
-        for b in range(CALIBRATION_BINS):
-            lo, hi = b / CALIBRATION_BINS, (b + 1) / CALIBRATION_BINS
-            members = [it for it in binnable
-                       if (it["p1"] >= lo and
-                           (it["p1"] < hi or (b == CALIBRATION_BINS - 1
-                                              and it["p1"] <= hi)))]
+        # Ordinality law (AC-8c): p1 is an ORDINAL severity score in [0,1],
+        # never a probability. We therefore measure only RANK-ORDER fidelity:
+        # do higher p1 ranks correspond to more SEV1/2 outcomes? AUC over
+        # (p1 rank, sev12) is the honest instrument — it consumes order only.
+        # Equal-count rank deciles replace equal-width probability bins; the
+        # observed rates are descriptive outcome fractions, never predictions.
+        ranked = sorted(binnable, key=lambda it: it["p1"])
+        n_b = len(ranked)
+        deciles = []
+        for d in range(RANK_DECILES):
+            start = d * n_b // RANK_DECILES
+            end = (d + 1) * n_b // RANK_DECILES
+            members = ranked[start:end]
             n = len(members)
+            lo_pct = round(start / n_b, 4) if n_b else 0.0
+            hi_pct = round(end / n_b, 4) if n_b else 0.0
             if n == 0:
-                bins.append({"bin": b + 1, "predicted_lo": lo,
-                             "predicted_hi": hi, "n": n,
-                             "observed_rate": 0.0,
-                             "ci95_lo": 0.0, "ci95_hi": 0.0})
+                deciles.append({"decile": d + 1, "rank_lo": lo_pct,
+                                "rank_hi": hi_pct, "n": n,
+                                "observed_sev12_rate": 0.0,
+                                "ci95_lo": 0.0, "ci95_hi": 0.0})
                 continue
             obs = sum(1 for m in members if m["sev12"]) / n
             ci_lo, ci_hi = _wilson(obs, n)
-            bins.append({"bin": b + 1, "predicted_lo": lo,
-                         "predicted_hi": hi, "n": n,
-                         "observed_rate": round(obs, 4),
-                         "ci95_lo": round(ci_lo, 4),
-                         "ci95_hi": round(ci_hi, 4)})
-        ece = 0.0
-        if binnable:
-            n = len(binnable)
-            ece = sum(b["n"] / n * abs(b["observed_rate"]
-                                      - (b["predicted_lo"]
-                                         + b["predicted_hi"]) / 2)
-                      for b in bins)
-        ece_ci = self._ece_ci(binnable)
+            deciles.append({"decile": d + 1,
+                            "rank_lo": lo_pct, "rank_hi": hi_pct,
+                            "n": n,
+                            "observed_sev12_rate": round(obs, 4),
+                            "ci95_lo": round(ci_lo, 4),
+                            "ci95_hi": round(ci_hi, 4)})
+        auc = _rank_auc(ranked)
+        auc_ci = self._auc_ci(ranked)
 
         def coverage(tau):
             if n_labeled == 0:
@@ -499,37 +523,42 @@ class ReadStore:
             "dataset_version": dataset_version,
             "n_decisions": len(rows),
             "n_labeled": n_labeled,
-            "bins": bins,
-            "ece": round(ece, 4),
-            "ece_ci95": ece_ci,
+            "rank_fidelity": {
+                "auc": round(auc, 4) if auc is not None else None,
+                "auc_ci95": auc_ci,
+                "n": n_b,
+            },
+            "deciles": deciles,
             "coverage": {"0.7": coverage(0.7), "0.8": coverage(0.8),
                          "0.9": coverage(0.9)},
             "flip_rate": flips["flip_rate"],
             "flips_n": flips["flips_n"],
+            "interpretation": {
+                "p1_semantics": "ordinal",
+                "statement": (
+                    "p1 is an ORDINAL severity score in [0,1], never a "
+                    "probability. auc measures rank-order agreement between "
+                    "p1 ranks and SEV1/2 outcomes only (0.5 = chance, "
+                    "1.0 = perfect ranking). deciles are equal-count rank "
+                    "groups, not probability bins; observed_sev12_rate is a "
+                    "descriptive outcome fraction, not a predicted "
+                    "probability. Nothing here says P(SEV | p1 = x)."
+                ),
+            },
         }
 
-    def _ece_ci(self, binnable, resamples: int = 200):
-        """Deterministic bootstrap CI for ECE (seeded — replay-stable)."""
-        if not binnable:
-            return [0.0, 0.0]
+    def _auc_ci(self, ranked, resamples: int = 200):
+        """Deterministic bootstrap CI for rank AUC (seeded — replay-stable)."""
+        if _rank_auc(ranked) is None:
+            return [None, None]
         import random
         rng = random.Random(20261004)
-        n = len(binnable)
+        n = len(ranked)
         vals = []
         for _ in range(resamples):
-            sample = [binnable[rng.randrange(n)] for _ in range(n)]
-            bins_n = [0] * CALIBRATION_BINS
-            bins_k = [0] * CALIBRATION_BINS
-            for it in sample:
-                b = min(int(it["p1"] * CALIBRATION_BINS), CALIBRATION_BINS - 1)
-                bins_n[b] += 1
-                bins_k[b] += 1 if it["sev12"] else 0
-            e = 0.0
-            for b in range(CALIBRATION_BINS):
-                if bins_n[b]:
-                    mid = (b + 0.5) / CALIBRATION_BINS
-                    e += bins_n[b] / n * abs(bins_k[b] / bins_n[b] - mid)
-            vals.append(e)
+            sample = [ranked[rng.randrange(n)] for _ in range(n)]
+            a = _rank_auc(sample)
+            vals.append(a if a is not None else 0.5)
         vals.sort()
         lo = vals[int(0.025 * resamples)]
         hi = vals[min(int(0.975 * resamples), resamples - 1)]

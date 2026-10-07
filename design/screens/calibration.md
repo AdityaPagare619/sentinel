@@ -1,5 +1,16 @@
 # Screen: Calibration — "is the machine honest about what it knows?"
 
+> **REVISION NOTE (2026-10-07, lane/fix-dead-calibration):** this spec's
+> probability presentation (ECE headline, reliability diagram, "when
+> Sentinel says 80% confident…" gloss) is SUPERSEDED by the ordinality law
+> (AC-8c: p1 is an ordinal severity score, never a probability). The v1
+> screen is not shipped. `GET /api/calibration` now reports ordinal
+> rank-fidelity (AUC of p1 ranks vs SEV1/2 outcomes) + equal-count rank
+> deciles + an explicit `interpretation` block — no ECE, no
+> predicted-probability bins, no "P(p1)=" anywhere. If this screen is ever
+> rebuilt, it must present the endpoint's ordinal fields as-is, never
+> translate them back into confidence-as-probability copy.
+
 **Function code:** `CAL` · **Route:** `/calibration`
 **API:** `GET /api/calibration?team=<team>` ·
 `GET /api/analytics/flips?window=7d`
@@ -108,7 +119,7 @@ timeline itself lives in the audit explorer spec — calibration surfaces the
 
 | UI need | Endpoint |
 |---|---|
-| headline cards + diagram | `GET /api/calibration?team=<team>` (bins, counts, ECE, threshold) |
+| headline cards + diagram | `GET /api/calibration?team=<team>` (rank deciles, counts, AUC rank-fidelity, interpretation) |
 | flip rate card | `GET /api/analytics/flips?window=7d` |
 | flip cases | deep link → audit explorer |
 

@@ -1,1 +1,125 @@
-{"data":{"bins":[{"bin":1,"ci95_hi":0.008,"ci95_lo":0.001,"n":1150,"observed_rate":0.004,"predicted_hi":0.1,"predicted_lo":0.0},{"bin":2,"ci95_hi":0.1,"ci95_lo":0.03,"n":180,"observed_rate":0.061,"predicted_hi":0.2,"predicted_lo":0.1},{"bin":3,"ci95_hi":0.22,"ci95_lo":0.09,"n":120,"observed_rate":0.15,"predicted_hi":0.3,"predicted_lo":0.2},{"bin":4,"ci95_hi":0.42,"ci95_lo":0.22,"n":90,"observed_rate":0.322,"predicted_hi":0.4,"predicted_lo":0.3},{"bin":5,"ci95_hi":0.55,"ci95_lo":0.33,"n":80,"observed_rate":0.438,"predicted_hi":0.5,"predicted_lo":0.4},{"bin":6,"ci95_hi":0.68,"ci95_lo":0.44,"n":70,"observed_rate":0.557,"predicted_hi":0.6,"predicted_lo":0.5},{"bin":7,"ci95_hi":0.78,"ci95_lo":0.52,"n":50,"observed_rate":0.66,"predicted_hi":0.7,"predicted_lo":0.6},{"bin":8,"ci95_hi":0.87,"ci95_lo":0.62,"n":40,"observed_rate":0.775,"predicted_hi":0.8,"predicted_lo":0.7},{"bin":9,"ci95_hi":0.94,"ci95_lo":0.7,"n":35,"observed_rate":0.857,"predicted_hi":0.9,"predicted_lo":0.8},{"bin":10,"ci95_hi":1.0,"ci95_lo":0.82,"n":25,"observed_rate":0.96,"predicted_hi":1.0,"predicted_lo":0.9}],"coverage":{"0.7":0.61,"0.8":0.44,"0.9":0.28},"dataset_version":"labels-v3","ece":0.031,"ece_ci95":[0.024,0.039],"flip_rate":0.017,"flips_n":240,"n_decisions":1840,"n_labeled":1840,"team":"data","window":"7d"},"meta":{"contract_version":"1.0.0","data_source":"synthetic","generated_at":"2026-10-02T18:55:00Z"}}
+{
+  "data": {
+    "coverage": {
+      "0.7": 1.0,
+      "0.8": 0.609,
+      "0.9": 0.2075
+    },
+    "dataset_version": "labels-v3",
+    "deciles": [
+      {
+        "ci95_hi": 0.0188,
+        "ci95_lo": 0.0,
+        "decile": 1,
+        "n": 200,
+        "observed_sev12_rate": 0.0,
+        "rank_hi": 0.1,
+        "rank_lo": 0.0
+      },
+      {
+        "ci95_hi": 0.0188,
+        "ci95_lo": 0.0,
+        "decile": 2,
+        "n": 200,
+        "observed_sev12_rate": 0.0,
+        "rank_hi": 0.2,
+        "rank_lo": 0.1
+      },
+      {
+        "ci95_hi": 0.0278,
+        "ci95_lo": 0.0009,
+        "decile": 3,
+        "n": 200,
+        "observed_sev12_rate": 0.005,
+        "rank_hi": 0.3,
+        "rank_lo": 0.2
+      },
+      {
+        "ci95_hi": 0.0357,
+        "ci95_lo": 0.0027,
+        "decile": 4,
+        "n": 200,
+        "observed_sev12_rate": 0.01,
+        "rank_hi": 0.4,
+        "rank_lo": 0.3
+      },
+      {
+        "ci95_hi": 0.0432,
+        "ci95_lo": 0.0051,
+        "decile": 5,
+        "n": 200,
+        "observed_sev12_rate": 0.015,
+        "rank_hi": 0.5,
+        "rank_lo": 0.4
+      },
+      {
+        "ci95_hi": 0.0833,
+        "ci95_lo": 0.0239,
+        "decile": 6,
+        "n": 200,
+        "observed_sev12_rate": 0.045,
+        "rank_hi": 0.6,
+        "rank_lo": 0.5
+      },
+      {
+        "ci95_hi": 0.1552,
+        "ci95_lo": 0.0697,
+        "decile": 7,
+        "n": 200,
+        "observed_sev12_rate": 0.105,
+        "rank_hi": 0.7,
+        "rank_lo": 0.6
+      },
+      {
+        "ci95_hi": 0.4337,
+        "ci95_lo": 0.3014,
+        "decile": 8,
+        "n": 200,
+        "observed_sev12_rate": 0.365,
+        "rank_hi": 0.8,
+        "rank_lo": 0.7
+      },
+      {
+        "ci95_hi": 0.9097,
+        "ci95_lo": 0.8163,
+        "decile": 9,
+        "n": 200,
+        "observed_sev12_rate": 0.87,
+        "rank_hi": 0.9,
+        "rank_lo": 0.8
+      },
+      {
+        "ci95_hi": 0.9991,
+        "ci95_lo": 0.9722,
+        "decile": 10,
+        "n": 200,
+        "observed_sev12_rate": 0.995,
+        "rank_hi": 1.0,
+        "rank_lo": 0.9
+      }
+    ],
+    "flip_rate": 0.0,
+    "flips_n": 0,
+    "interpretation": {
+      "p1_semantics": "ordinal",
+      "statement": "p1 is an ORDINAL severity score in [0,1], never a probability. auc measures rank-order agreement between p1 ranks and SEV1/2 outcomes only (0.5 = chance, 1.0 = perfect ranking). deciles are equal-count rank groups, not probability bins; observed_sev12_rate is a descriptive outcome fraction, not a predicted probability. Nothing here says P(SEV | p1 = x)."
+    },
+    "n_decisions": 2000,
+    "n_labeled": 2000,
+    "rank_fidelity": {
+      "auc": 0.9734,
+      "auc_ci95": [
+        0.9667,
+        0.9802
+      ],
+      "n": 2000
+    },
+    "team": "all",
+    "window": "7d"
+  },
+  "meta": {
+    "contract_version": "1.0.0",
+    "data_source": "synthetic",
+    "generated_at": "2026-10-07T13:30:00Z"
+  }
+}
