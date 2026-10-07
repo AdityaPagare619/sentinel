@@ -254,9 +254,15 @@ def assemble_staging(ui_src: str, api_dir: str, out: str) -> None:
     if os.path.exists(out):
         shutil.rmtree(out)
     os.makedirs(out)
-    # UI assets
+    # UI assets. Ordinality law (AC-8c): the dead v1 calibration assets
+    # (lib.js gloss80/stripCal/calVerdict/P(p1), views-cal.js ECE diagrams,
+    # views-sim.js P(p1) sums) must never ship to the public branch again —
+    # exclude them at the copy boundary.
+    _DEAD_CALIBRATION_ASSETS = {"lib.js", "views-cal.js", "views-sim.js"}
     for name in ("assets",):
-        shutil.copytree(os.path.join(ui_src, name), os.path.join(out, name))
+        shutil.copytree(
+            os.path.join(ui_src, name), os.path.join(out, name),
+            ignore=shutil.ignore_patterns(*_DEAD_CALIBRATION_ASSETS))
     shutil.copy(os.path.join(ui_src, "index.html"), out)
     # Pre-rendered API
     shutil.copytree(api_dir, os.path.join(out, "api"))
