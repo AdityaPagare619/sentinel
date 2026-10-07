@@ -1161,8 +1161,6 @@ class Forwarder:
                              error="kill_switch_engaged", action=action,
                              dedup_key=dedup_key, killed=True)
 
-    # -------------------------------------------------------------- internals
-
     def _business_hours_body(self, alert: Alert) -> bytes:
         key, _source = self._resolve_key()
         payload = _pd_event_for(alert, key)
