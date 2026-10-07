@@ -79,6 +79,11 @@ button.chip:hover{border-color:var(--ink-3)}
 .kill.armed .lamp{background:var(--red);animation:beat 1.2s infinite}
 .kill.confirm{background:var(--red);border-color:var(--red);color:#fff}
 .kill.confirm .lamp{background:#fff}
+/* INTERIM (P0-1 open): deployed tier hosts no paging path that reads the
+   kill flag — the control is visibly disabled until kill-topology wiring
+   lands. Sim mode never renders this state. */
+.kill.disabled{opacity:.55;cursor:not-allowed}
+.kill.disabled .lamp{background:var(--ink-3)}
 
 /* one-line state of the world */
 .state-line{background:var(--surface);border-bottom:1px solid var(--line);
@@ -673,7 +678,12 @@ function prodSyncStore(h, decisions, s){
   S.counts={recv:n, corr:n, race:n, gate:n, fwd:db.pages_1h||0};
   S.dataAgeSec=db.data_age_s!=null?Math.round(db.data_age_s):null;
   S.kill={engaged:!!(s&&s.engaged), armed:false, flips:[],
-    drillMs:(s&&s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null};
+    drillMs:(s&&s.last_drill&&s.last_drill.measured_ms!=null)?s.last_drill.measured_ms:null,
+    /* per-instance kill-state visibility: the deployed tier keeps the flag
+       in per-instance /tmp; instances can disagree. Surfaced so the
+       operator sees divergence instead of assuming one switch. */
+    instanceId:(s&&s.instance_id)||null,
+    scope:(h&&h.safety&&h.safety.kill_switch&&h.safety.kill_switch.kill_state_scope)||null};
   S.judgeDown=false; S.storm=null;
   S.auth=[{state:(h&&h.safety&&h.safety.auth&&h.safety.auth.operator_token==='ok')?'locked':'unknown'}];
   S._ops=h||null;
@@ -731,18 +741,29 @@ const ProductionAdapter = {
   takeOwnership(id,by){ toast('Ownership lives in PagerDuty'); },
   appeal(pid,reason){ toast('Appeals apply to the live pipeline via the API'); },
   engageKill(){
+    /* INTERIM (P0-1 open): the kill endpoint flips a per-instance flag only
+       — no paging path on the deployed tier reads it. The confirmation
+       below echoes ONLY what the response contained; it must never claim
+       "suppression paused" or "backend confirmed". */
     const t0=performance.now();
-    this._post('/api/v1/safety/kill',{}).then(()=>{
+    this._post('/api/v1/safety/kill',{}).then((j)=>{
       const ms=performance.now()-t0;
-      log('you','kill switch ENGAGED — backend confirmed in '+ms.toFixed(0)+' ms');
-      toast('Suppression paused — backend confirmed in '+ms.toFixed(0)+' ms');
-      S.kill.engaged=true; render();
+      const engaged=!!(j&&j.engaged);
+      S.kill.engaged=engaged; render();
+      const echo='engaged='+engaged+', engaged_at='+((j&&j.engaged_at)||'n/a')
+        +', transitioned='+((j&&j.transitioned)!==undefined?j.transitioned:'n/a');
+      log('you','kill endpoint responded ['+echo+'] in '+ms.toFixed(0)+' ms — response contains a per-instance flag flip only; no paging path reads it on this tier');
+      toast('kill endpoint: ['+echo+'] — flag only, nothing halted');
     }).catch(e=>toast('kill failed: '+e.message));
     return 0; /* async: confirmation toasts on arrival, never faked sync */
   },
   disengageKill(){
-    this._post('/api/v1/safety/rearm',{confirm:true}).then(()=>{
-      S.kill.engaged=false; render(); toast('Gating resumed — backend confirmed');
+    const t0=performance.now();
+    this._post('/api/v1/safety/rearm',{confirm:true}).then((j)=>{
+      const ms=performance.now()-t0;
+      const engaged=!!(j&&j.engaged);
+      S.kill.engaged=engaged; render();
+      toast('re-arm endpoint: [engaged='+engaged+'] in '+ms.toFixed(0)+' ms — flag only');
     }).catch(e=>toast('re-arm failed: '+e.message));
     return 0;
   },
@@ -778,6 +799,14 @@ function prodTokenGate(){
 /* production chrome: structural mode banner + evaluator removed from the
    operator's control plane (B-5) + Operations Health entry point */
 function prodApplyChrome(){
+  /* INTERIM (P0-1 open): kill control disabled from the first paint — the
+     deployed tier hosts no paging path that reads the flag. renderHeader
+     keeps it disabled on every sync; this covers pre-sync paint. */
+  const kb0=document.getElementById('killBtn');
+  if(kb0){ kb0.classList.add('disabled'); kb0.disabled=true;
+    const kl=document.getElementById('killLabel'); if(kl) kl.textContent='Kill switch (this tier)';
+    const honest='Kill switch (this tier): DISABLED. Flips a per-instance flag only — no paging path on this tier reads it.';
+    kb0.setAttribute('aria-label',honest); kb0.setAttribute('title',honest); }
   const band=document.querySelector('.sim-band');
   if(band){ band.style.background='#7a1f14';
     band.innerHTML='<span class="tag" style="background:#fff;color:#7a1f14">PRODUCTION</span>'
@@ -956,11 +985,21 @@ function renderHeader(){
   const r=S.race, tot=r.judge+r.timer;
   $('#chipRace').innerHTML = `race <b class="num">${tot? r.judge+'/'+tot+' judge' : '—'}</b>`;
   const kb=$('#killBtn');
-  kb.classList.toggle('armed', S.kill.engaged);
-  $('#killLabel').textContent = S.kill.engaged ? 'Suppression OFF' : 'Suppressing';
-  kb.setAttribute('aria-label', S.kill.engaged
-    ? 'Kill switch ENGAGED: suppression paused. Activate to resume.'
-    : 'Kill switch: suppression is on. Activate to stop all suppression.');
+  if(PROD_MODE){
+    /* INTERIM (P0-1 open): the deployed tier hosts no paging path that
+       reads the kill flag — the control is disabled with honest copy.
+       The flag flip is a no-op lever; engaging changes nothing. */
+    kb.classList.add('disabled'); kb.classList.remove('armed'); kb.disabled=true;
+    $('#killLabel').textContent='Kill switch (this tier)';
+    const honest='Kill switch (this tier): DISABLED. Flips a per-instance flag only — no paging path on this tier reads it. Engaging currently changes nothing. Kill-topology wiring is open (P0-1); this control re-enables when a paging path consumes the flag.';
+    kb.setAttribute('aria-label',honest); kb.setAttribute('title',honest);
+  } else {
+    kb.classList.toggle('armed', S.kill.engaged);
+    $('#killLabel').textContent = S.kill.engaged ? 'Suppression OFF' : 'Suppressing';
+    kb.setAttribute('aria-label', S.kill.engaged
+      ? 'Kill switch ENGAGED: suppression paused. Activate to resume.'
+      : 'Kill switch: suppression is on. Activate to stop all suppression.');
+  }
   const badAuth=S.auth.some(a=>a.state.includes('blocked'));
   const ca=$('#chipAuth');
   ca.className='chip'+(badAuth?' warn':' ok');
@@ -986,8 +1025,14 @@ function renderDegraded(){
       `Every problem pages a human until the judge recovers. <button class="trace" data-why="degraded">What stopped?</button></div>`;
   } else if(S.kill.engaged){
     const wouldBe = S.ledger.filter(l=>{const p=S.problems.get(l.pid);return p&&p.state==='decided';}).length;
+    /* INTERIM (P0-1 open): on the deployed tier the flag can be engaged via
+       the API while no paging path reads it — say so, never "suppression
+       paused". */
+    const engagedLine = PROD_MODE
+      ? `<b>Kill flag engaged (this instance)</b> — per-instance flag only; no paging path on this tier reads it, so nothing was halted. `
+      : `<b>Kill switch engaged</b> — suppression paused. Problems that would have been silenced now page. `;
     el.innerHTML=`<div style="background:var(--red-soft);border-bottom:1px solid var(--red-edge);padding:9px 16px;font-size:13px;color:var(--red)">`+
-      `<b>Kill switch engaged</b> — suppression paused. Problems that would have been silenced now page. `+
+      engagedLine+
       `Flipped <button class="trace num" data-why="killms">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'—'}</button> ago (measured, not asserted).</div>`;
   } else el.innerHTML='';
 }
@@ -1191,11 +1236,17 @@ function renderSafety(soft){
     <div class="sub">Visible, inspectable, first-class. Never a settings page.</div></div>
     <button class="x" onclick="closeDrawers()">Close</button></header>
    <div class="dbody">
+    ${PROD_MODE?`
+    <div class="srow"><h5>Kill switch <span class="pillwarn">NO-OP LEVER (this tier)</span></h5>
+      <p><b>Disabled.</b> Flipping the flag halts <b>no paging path</b> — this tier hosts no forwarder or receiver, so nothing reads the flag. Engaging currently changes nothing. Kill-topology wiring is open (P0-1); this control re-enables when a paging path consumes the flag.</p>
+      <div class="contract"><b>The contract, in plain language:</b> POST /api/v1/safety/kill returns 200 and flips a per-instance /tmp flag. Serving instance: <b class="num">${esc(S.kill.instanceId||'unknown')}</b> · kill-state scope: <b class="num">${esc(S.kill.scope||'unknown')}</b>. Instances can disagree — there is no distributed flag yet. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
+      <div class="dactions"><button class="btn" id="sKill" disabled>Engage kill switch — disabled (no paging path on this tier)</button></div>
+    </div>`:`
     <div class="srow"><h5>Kill switch ${S.kill.engaged?'<span class="pillbad">ENGAGED</span>':'<span class="pillok">ARMED</span>'}</h5>
       <p>One control that stops <b>all</b> suppression. Everything pages until it is turned off.</p>
       <div class="contract"><b>The contract, in plain language:</b> engaging does not page everyone at once — it stops the machine from staying silent. In-flight races resolve as pages (fail-open). Re-arming resumes gating. Last flip: <b class="num">${S.kill.drillMs!=null?S.kill.drillMs.toFixed(1)+' ms':'no flip recorded this session'}</b> — measured, not asserted.</div>
       <div class="dactions"><button class="btn ${S.kill.engaged?'':'danger'}" id="sKill">${S.kill.armed?'Confirm: stop all suppression':S.kill.engaged?'Resume suppression':'Engage kill switch'}</button></div>
-    </div>
+    </div>`}
     <div class="srow"><h5>Policy governance</h5>
       <dl class="kv"><dt>Live version</dt><dd style="font-family:var(--mono);font-size:12px">${s.policy.version}</dd>
       <dt>Signed by</dt><dd>${s.policy.signers.map(esc).join(' · ')} <span class="pillok">2-of-2</span></dd>
@@ -1222,6 +1273,9 @@ function renderSafety(soft){
     </div>
    </div>`;
   $('#sKill').onclick=()=>{
+    /* INTERIM (P0-1 open): the PROD_MODE control is rendered disabled and
+       cannot fire this handler — the guard below is belt-and-braces. */
+    if(PROD_MODE){ toast('Kill switch disabled on this tier — no paging path reads the flag'); return; }
     if(!S.kill.engaged && !S.kill.armed){
       S.kill.armed=true; renderSafety(true);
       toast('Kill switch armed — press once more to stop all suppression');
