@@ -757,7 +757,7 @@ def build_sim_allowlist(noise_fps: list[str], start_epoch: float,
 # --------------------------------------------------------------------------
 
 def build_sim_pipeline(manifest: dict, judge, fakepd_url: str,
-                       tmpdir: str):
+                       tmpdir: str, audit_db_path: str | None = None):
     seed = manifest["seed"]
     start_epoch = manifest["_start_epoch"]
     vclock = VirtualClock(start_epoch)
@@ -785,7 +785,9 @@ def build_sim_pipeline(manifest: dict, judge, fakepd_url: str,
 
     judge_name, client, real_pin = judge
     pinned = _SIM_PINNED_MODEL if judge_name == "fake-jev" else real_pin
-    audit = AuditLog(":memory:")
+    # File-backed audit for load scale: an in-memory DB grows ~7KB/decision
+    # and OOMs the box at 1M alerts. Default stays :memory: for the sim UI.
+    audit = AuditLog(audit_db_path or ":memory:")
     gate = Gate(client, Thresholds(), allowlist, audit,
                 freshness_monitor=mon, pinned_model=pinned,
                 clock=vclock.as_datetime)
