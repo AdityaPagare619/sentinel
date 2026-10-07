@@ -388,7 +388,8 @@ components:
         jev_model: {type: string, nullable: true, example: system-one-2026-09-15, description: Pinned Jev model version; null on deterministic pre-Jev paths}
         latency_ms: {type: number, nullable: true, description: Jev round-trip; null on deterministic paths}
         budget_outcome:
-          type: string, nullable: true,
+          type: string
+          nullable: true
           description: |
             The race's authoritative verdict (RFC aiml-winner-heuristic):
             answered_in_time | timer_won | timer_won_shed | error_passthrough |

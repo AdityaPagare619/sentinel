@@ -2,7 +2,7 @@
  *
  * GENERATED FROM platform/contracts/openapi.yaml — DO NOT EDIT BY HAND.
  * Regenerate: python3 platform/ui/tools/gen_contract.py
- * Source sha256: 006e77c3841d957ffd83d4b17e3a537c0ea6454a77f8d369818d2cf9a3d8f28f
+ * Source sha256: 79bc2115714f2a2f5a66c6fae2aeb80459b28453ed70d5244a0e2cdcdf591850
  *
  * This module is the console's typed boundary (F8). The river, views, filters,
  * and sorts may reference ONLY the fields enumerated here. Vendor payload
@@ -15,7 +15,7 @@
  */
 
 export const CONTRACT_VERSION = '1.0.0';
-export const CONTRACT_SOURCE_SHA = '006e77c3841d957ffd83d4b17e3a537c0ea6454a77f8d369818d2cf9a3d8f28f';
+export const CONTRACT_SOURCE_SHA = '79bc2115714f2a2f5a66c6fae2aeb80459b28453ed70d5244a0e2cdcdf591850';
 
 export const ENUMS = {
   "Severity": [
@@ -51,7 +51,7 @@ export const DECISION_SUMMARY_REQUIRED = ["confidence", "disposition", "fingerpr
 export const DECISION_DETAIL_REQUIRED = ["alert", "audit", "confidence", "disposition", "fingerprint", "id", "input_sha256", "jev_model", "latency_ms", "prob_map", "reason", "service", "severity", "team", "time", "title"];
 
 /* Closed river-row vocabulary: every field the river may render. */
-export const RIVER_FIELDS = ["alert_id", "confidence", "disposition", "fingerprint", "id", "input_sha256", "jev_model", "latency_ms", "prob_map", "reason", "service", "severity", "shadow", "team", "time", "title"];
+export const RIVER_FIELDS = ["alert_id", "budget_outcome", "confidence", "disposition", "fingerprint", "id", "input_sha256", "jev_model", "latency_ms", "prob_map", "reason", "service", "severity", "shadow", "team", "time", "title"];
 
 /* Closed filter grammar: the only decision fields filters/sorts may reference. */
 export const FILTERABLE_FIELDS = ["id", "time", "service", "severity", "team", "disposition", "reason", "fingerprint", "confidence"];

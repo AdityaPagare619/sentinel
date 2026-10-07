@@ -226,7 +226,7 @@ class TestPreCallGates(unittest.TestCase):
 class TestSpendReconciliation(unittest.TestCase):
     """SpendMeter (advisory estimate envelope) vs JevSpendTracker (C2
     wire-truth ledger): explicit roles, one-directional divergence bound,
-    fail-closed on disagreement."""
+    fail-closed on disagreement, atomic gate+charge under threads."""
 
     def test_blocked_tracker_blocks_dispatcher(self):
         """A blocked wire-truth ledger blocks advisory even when the estimate
@@ -272,6 +272,37 @@ class TestSpendReconciliation(unittest.TestCase):
         self.assertGreaterEqual(meter.session_usd, tracker.session_usd)
         self.assertAlmostEqual(meter.session_usd, 0.00030, places=9)
         self.assertAlmostEqual(tracker.session_usd, 0.00017, places=9)
+
+    def test_gate_and_charge_atomic_under_threads(self):
+        """The envelope gate and charge are atomic: with a budget admitting
+        exactly K charges, N racing threads produce exactly K Jev calls —
+        never K+1 from a check-then-act race."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        fake = RecordingDecide(_resp())
+        est = estimate_cost_usd({"a": 1}, d6_questions())
+        k = 3
+        meter = SpendMeter(budget_usd=k * est)
+        d = AdvisoryDispatcher(fake, meter, jev_model="jev-mock-0.0.0")
+        barrier = threading.Barrier(16)
+
+        def worker(_):
+            barrier.wait()  # release all threads at once: maximal contention
+            return d.call_inline("triage_suggest", {"a": 1}, d6_questions(),
+                                 lambda r: {"x": 1},
+                                 lambda reason: {"fb": reason})
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            envs = list(pool.map(worker, range(16)))
+        jev_wins = [e for e in envs if e["fallback"] == "jev"]
+        blocked = [e for e in envs
+                   if e.get("fallback_reason") == "budget_blocked"]
+        self.assertEqual(len(jev_wins), k,
+                         f"expected exactly {k} admissions, got {len(jev_wins)}")
+        self.assertEqual(len(blocked), 16 - k)
+        self.assertEqual(fake.n_calls, k)
+        self.assertTrue(meter.blocked)
+        d.close()
 
 
 # ---------------------------------------------------------------------------

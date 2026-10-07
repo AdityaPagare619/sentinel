@@ -83,10 +83,27 @@ Implement C. Type 2: docstrings + one gate line + test. The money path
    accepted and documented: conservative direction is the safe one; the bound
    is per-call and small (estimate vs actual input tokens).
 
-## 6. Verification
+## 7. Amendment (2026-10-07, found during implementation)
 
-- New test `test_spend_meters_reconcile` (failing-before: without the gate line,
-  a blocked tracker does not block the dispatcher → test fails; passing-after:
-  with it, blocks).
+**Latent race in the envelope's gate:** `_pre_call_gates` read
+`SpendMeter.blocked`/`session_usd` without the lock while `_charge` took it —
+two racing threads could both pass the gate on the last unblocked dollar
+(check-then-act). Fixed: `_spend_lock` is now an `RLock`, and `call_multi` /
+`submit_multi` hold it across the gate+charge sequence (atomic
+check-and-charge; `_charge` re-takes safely). The tracker's own gate was
+already lock-protected. Regression test
+`test_gate_and_charge_atomic_under_threads`: 16 threads, budget for exactly 3
+→ exactly 3 admissions (failing-before proven by widening the race window:
+16 admitted without the fix). Advisory is unwired in production, so this was
+latent — fixed now rather than later because the lane found it.
+
+## 8. Verification
+
+- New tests `test_blocked_tracker_blocks_dispatcher`,
+  `test_unblocked_tracker_does_not_block`,
+  `test_estimate_envelope_never_understates_ledger`,
+  `test_gate_and_charge_atomic_under_threads` (failing-before proven for each
+  by mutation: without the gate line the dispatcher spends past a blocked
+  tracker; without atomicity 16 threads over-admit).
 - Existing suites green: `tests/test_advisory.py`, `tests/test_sim_judge.py`.
 - `GET /api/v1/jev/spend` shape unchanged (tracker only).

@@ -4,15 +4,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SEV_LABEL, DISP_LABEL, fmtInt, fmtPct, ageStr, shortFpr, parseHash, routeHref,
-  stripRiver, stripCal, stripSim, stripAudit, stripStart,
+  stripRiver, stripSim, stripAudit, stripStart,
   fmtTimeBoth, tailState, LIVE_TAIL_MAX_PER_SEC,
-  gloss80, overconfidentBins, calVerdict, quartilesFromBins, receiptLine,
+  receiptLine,
   verdictSentence, applyThresholds, DEFAULT_THRESHOLDS, policyDiffYaml, branchName,
   startPlan, jevStateFromParams,
 } from '../assets/lib.js';
 import { readFileSync } from 'node:fs';
 
-const bins = JSON.parse(readFileSync(new URL('../data/calibration.json', import.meta.url))).data.bins;
 const decisions = JSON.parse(readFileSync(new URL('../data/decisions.json', import.meta.url))).data;
 
 /* display mappings follow the contract enums */
@@ -45,22 +44,22 @@ test('strip grammar', () => {
   assert.match(stripRiver({ nPages: 2, nSuppress: 5, windowLabel: '1h' }), /2 pages in the last 1h/);
   assert.match(stripRiver({ apiDown: true, apiMsg: 'GET /api/decisions → 503', newestIso: '2026-10-02T18:51:12Z' }),
     /The gate is unaffected/);
-  assert.match(stripCal({ ece: 0.031, n: 1840 }), /ECE 0\.031 \(n=1,840\)/);
-  assert.match(stripCal({ n: 87, thin: true }), /provisional/);
   assert.match(stripSim({ pageNow: 96 }), /woken 96 times/);
   assert.match(stripSim({ thin: true, n: 87 }), /refusal is the feature/);
   assert.match(stripStart({ mode: 'live' }), /Shadow mode/);
   assert.match(stripStart({ mode: 'recorded' }), /recording/);
 });
 
-/* calibration glosses are generated from the actual bins */
-test('calibration math on the mock report', () => {
-  assert.match(gloss80(bins), /77|74|75|76|78|79|80|81/); /* bin 8 ci95_lo..hi */
-  assert.equal(overconfidentBins(bins).length, 2);
-  assert.match(calVerdict({ team: 'data', ece: 0.031, bins }), /healthy.*2 bins are overconfident/);
-  const qs = quartilesFromBins(bins);
-  assert.equal(qs.n, 1840);
-  assert.ok(qs.q1 <= qs.q2 && qs.q2 <= qs.q3 && qs.q1 < qs.q3, 'quartiles monotone (q1==q2 is correct for this left-skewed distribution)');
+/* ordinality law (AC-8c, RFC aiml-ordinality-sweep): the v1 calibration
+ * presentation was deleted at the source. This test guards the deletion —
+ * the banned helpers must not exist on the module, so no view can reimport
+ * the banned presentation. */
+test('ordinality: banned calibration helpers are gone', async () => {
+  const lib = await import('../assets/lib.js');
+  for (const name of ['stripCal', 'gloss80', 'overconfidentBins', 'calVerdict',
+                      'binForConf', 'quartilesFromBins']) {
+    assert.equal(lib[name], undefined, `${name} must stay deleted (AC-8c)`);
+  }
 });
 
 /* counterfactual receipt is derived, labeled, never an event field */
@@ -69,6 +68,8 @@ test('receiptLine', () => {
   const line = receiptLine(d, DEFAULT_THRESHOLDS);
   assert.match(line, /stands down/);
   assert.match(line, /would page below 0\.90/);
+  assert.ok(!/P\(p1\)=/.test(line), 'no P(...) probability notation (AC-8c)');
+  assert.match(line, /ordinal severity score, never a probability/);
   assert.equal(receiptLine({ ...d, disposition: 'page_now' }, DEFAULT_THRESHOLDS), null);
 });
 

@@ -278,7 +278,9 @@ class AdvisoryDispatcher:
         self._budgets = merged
         self._jev_model = jev_model
         self._pool = pool or AdvisoryPool()
-        self._spend_lock = threading.Lock()
+        self._spend_lock = threading.RLock()  # RLock: the gate+charge
+        # sequence below holds it across _pre_call_gates and _charge
+        # (atomic check-and-charge; RFC aiml-spend-reconciliation §7).
         self._daily: dict[str, tuple[date, float]] = {}  # direction -> (day, usd)
 
     # -- properties (Track 7 test seam) -----------------------------------
@@ -376,12 +378,20 @@ class AdvisoryDispatcher:
         """
         budget = self._budgets.get(direction) or DirectionBudget()
         try:
-            ok, reason, est = self._pre_call_gates(direction, state, questions)
-            if not ok:
-                return [self._fallback_part(d, reason, fb, alert_id,
-                                            fingerprint, episode_id)
-                        for d, _oj, fb in parts]
-            self._charge(direction, est)
+            # Atomic check-and-charge: the envelope gate and the charge hold
+            # the spend lock together, so two racing threads cannot both pass
+            # the gate on the last unblocked dollar (RLock: _charge re-takes).
+            # Atomic check-and-charge: the envelope gate and the charge hold
+            # the spend lock together, so two racing threads cannot both pass
+            # the gate on the last unblocked dollar (RLock: _charge re-takes).
+            with self._spend_lock:
+                ok, reason, est = self._pre_call_gates(direction, state,
+                                                       questions)
+                if not ok:
+                    return [self._fallback_part(d, reason, fb, alert_id,
+                                                fingerprint, episode_id)
+                            for d, _oj, fb in parts]
+                self._charge(direction, est)
             timeout_s = (timeout_ms if timeout_ms is not None
                          else budget.timeout_ms) / 1000.0
             outcome: dict = {}
@@ -443,13 +453,17 @@ class AdvisoryDispatcher:
         enrichment fell back synchronously (shed/gate-failed). Never
         raises."""
         try:
-            ok, reason, est = self._pre_call_gates(direction, state, questions)
-            if not ok:
-                on_done([self._fallback_part(d, reason, fb, alert_id,
-                                            fingerprint, episode_id)
-                         for d, _oj, fb in parts])
-                return False
-            self._charge(direction, est)
+            # Atomic check-and-charge (see call_multi): the envelope gate and
+            # the charge hold the spend lock together.
+            with self._spend_lock:
+                ok, reason, est = self._pre_call_gates(direction, state,
+                                                       questions)
+                if not ok:
+                    on_done([self._fallback_part(d, reason, fb, alert_id,
+                                                fingerprint, episode_id)
+                             for d, _oj, fb in parts])
+                    return False
+                self._charge(direction, est)
 
             def _worker():
                 try:
