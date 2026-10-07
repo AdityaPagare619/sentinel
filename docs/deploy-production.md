@@ -1,5 +1,14 @@
 # Deploying Sentinel to production (self-hosted)
 
+> **Which deployment is this?** This guide is for the **customer
+> self-hosted engine** — a Linux box in YOUR infrastructure running the
+> paging pipeline (receiver + platform server). It is NOT the story of
+> Sentinel's own hosted tier, which is Vercel serverless
+> (`sentinel-platform`, see `deploy/vercel/README.md` and
+> `docs/planning/production/PRODUCTION-STAGES.md` §§5/8). The engine
+> modules are the same; the topology, secrets handling, and rollback
+> story are different. Do not mix the two.
+
 Sentinel is middleware that runs **in your infrastructure** — the engine never
 leaves your network. This guide takes a fresh Ubuntu 22.04/24.04 box to a
 running production deployment: the paging pipeline (receiver) + the read API

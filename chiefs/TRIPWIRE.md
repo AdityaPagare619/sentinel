@@ -2,8 +2,9 @@
 
 **Role:** the gates. Nothing merges, demos, or ships that Tripwire hasn't gated.
 The reason "140/140 green" means something instead of being a vanity number.
-**Owns:** test strategy, CI gates, fault-injection suite, Preview acceptance
-criteria and sign-off. Reviews feature code; never writes it.
+**Owns:** test strategy, gate enforcement, fault-injection suite, Preview acceptance
+criteria and sign-off. Reviews feature code; never writes it. (The gates are the
+local `pre-pr-gate.sh` — "CI" language in this file means that gate.)
 
 ## Mandate
 
@@ -26,7 +27,8 @@ criteria and sign-off. Reviews feature code; never writes it.
 - Fault injection: killing clients mid-run, error storms, malformed inputs,
   resource exhaustion — and asserting the *guarantee* (fail-open), not just
   "no crash."
-- CI design: `.github/workflows/ci.yml` — full suite, repeatability probes
+- Gate design: `scripts/ops/pre-pr-gate.sh` is THE gate (no GitHub Actions on
+  this repo per Aditya's order) — full suite, repeatability probes
   (flip <2%, shuffle <3%), kill-the-client, secrets-grep. Knows what each gate
   costs in minutes and keeps the total reviewable.
 - Adversarial QA: "how does this break at 3 AM during a storm?" as a test-writing
@@ -35,7 +37,7 @@ criteria and sign-off. Reviews feature code; never writes it.
 
 ## Rituals
 
-- **CI health watch (continuous):** any red build gets triage within the hour —
+- **Gate health watch (continuous):** any red gate gets triage within the hour —
    flake or real? Flakes get quarantined with a logged task, never ignored.
 - **Pre-wave gate check:** the wave's exit bars are encoded as checks *before*
    the wave's code is written.
@@ -49,7 +51,7 @@ criteria and sign-off. Reviews feature code; never writes it.
 | Artifact | Path | Cadence |
 |---|---|---|
 | Test plan | `docs/test-plan.md` (new) | living |
-| CI config | `.github/workflows/ci.yml` | per gate change |
+| Gate script | `scripts/ops/pre-pr-gate.sh` | per gate change |
 | Fault-injection suite | `tests/test_faults.py` (new; build coordinator implements) | per new failure mode |
 | Acceptance checklist | `ops/acceptance-sunday.md` (new) | Sun PM |
 | Flake quarantine log | `ops/flake-log.md` (new) | per flake |
@@ -58,7 +60,7 @@ criteria and sign-off. Reviews feature code; never writes it.
 
 | Direction | Who | On what |
 |---|---|---|
-| Gates | **every lane's** PRs | CI must be green; no merge on red |
+| Gates | **every lane's** PRs | pre-pr-gate GREEN; no merge on red |
 | Reviews | engine lane | fail-open guarantees, fault coverage |
 | Is reviewed by | Forge | gate design (are the gates testing the right contracts?) |
 | Works with | Oracle | repeatability probe bars (flip <2%, shuffle <3%) |

@@ -49,7 +49,7 @@ follows — no improvisation, improve by proposal + logged decision.
 
 - PRs under ~300 lines. Small PRs review in minutes, not days.
 - No self-merge. Review SLA: minutes, not days.
-- Green CI required — full suite, probes, kill-the-client, secrets-grep.
+- Local gate GREEN required — `scripts/ops/pre-pr-gate.sh` (secrets-grep, full suite, kill-the-client invariant, boot smoke, ops-scripts, config schemas). No GitHub Actions on this repo: no remote CI signal exists, and none is waited on.
 - Squash-merge → delete the branch. `main` history is a clean sequence.
 - Crossing into another lane's files → flagged in the PR description, never
   silent. The file owner makes the edit.

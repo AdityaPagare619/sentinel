@@ -16,7 +16,7 @@
 
 | Family | Name | Source | Purpose | Caliber |
 | --- | --- | --- | --- | --- |
-| D1 | STORM (synthetic storm) | `sentinel.synthetic.generate_alerts` | Regression anchor; CI gate; harness plumbing | Proves the pipeline, never the model |
+| D1 | STORM (synthetic storm) | `sentinel.synthetic.generate_alerts` | Regression anchor; local-gate regression; harness plumbing | Proves the pipeline, never the model |
 | D2 | SHADOW (shadow-mode decisions) | Partner's real alert stream in shadow mode | First real calibration curve | Proves the curve on *their* stream |
 | D3 | PARTNER (outcome-labeled) | D2 decisions + feedback join | Threshold tuning; go-live bars | The evidence a buyer signs |
 

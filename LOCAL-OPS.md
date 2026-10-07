@@ -47,7 +47,7 @@ chore(ci): add secrets-grep step
   propose changes via the coordinator or a flagged PR request.
 - **Never commit:** secrets/keys/`.env`, `__pycache__/`, `*.pyc`, `.pytest_cache__/`,
   `node_modules/`, SQLite dev DBs (`*.db`, `sentinel.db`), `TYPESAFE_API_KEY` values,
-  webhook secrets, routing keys. (`.gitignore` enforces; CI secrets-grep double-enforces.)
+  webhook secrets, routing keys. (`.gitignore` enforces; the gate's secrets-grep stage double-enforces.)
 - **Commit cadence:** at least one commit per meaningful unit of work; push the branch
   when the remote is reachable. A day's work must never live only on one agent's
   scratch.
@@ -58,13 +58,16 @@ chore(ci): add secrets-grep step
 2. Open a PR: `main` ← your branch, using `.github/pull_request_template.md`
    (tests green, docs updated, no secrets, Claim-Auditor pass on numbers).
 3. Review must come from a **DIFFERENT agent** — no self-merge.
-4. CI (`.github/workflows/sentinel-ci.yml`) must be green: full suite, repeatability probes,
-   kill-the-client, secrets-grep.
+4. The local gate (`scripts/ops/pre-pr-gate.sh`) must be GREEN: secrets-grep,
+   full suite (baseline 496), kill-the-client invariant, boot smoke,
+   ops-scripts py_compile, config schemas. There is no GitHub Actions on
+   this repo — a `gh run` signal is meaningless (Aditya's standing order,
+   2026-10-03).
 5. Squash-merge → delete the branch. `main` history stays a clean sequence.
 
 ## 6. main stays green
 
-- `main` is protected: PR-only, no direct pushes, green CI required.
+- `main` is protected: PR-only, no direct pushes, local gate green required.
 - If `main` breaks, the breaker (or whoever finds it) owns the fix; all lanes pause
   merges until green. A red `main` is a stop-the-line event.
 - Never force-push `main`. Ever.

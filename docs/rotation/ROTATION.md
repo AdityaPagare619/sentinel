@@ -1,5 +1,20 @@
 # Rotation — operator ceremony, API & console contract (Track 4 / C4)
 
+> **Reality amendment (2026-10-07, docs W7).** The four-step dual-accept
+> ceremony below is the **engine design** — it is real for
+> server-persistent deployments where `RotatingKeyStore` holds state
+> (`$SENTINEL_STATE_DIR`, 0600 files) and both primary and secondary can
+> verify. **On the Vercel serverless tier it is not wired.** Every secret
+> there arrives via dashboard env vars, so rotation is currently
+> **flag-day**: swapping `SENTINEL_OPERATOR_TOKEN` (or any key) in the
+> dashboard cuts over with no overlap (`{"primary": provisioned,
+> "secondary": None}` — the serverless cold start cannot hold a staged
+> secondary). Two-env-var dual-accept overlap is unwired (code change,
+> flagged — not made in this docs lane). Until it is wired: stage the
+> new value, verify auth against the tier with it, THEN swap, and confirm
+> — never rotate blind. **Do not read the ceremony below as the Vercel
+> tier's behavior; it is the design the tier does not yet implement.**
+
 Every privileged secret in Sentinel — the operator bearer token (C1), the
 webhook HMAC secret, the BYOK keys (`pagerduty_routing_key`, `jev_api_key`)
 — lives as a **record** `{primary, secondary, generation}` and rotates
