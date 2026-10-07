@@ -4,8 +4,10 @@
 One console codebase, environment as structural mode (CONSOLE-PARITY.md):
 
   /index.html          → production console: <html data-mode="production"
-                            data-backend="<vercel-url>">. Red PRODUCTION
-                            banner, operator token gate, live /api/*.
+                            data-backend="<vercel-url>">. Static PRODUCTION
+                            band in the bytes (honest aria-label, never a
+                            JS post-token flip), operator token gate,
+                            live /api/*.
   /staging/index.html  → simulated showcase: the v2 file as-is (sim mode).
                             Violet SIMULATED banner, seed shown.
   /loadtest/index.html → load-test dashboard (handoff from lane/loadtest-env;
@@ -38,6 +40,25 @@ def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
         "<html", '<html data-mode="production" data-backend="' + backend + '"', 1)
     assert 'data-mode="production"' in prod, "mode injection failed"
     assert backend in prod, "backend injection failed"
+    # X-H: static prod chrome in the bytes — the mode label must never depend
+    # on JS+token cooperation (a JS/fetch failure would mislabel an armed
+    # console as simulated, the dangerous direction). Screen readers, curl,
+    # and no-JS audits read these bytes.
+    _sim_band = re.compile(
+        r'<div class="sim-band" role="note" aria-label="Simulated mode">.*?</div>',
+        re.DOTALL)
+    assert _sim_band.search(prod), "sim-band markup missing from source"
+    prod_band = (
+        '<div class="sim-band" role="note" '
+        'aria-label="Production console: live platform backend" '
+        'style="background:#7a1f14">\n'
+        '  <span class="tag" style="background:#fff;color:#7a1f14">PRODUCTION</span>\n'
+        '  <span id="prodBandText">Live platform backend — '
+        'syncing forwarder &amp; judge state…</span>\n'
+        '</div>')
+    prod = _sim_band.sub(prod_band, prod, count=1)
+    assert 'aria-label="Simulated mode"' not in prod, "sim label leaked into prod"
+    assert 'aria-label="Production console' in prod, "prod aria-label missing"
     # banner contract: production build must carry the PRODUCTION chrome
     assert "PRODUCTION" in prod and "ProductionAdapter" in prod
     os.makedirs(out, exist_ok=True)

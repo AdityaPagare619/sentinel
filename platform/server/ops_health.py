@@ -92,6 +92,16 @@ def _engine_db_stats(app) -> dict:
     return out
 
 
+def _jev_key_configured(app) -> bool:
+    """Whether a Jev API key is provisioned. Presence only —
+    the secret value is never read into this response."""
+    try:
+        from .integrations import JEV_KEY_NAME
+        return app.integrations.get(JEV_KEY_NAME) is not None
+    except Exception:
+        return False
+
+
 def _forwarder_identity(app) -> dict:
     """pagerduty vs fakepd from the integrations store. Presence only —
     the secret value is never read into this response."""
@@ -150,6 +160,11 @@ def handle_health(app, environ, start_response):
             # from the decision log, not a live connection probe.
             "last_judgment_model": db.pop("last_judgment_model", None),
             "last_judgment_at": db["latest_decision_at"],
+            # Presence only — the secret value is never read into this
+            # response. The console treats key_configured=false as
+            # judge-unavailable (degraded banner); when true, live liveness
+            # stays "not_instrumented" on this read tier.
+            "key_configured": _jev_key_configured(app),
             "connection": "not_instrumented",
             "circuit": "not_implemented",
             "state": "not_instrumented",
