@@ -56,14 +56,16 @@ else
   echo "── stage: full-suite ──"
   OUT="$(python3 -m unittest discover tests 2>&1 | grep -E '^(Ran |OK|FAILED)' || true)"
   echo "$OUT"
-  # The verdict is the unittest summary line, anchored exactly: test stdout
-  # itself prints lines starting with "OK" (e.g. "OK: 1 events verified"),
-  # so an unanchored ^OK match green-lights a red suite. FAILED is checked
-  # first and is always red.
+  # The verdict is the unittest summary line, anchored carefully: test
+  # stdout itself prints lines starting with "OK" (e.g. "OK: 1 events
+  # verified"), so a bare ^OK match green-lights a red suite — but the
+  # anchor must still accept unittest's own "OK (skipped=N)" /
+  # "OK (expected failures=N)" forms (the ^OK$ anchor red-flagged a green
+  # suite on 2026-10-07). FAILED is checked first and is always red.
   if echo "$OUT" | grep -q '^FAILED'; then
     echo "FAIL: full-suite"
     FAIL=$((FAIL+1))
-  elif echo "$OUT" | grep -q '^OK$'; then
+  elif echo "$OUT" | grep -qE '^OK( \([^)]*\))?$'; then
     N=$(echo "$OUT" | grep -oP '^Ran \K[0-9]+' || echo '?')
     echo "PASS: full-suite ($N tests)"
     PASS=$((PASS+1))
@@ -90,7 +92,7 @@ else
   if echo "$OUT" | grep -q '^FAILED'; then
     echo "FAIL: platform-server suite"
     FAIL=$((FAIL+1))
-  elif echo "$OUT" | grep -q '^OK$'; then
+  elif echo "$OUT" | grep -qE '^OK( \([^)]*\))?$'; then
     N=$(echo "$OUT" | grep -oP '^Ran \K[0-9]+' || echo '?')
     echo "PASS: platform-server suite ($N tests)"
     PASS=$((PASS+1))
