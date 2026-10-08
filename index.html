@@ -857,7 +857,7 @@ function prodTokenGate(){
   ov.style.cssText='position:fixed;inset:0;background:#141310f2;z-index:9999;display:flex;align-items:center;justify-content:center';
   ov.innerHTML='<div style="background:#F6F6F3;padding:28px;border-radius:8px;max-width:380px;color:#1C1B17">'
     +'<h3 style="margin:0 0 8px">Operator token required</h3>'
-    +'<p style="font-size:13px;color:#5c584c">This console talks to the live platform backend. Paste the per-install operator bearer token. It lives in this tab\u2019s memory only.</p>'
+    +'<p style="font-size:13px;color:#5c584c">This console talks to the configured platform backend. Paste the per-install operator bearer token. It lives in this tab\u2019s memory only.</p>'
     +'<input id="tokin" type="password" placeholder="Bearer token" style="width:100%;padding:10px;margin:8px 0;border:1px solid #d8d5c9;border-radius:6px"/>'
     +'<p id="tokerr" role="alert" style="font-size:12px;color:#8a1f14;min-height:16px;margin:2px 0 6px"></p>'
     +'<button id="tokgo" style="padding:10px 18px;background:#1C1B17;color:#fff;border:0;border-radius:6px;cursor:pointer">Connect</button></div>';
@@ -907,7 +907,7 @@ function prodApplyChrome(){
     kb0.setAttribute('aria-label',honest); kb0.setAttribute('title',honest); }
   const band=document.querySelector('.sim-band');
   if(band) band.setAttribute('aria-label',
-    'Production console: live platform backend. Forwarder and judge state follow in the banner.');
+    'Production console: operator access required. Forwarder and judge state follow in the banner after authentication.');
   const ev=document.getElementById('evalbar'); if(ev) ev.remove();
   const rail=document.querySelector('.rail');
   if(rail && !document.getElementById('opsBtn')){
