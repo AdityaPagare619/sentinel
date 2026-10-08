@@ -74,11 +74,11 @@ def build(out: str, backend: str, loadtest_dashboard: str | None) -> None:
     assert _sim_band.search(prod), "sim-band markup missing from source"
     prod_band = (
         '<div class="sim-band" role="note" '
-        'aria-label="Production console: live platform backend" '
+        'aria-label="Production console: operator access required" '
         'style="background:#7a1f14">\n'
         '  <span class="tag" style="background:#fff;color:#7a1f14">PRODUCTION</span>\n'
-        '  <span id="prodBandText">Live platform backend — '
-        'syncing forwarder &amp; judge state…</span>\n'
+        '  <span id="prodBandText">Operator access required — '
+        'contents unverified until authenticated.</span>\n'
         '</div>')
     prod = _sim_band.sub(prod_band, prod, count=1)
     assert 'aria-label="Simulated mode"' not in prod, "sim label leaked into prod"

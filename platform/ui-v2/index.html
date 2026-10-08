@@ -292,8 +292,8 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
   <button class="chip ok" id="chipPolicy" title="Policy governance">policy <b>v2026.10.06-r3</b></button>
   <button class="chip ok" id="chipAuth" title="Auth status">auth <b>2/3 locked</b></button>
   <button class="chip" id="chipRace" title="AI vs timer">race <b class="num">—</b></button>
-  <button class="kill" id="killBtn" aria-label="Kill switch: paging is live. Activate to halt all paging.">
-    <span class="lamp"></span><span id="killLabel">Paging live</span>
+  <button class="kill" id="killBtn" aria-label="Kill switch: simulated paging. Activate to halt the simulation.">
+    <span class="lamp"></span><span id="killLabel">Paging simulation</span>
   </button>
 </div>
 
@@ -394,9 +394,9 @@ const SERVICES = [
   {id:'edge-cache', owner:'team-platform'}, {id:'billing', owner:'team-billing'},
 ];
 const TEMPLATES = [
-  {id:'err-spike', title:'Error rate spike', sev:1, cost:p=>`Checkout failing for ~${8+Math.floor(p.r()*9)}% of requests. Every minute costs on the order of $${(900+p.r()*900|0).toLocaleString()} in abandoned carts.`},
+  {id:'err-spike', title:'Simulated error-rate spike', sev:1, cost:p=>`Checkout failing for ~${8+Math.floor(p.r()*9)}% of requests. Every minute costs on the order of $${(900+p.r()*900|0).toLocaleString()} in abandoned carts.`},
   {id:'lat-p99', title:'Latency p99 above SLO', sev:2, cost:()=>`p99 latency ${(1.2+Math.random()*0.8).toFixed(1)}s vs 800ms SLO. Slow pages convert worse; tail users are churning now.`},
-  {id:'db-failover', title:'Database failover in progress', sev:1, cost:()=>`Writes paused during failover. Every minute of extended failover risks order loss and replica lag that takes an hour to heal.`},
+  {id:'db-failover', title:'Simulated DB failover drill', sev:1, cost:()=>`Writes paused during failover. Every minute of extended failover risks order loss and replica lag that takes an hour to heal.`},
   {id:'cpu-sat', title:'CPU saturation', sev:3, cost:()=>`Headroom gone on this pool. No user impact yet; the next traffic bump becomes user impact.`},
   {id:'queue-backlog', title:'Queue backlog growing', sev:2, cost:()=>`Background jobs delayed ${(5+Math.floor(Math.random()*40))} min. Notifications, webhooks and reports arriving late.`},
   {id:'cert-expiry', title:'Certificate expiring soon', sev:2, cost:()=>`TLS certificate expires in under 72h. If it lapses, every client connection fails at once.`},
@@ -1124,10 +1124,10 @@ function renderHeader(){
     kb.setAttribute('aria-label',honest); kb.setAttribute('title',honest);
   } else {
     kb.classList.toggle('armed', S.kill.engaged);
-    $('#killLabel').textContent = S.kill.engaged ? 'Paging halted' : 'Paging live';
+    $('#killLabel').textContent = S.kill.engaged ? 'Paging halted' : 'Paging simulation';
     kb.setAttribute('aria-label', S.kill.engaged
-      ? 'Kill switch ENGAGED: all paging halted. Activate to re-arm and resume.'
-      : 'Kill switch: paging is live. Activate to halt all paging.');
+      ? 'Kill switch ENGAGED: simulated paging halted. Activate to re-arm and resume.'
+      : 'Kill switch: simulated paging. Activate to halt the simulation.');
   }
   const badAuth=S.auth.some(a=>a.state.includes('blocked'));
   const ca=$('#chipAuth');
@@ -1145,6 +1145,7 @@ function renderStateLine(){
     `<strong class="num">${d.unacked} need you</strong><span class="sep">·</span>`+
     `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
     `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems, never as raw alerts</span>`+
+    (!PROD_MODE?`<span class="sep">·</span><span class="dim">scripted replay — all numbers simulated</span>`:'')+
     (PROD_MODE&&S.dataAgeSec!=null?`<span class="sep">·</span><span class="dim">backend data ${fmtAge(S.dataAgeSec)} old</span>`:'')+
     (nErr?`<span class="sep">·</span><strong style="color:var(--amber)">${nErr} endpoint${nErr>1?'s':''} failing</strong>`:'')+
     (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
