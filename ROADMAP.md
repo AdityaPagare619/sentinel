@@ -1,5 +1,8 @@
 # Sentinel — ROADMAP: Preview-1
 
+> **SUPERSEDED (2026-10-08).** This plan targeted EOD Oct 4, 2026 (past). The
+> current plan is `docs/planning/CURRENT_PLAN.md`. Kept for history only.
+
 **Target: working demo by EOD Oct 4, 2026 IST.** Not slides — a live, recorded run:
 synthetic alert storm → Jev triage (mock) → suppress/escalate per expected-cost thresholds
 → immutable audit log → calibration report. Aditya's bar: "not today, not beyond ~2 days."

@@ -1,5 +1,8 @@
 # ROAD TO LAUNCH — Master Plan
 
+> **SUPERSEDED (2026-10-08).** This plan targeted Oct 4, 2026 (past). The
+> current plan is `docs/planning/CURRENT_PLAN.md`. Kept for history only.
+
 **Standing:** v0.1 engine built and tested (140/140 green); platform direction
 frozen; company operating files in place.
 **Target:** working interactive design-partner platform, **Sunday 4 Oct 2026,
