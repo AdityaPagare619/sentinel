@@ -272,9 +272,9 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
 <body>
 
 <!-- SIMULATED band: in-band, unmissable, on every surface -->
-<div class="sim-band" role="note" aria-label="Production console: live platform backend" style="background:#7a1f14">
+<div class="sim-band" role="note" aria-label="Production console: operator access required" style="background:#7a1f14">
   <span class="tag" style="background:#fff;color:#7a1f14">PRODUCTION</span>
-  <span id="prodBandText">Live platform backend — syncing forwarder &amp; judge state…</span>
+  <span id="prodBandText">Operator access required — contents unverified until authenticated.</span>
 </div>
 
 <!-- header rail: pipeline pulse + safety, reachable within seconds -->
@@ -292,8 +292,8 @@ textarea.reason{width:100%;border:1px solid var(--line);border-radius:6px;paddin
   <button class="chip ok" id="chipPolicy" title="Policy governance">policy <b>v2026.10.06-r3</b></button>
   <button class="chip ok" id="chipAuth" title="Auth status">auth <b>2/3 locked</b></button>
   <button class="chip" id="chipRace" title="AI vs timer">race <b class="num">—</b></button>
-  <button class="kill" id="killBtn" aria-label="Kill switch: paging is live. Activate to halt all paging.">
-    <span class="lamp"></span><span id="killLabel">Paging live</span>
+  <button class="kill" id="killBtn" aria-label="Kill switch: simulated paging. Activate to halt the simulation.">
+    <span class="lamp"></span><span id="killLabel">Paging simulation</span>
   </button>
 </div>
 
@@ -394,9 +394,9 @@ const SERVICES = [
   {id:'edge-cache', owner:'team-platform'}, {id:'billing', owner:'team-billing'},
 ];
 const TEMPLATES = [
-  {id:'err-spike', title:'Error rate spike', sev:1, cost:p=>`Checkout failing for ~${8+Math.floor(p.r()*9)}% of requests. Every minute costs on the order of $${(900+p.r()*900|0).toLocaleString()} in abandoned carts.`},
+  {id:'err-spike', title:'Simulated error-rate spike', sev:1, cost:p=>`Checkout failing for ~${8+Math.floor(p.r()*9)}% of requests. Every minute costs on the order of $${(900+p.r()*900|0).toLocaleString()} in abandoned carts.`},
   {id:'lat-p99', title:'Latency p99 above SLO', sev:2, cost:()=>`p99 latency ${(1.2+Math.random()*0.8).toFixed(1)}s vs 800ms SLO. Slow pages convert worse; tail users are churning now.`},
-  {id:'db-failover', title:'Database failover in progress', sev:1, cost:()=>`Writes paused during failover. Every minute of extended failover risks order loss and replica lag that takes an hour to heal.`},
+  {id:'db-failover', title:'Simulated DB failover drill', sev:1, cost:()=>`Writes paused during failover. Every minute of extended failover risks order loss and replica lag that takes an hour to heal.`},
   {id:'cpu-sat', title:'CPU saturation', sev:3, cost:()=>`Headroom gone on this pool. No user impact yet; the next traffic bump becomes user impact.`},
   {id:'queue-backlog', title:'Queue backlog growing', sev:2, cost:()=>`Background jobs delayed ${(5+Math.floor(Math.random()*40))} min. Notifications, webhooks and reports arriving late.`},
   {id:'cert-expiry', title:'Certificate expiring soon', sev:2, cost:()=>`TLS certificate expires in under 72h. If it lapses, every client connection fails at once.`},
@@ -657,6 +657,21 @@ const SimAdapter = {
    ================================================================ */
 const SEVNUM={'p1_critical':1,'p2_high':2,'p3_medium':3,'p4_low':4};
 /* map a platform decision row → the console's problem shape (real fields only) */
+/* Race winner — derived from the engine's authoritative budget_outcome
+ * (audit P1/C2, RFC aiml-winner-heuristic). The old heuristic
+ * (d.jev_model ? 'judge' : 'timer') mislabeled the error_passthrough path
+ * as a judge win: the judge was invoked (jev_model recorded) but RAISED,
+ * and the deterministic fail-open path owned the decision. */
+function raceWinner(d){
+  const bo = d.budget_outcome;
+  if (bo === 'answered_in_time') return 'judge';
+  if (bo === 'timer_won' || bo === 'timer_won_shed') return 'timer';
+  if (bo === 'error_passthrough') return 'error';
+  /* structural_passthrough: no race ran (deterministic pre-Jev path) — no
+   * judge answer exists, so 'timer' is the honest bucket. Legacy rows without
+   * budget_outcome fall back to the old heuristic, labeled as such below. */
+  return d.jev_model ? 'judge' : 'timer';
+}
 function prodProblem(d){
   const sev=SEVNUM[d.severity]||3;
   const disp=(d.disposition||'passthrough').toUpperCase();
@@ -671,13 +686,14 @@ function prodProblem(d){
     cost:'\u2014', blast:'\u2014', changed:'\u2014', flap:false,
     judge:{latency:d.latency_ms!=null?d.latency_ms:null,
       score:d.confidence!=null?+d.confidence:null,
-      winner:d.jev_model?'judge':'timer'},
+      winner:raceWinner(d)},
     decision:{ disp:disp, ruleId:(d.mode==='shadow'?'shadow':String(d.reason||'\u2014')).slice(0,24),
       plain:d.reason||'\u2014', at:t, score:d.confidence!=null?+d.confidence:null,
-      winner:d.jev_model?'judge':'timer', latencyMs:d.latency_ms!=null?d.latency_ms:null,
+      winner:raceWinner(d), latencyMs:d.latency_ms!=null?d.latency_ms:null,
       frozen:{ signals:1, sev:sev, owner:d.team||'unassigned',
         evidence:['decision record #'+d.id+(d.input_sha256?' \u00b7 '+String(d.input_sha256).slice(0,12):'')],
-        considered: d.jev_model? '' : 'Timer won or deterministic path — no Jev answer exists.' } },
+        considered: raceWinner(d)==='error' ? 'Judge errored — the deterministic fail-open path paged; no Jev answer was used.'
+          : d.jev_model ? '' : 'Timer won or deterministic path — no Jev answer exists.' } },
   };
 }
 /* Per-endpoint merge (eternal friction): each successfully fetched part
@@ -1108,10 +1124,10 @@ function renderHeader(){
     kb.setAttribute('aria-label',honest); kb.setAttribute('title',honest);
   } else {
     kb.classList.toggle('armed', S.kill.engaged);
-    $('#killLabel').textContent = S.kill.engaged ? 'Paging halted' : 'Paging live';
+    $('#killLabel').textContent = S.kill.engaged ? 'Paging halted' : 'Paging simulation';
     kb.setAttribute('aria-label', S.kill.engaged
-      ? 'Kill switch ENGAGED: all paging halted. Activate to re-arm and resume.'
-      : 'Kill switch: paging is live. Activate to halt all paging.');
+      ? 'Kill switch ENGAGED: simulated paging halted. Activate to re-arm and resume.'
+      : 'Kill switch: simulated paging. Activate to halt the simulation.');
   }
   const badAuth=S.auth.some(a=>a.state.includes('blocked'));
   const ca=$('#chipAuth');
@@ -1129,6 +1145,7 @@ function renderStateLine(){
     `<strong class="num">${d.unacked} need you</strong><span class="sep">·</span>`+
     `<button class="trace num" data-why="quiet-n">${d.quiet} handled quietly</button><span class="sep">·</span>`+
     `<span><button class="trace num" data-why="open-n">${d.open} open problems</button>, counted as problems, never as raw alerts</span>`+
+    (!PROD_MODE?`<span class="sep">·</span><span class="dim">scripted replay — all numbers simulated</span>`:'')+
     (PROD_MODE&&S.dataAgeSec!=null?`<span class="sep">·</span><span class="dim">backend data ${fmtAge(S.dataAgeSec)} old</span>`:'')+
     (nErr?`<span class="sep">·</span><strong style="color:var(--amber)">${nErr} endpoint${nErr>1?'s':''} failing</strong>`:'')+
     (S.storm?`<span class="sep">·</span><strong style="color:var(--red)">storm in progress</strong>`:'')+
@@ -1231,7 +1248,8 @@ function paintRow(el,p){
     : p.decision ? `<b>${p.decision.disp}</b> · ${esc(p.decision.plain)}` : '';
   const score = p.judge.score!=null
     ? `<span class="ord"><span class="band${p.sev===1?' sev':''}"><i style="left:${Math.max(0,(p.judge.score-0.09)*100)}%;width:${18}%"></i></span><span class="v num">${p.judge.score.toFixed(2)}</span></span>`
-    : (p.judge.winner==='timer' ? `<span class="v">timer won</span>` : '');
+    : (p.judge.winner==='timer' ? `<span class="v">timer won</span>`
+      : p.judge.winner==='error' ? `<span class="v" style="color:var(--amber)">judge errored — failed open</span>` : '');
   el.querySelector('.body').innerHTML =
     `<div class="title">${esc(p.tpl.title)} <span style="color:var(--ink-3);font-weight:500">— ${esc(p.svc.id)}</span></div>
      <div class="meta"><span><span class="k">SEV</span>${p.sev}</span>
