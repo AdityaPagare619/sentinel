@@ -1,60 +1,49 @@
-# Sentinel — Build PROGRESS
+# Sentinel — PROGRESS (synced to shipped state)
 
-**Project:** Sentinel — SRE page-or-suppress triage middleware (Jev System-One decision model)
-**Coordinator:** Petu's build coordinator (reports to Petu; Aditya sees via briefs)
-**Env:** `~/workspace/jev-builds/sentinel/` — all work lives here
-**Started:** 2026-10-02 ~13:00 IST
-**Spec foundation:** `~/workspace/jev-product-research/JEV_RESEARCH_REPORT.md` §§1,7,8; `notes/phase5-arch1-paging.md`; `notes/phase1-jev-deepdive.md` §§2.1–2.7
+**Project:** Sentinel — SRE page-or-suppress triage middleware. Jev (TypeSafe System One) advises; the deterministic gate decides. **Open source (MIT), no pricing, no billing — ever.**
+**Repo:** `AdityaPagare619/sentinel` · **Env:** `~/workspace/jev-builds/sentinel/`
+**Started:** 2026-10-02. This file is synced to git + gh-pages, not to reports.
 
-## Build order (MVP v0.1)
+## Current shipped state (verified against git/gh-pages, 2026-10-09)
 
-- [x] 1. ARCHITECTURE.md — design doc (frozen 2026-10-02)
-- [x] 2. System-One wire-format client (`src/sentinel/client.py`) — DONE 2026-10-02 (Helper A: client+models+questions+state, 41/41 tests pass, coordinator-verified)
-- [x] 3. Webhook receiver + triage pipeline — DONE 2026-10-02 (Helper B: correlator/audit/gate/forwarder/receiver; kill-the-client release-blocker tests pass; coordinator-verified)
-- [x] 4. Threshold tuner CLI (`tuner.py`) — DONE 2026-10-02 (Helper C, tests pass, coordinator-verified)
-- [x] 5. Eval harness (`evalharness.py` + `synthetic.py`) — DONE 2026-10-02 (Helper C, 24/24 tests pass, coordinator-verified)
-- [x] 6. README.md — DONE 2026-10-02 (coordinator; quickstart, BYOK, env table, honest limitations)
+| Surface | State | Evidence |
+|---|---|---|
+| `main` | @7ab7133 — FAANG wave merged (6 lanes, gates 8/8 green) + committee trust fixes + release files + diagrams | `git ls-remote origin main` |
+| `gh-pages` | @02a298e — consoles rebuilt with honest labels (staging "Paging simulation", prod pre-auth banner "Production — operator access required") | `git ls-remote origin gh-pages` + served-byte checks |
+| Release | **v0.1.0** tagged @6013c03, GitHub release live | https://github.com/AdityaPagare619/sentinel/releases/tag/v0.1.0 |
+| Consoles | production / staging / loadtest / preview-v2 all HTTP 200 | https://adityapagare619.github.io/sentinel/ (and subpaths) |
+| Backend | Vercel `dpl_7erEzK2CrSxtp3K1bQhWpBxWW2JP` (built from 9f51807 code; docs-only diff since), stable alias serves it; live 200, CORS preflight OK, 401s fast + `WWW-Authenticate` | direct probes |
+| License | MIT (`LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md` at repo root) | v0.1.0 tag |
 
-## Milestones
+## What this is / is not (honest scope)
 
-- [x] M1: ARCHITECTURE.md complete (design frozen for v0.1)
-- [x] M2: client + mock + unit tests green (41/41, coordinator-verified 2026-10-02)
-- [x] M3: receiver → correlator → gate → forwarder pipeline end-to-end (mock Jev) — verified 2026-10-02 via live mock-mode smoke test (HTTP 200s, audit rows written, fail-open on mock error) + loopback receiver tests incl. dead-Jev byte-identical relay
-- [x] M4: tuner CLI produces thresholds + savings projection from labeled data (smoke: 2,000 synthetic alerts → conf 0.90, 1,123 suppressions / 67.3% of baseline pages)
-- [x] M5: eval harness runs; calibration report generated; probes green; FULL SUITE 140/140 OK (2026-10-02)
-- [x] M6: MVP complete — README done, full suite green, demo walkthrough below
+- **Is:** a self-hostable page-or-suppress engine (receiver → correlator → race → gate → forwarder), four honest console surfaces, a structural simulation tier (FakePD only — zero real PagerDuty contact, ever), a millions-scale load-test proof, and a runnable shadow-pilot harness awaiting real traffic.
+- **Is not (yet):** a production paging deployment. No engine is deployed anywhere receiving real webhooks; no real page has ever been sent or suppressed; the deployed kill flag guards no paging path on the serverless tier (the real halt proof is the receiver-topology drill, 9.75ms).
 
-## Demo walkthrough (Preview-1 ready)
+## Milestone timeline (artifact-backed)
 
-```bash
-cd ~/workspace/jev-builds/sentinel && export PYTHONPATH=src
-# 1. synthetic storm → tune → evaluate
-python3 -m sentinel.synthetic --n 2000 --seed 7 -o /tmp/labels.jsonl
-python3 -m sentinel.tuner --labels /tmp/labels.jsonl -o /tmp/thresholds.json
-python3 -m sentinel.evalharness --n 2000 --seed 7 -o /tmp/judgment-fidelity-report.md
-# 2. live receiver in mock mode (no key needed)
-SENTINEL_MOCK=1 SENTINEL_DB=/tmp/demo.db python3 -m sentinel.receiver --port 8080 &
-curl -s localhost:8080/v2/enqueue -H 'Content-Type: application/json' -d \
- '{"routing_key":"demo","event_action":"trigger","payload":{"summary":"CPU > 95% for 10m","source":"prometheus","severity":"critical","component":"api-web"}}'
-# 3. audit trail
-python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('/tmp/demo.db').execute('select alert_id,action,reason from decisions')]"
-```
+- **2026-10-02** — MVP v0.1 build: client, pipeline, tuner, eval harness, README (full suite green).
+- **2026-10-05** — Repo public; GitHub Pages production + staging live.
+- **2026-10-06** — Load test: 1,092,876 alerts @ 187.4/s (virtual time, one box), $0.02 Jev spend, zero real PD contact; 3 real bugs found/fixed (race, 7GB OOM, fsync cap).
+- **2026-10-07** — Brutal audit (12 workers) → P0 fix wave → FAANG principal wave (6 teams, all merged, pre-pr-gate 8/8). Kill switch re-wired on the true receiver topology (re-drilled 9.75ms). Backend redeployed + verified. FAANG-standard diagrams committed (`docs/planning/diagrams/` — architecture, alert sequence, deployment topology; mandatory for all design docs since Aditya's diagram-law order).
+- **2026-10-08** — Ship-readiness verdict waves (internal 4 teams + external 5-judge committee): **NOT production-ready**, unanimous. The gate: a real shadow-pilot report. Committee items 2–4 done (trust-copy fixes, v0.1.0 cut, stale plans superseded → `docs/planning/CURRENT_PLAN.md`), vendor posture doc written (`docs/planning/VENDOR_POSTURE.md`), shadow-pilot harness built + proven runnable (`docs/planning/shadow-pilot/`). Aditya ruled: open source, no pricing/billing — commercial blockers struck; self-hosting must be trivial.
 
-## Integration notes
-- Box has no `python`, only `python3` — README uses `python3` throughout.
-- `_shims.py` REMOVED 2026-10-02 (dead code: evalharness prefers real `gate.py` via try/except; eval tests re-verified green after removal).
-- `SENTINEL_MOCK=1` added to receiver (coordinator): mock client, full pipeline runs, every decision fails open to passthrough, zero network calls.
-- Code committed on `lane/code-mvp-v0.1` (a8a7cf4, conventional commit). Push to GitHub blocked on Aditya's 30-sec phone step (repo access for the PAT) — Petu's domain.
-- Helper A spec resolutions accepted: Q2/Q3 instruction one-liners; state cap enforced on whole-state JSON tokens; truncate-lowest-priority-first semantics; mock-local canonical-JSON helper (avoids import cycle).
-- ARCHITECTURE.md §5 example corrected 2026-10-02 ($20,000 not $20.0 — caught by Helper C).
-- Smoke-test forwarder behavior confirmed as designed: PD relay timeout → logged + metric, receiver still 200; missing routing key → loud logged failure, never raise.
+## Open items — whose side
 
-## Decisions log
+**Aditya's side (nothing here blocks Petu's work):**
+- [ ] Kill-switch hand-test on the production console (engage → "Paging halted" → re-arm → recover + confirm Operations Health populates). Note: proves API/UI wiring on the serverless tier; the paging-halt proof lives on the receiver topology.
+- [ ] `TYPESAFE_API_KEY` in Vercel env (project `sentinel-platform`). Until set, the console truthfully shows judge-down. Also needed: `key_configured` must read env as well as the integrations store (code fix, Petu's side).
+- [ ] Real traffic source for the shadow pilot (2 weeks, real labeled traffic → published suppression report). Harness, runbook, and labeling protocol are ready; this is the single gate to production-ready per all five judges.
+- [ ] Credential rotation in GitHub settings (exposed via chat on 2026-10-03).
+- [ ] Optional: GitHub push protection on; UptimeRobot monitors (₹0).
 
-- 2026-10-02: Python stdlib only (no pip deps) — `http.server` for the receiver, `urllib` for the Jev client (custom User-Agent per the documented 403 quirk), `unittest` (stdlib) for tests. Rationale: ₹0 ops, runs anywhere, zero supply-chain surface; FastAPI/gunicorn swap documented as the production upgrade path.
-- 2026-10-02: v0.1 is Jev-only (no LLM adjudicator) per the architecture doc — hybrid deferred to a measured premium tier.
-- 2026-10-02: SQLite for the v0.1 audit store (single-file, zero-ops); schema designed Postgres-compatible for the SaaS upgrade.
+**Petu's side:**
+- [ ] Production-flip call — gated on Aditya's hand-test + a real receiver deployment; the flip is a decision, not a flag flip.
+- [ ] `key_configured` env-vs-store fix (named by the integration verdict team).
+- [ ] Shadow-pilot verdict once the pilot runs.
+- [ ] AC8 / CONSOLE_BANNED substring gates made negation/comment-aware (stopgap rewords hold).
+- [ ] Label or delist `/preview-v2/` — still carries the pre-fix kill copy publicly (Petu's call, pending the flip decision).
 
-## Blockers / decisions needed
+## Standing laws (unchanged)
 
-(none — MVP complete. Awaiting GitHub push unblock for PR flow; next build decisions (shadow pilot, real-key Jev validation) are Petu/Aditya calls.)
+Deterministic gate owns every decision (Jev advises only, ordinal never calibrated) · fail-open: silence when we should page is the worst failure · kill = HALT all paging, fail-closed · sim/loadtest structurally FakePD, real PD only via customer BYOK + explicit operator action · ₹0 ops · verify the artifact, never the report (`git ls-remote` before every "pushed" claim).
